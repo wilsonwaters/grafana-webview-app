@@ -18,7 +18,7 @@ an active blocker on dispatching `foundation`. Resolve before reaching the block
 | Q11 | How aggressively to strip frame-buster JavaScript without breaking legitimate page scripts — needs a bounded, documented pattern set. | CR2 | content-rewriting |
 | Q12 | On Grafana Cloud, what `/health` returns when the backend is simply not provisioned vs erroring, and whether backend availability can change mid-session (re-probe vs fixed per session). | DF1 | direct-only-fallback |
 | Q13 | Whether the Grafana-version E2E matrix spans the full `>=12.3.0` range or a pinned subset for CI cost, and how to simulate DNS rebinding deterministically in CI for AC 21. | TC1 / TC6 | testing-cicd |
-| Q14 | Which Grafana instance `rootUrls` to sign for the initial private release (depends on the stakeholder's self-hosted target). | DR8 | docs-release |
+| Q14 | ~~Which Grafana instance `rootUrls` to sign for the initial private release (depends on the stakeholder's self-hosted target).~~ **RESOLVED (CI fix #78):** Both `ci.yml` and `release.yml` sign **privately** for the GitHub Actions environment `QA-Alintech` variable `GRAFANA_INSTANCE_URL` **+ `http://localhost:3000`** (so CI e2e validates). Token = repo secret `GRAFANA_ACCESS_POLICY_TOKEN`. To change the production target, edit the `GRAFANA_INSTANCE_URL` env variable — no code change. | DR8 | docs-release |
 | Q15 | Whether the example dashboard's proxied URL should ship pre-allowlisted in provisioning for the demo, given the empty-by-default allowlist. | DR7 | docs-release |
 | Q16 | Current catalog submission URL/review process (confirm at submission time), and whether Grafana Labs will accept a frame-header-stripping proxy on Cloud at all — be prepared to continue with Path 1 if rejected. | CP4 | catalog-prep |
 

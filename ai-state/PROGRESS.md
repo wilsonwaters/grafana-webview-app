@@ -4,10 +4,42 @@ Narrative log of project status, maintained primarily by the orchestrator agent.
 
 ## Status summary
 
-Setup complete and the **execution loop is running** (task branch → PR → squash-merge into `main`).
-The **foundation stream is DONE** (F1–F4 merged). The Web View panel is registered as a nested
-panel inside the app and renders a placeholder; canonical `PanelOptions` type and the fail-closed
-plugin settings schema/loader are in place. No real viewport, proxy, or security enforcement yet.
+Setup complete and the **execution loop is running** (task branch → PR → review → CI-green →
+squash-merge into `main`). **foundation (F1–F4) and panel-core (PC1–PC5) are DONE; security-
+foundation is in progress (SF1 #81 merged).** The plugin is a **shippable direct-mode Web View
+panel** today: sandboxed iframe at a configured viewport, interactive editor (drag-pan/wheel-zoom +
+numeric inputs/reset), auto-refresh, debug overlay, multi-instance — e2e-verified across Grafana
+12.3.6/12.4.3/13.0.1/nightly and privately signed. No proxy or security *enforcement* wired yet
+(SF1 is a standalone library); those come in security-foundation → frameability → proxy →
+content-rewriting, which is the path to a framing-blocked site like the BOM radar.
+
+## Handoff notes for the next orchestrator (2026-06-02)
+
+Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `streams.md`,
+`board-map.md`, `OPEN-QUESTIONS.md`, and the relevant `streams/<name>/master-plan.md`. Then
+`mcp__github__list_issues` (label `status:ready`) and continue at **SF2 (#20)**. A few quirks
+that are NOT obvious from the code:
+
+- **Always check real GitHub CI on each PR** (`pull_request_read get_check_runs`), not just local
+  gates — that is how the signing/compat breakages (#78) were caught. CI signs privately via the
+  `QA-Alintech` env (no blocking approval rule; PR CI runs unattended).
+- **plugin-e2e `setVisualization` is flaky** — run e2e/Playwright with `--retries=2` (or a direct
+  navigation flow); it typically passes on retry.
+- **Benign dev-Grafana log noise** to ignore during runtime verification: TLS cert failures
+  reaching `grafana.com` (sandbox has no outbound to it) and "missing provisioning directory"
+  warnings. Use `https://example.com` as the framable test URL. Real plugin errors look different.
+- **Dev env**: mage at `/root/go/bin/mage`; add `$(go env GOPATH)/bin` to PATH. Start Docker if
+  down: `sudo bash -c 'setsid dockerd >/var/log/dockerd.log 2>&1 </dev/null &'` then
+  `docker compose up -d --build`; wait for `:3000/api/health`. Container: `wilsonwaters-webview-app`.
+- **Tracked debt** (non-blocking, fix opportunistically): (a) `VIEWPORT_ZOOM_MIN/MAX` duplicated
+  in `types.ts` (private) and `viewport.ts` (exported) — centralise; (b) `normalizeOptions` in
+  `src/types.ts` rejects negative `viewportX/Y`, but cursor-anchored pan can legitimately produce
+  small negatives — allow negative X/Y in a future cleanup; (c) PC5 test `iframe is remounted` has
+  a weak assertion (the reload mechanism is covered by sibling tests).
+- **Resolved design decisions** (don't relitigate): Q1–Q4, Q14 in `OPEN-QUESTIONS.md` (nested-panel
+  packaging, demo-page removal, custom-options-editor instead of edit-mode detection, debug-overlay
+  vs hide-selectors, private signing). AC 6 ("Capture current view") was intentionally reconciled
+  to live-capture (no button) — see panel-core master-plan changelog.
 
 ## Currently in flight
 
