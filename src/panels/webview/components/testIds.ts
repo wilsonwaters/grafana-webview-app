@@ -4,4 +4,5 @@ export const webViewPanelTestIds = {
   placeholder: 'data-testid webview-panel-placeholder',
   iframe: 'data-testid webview-panel-iframe',
   empty: 'data-testid webview-panel-empty',
+  debugOverlay: 'data-testid webview-panel-debug-overlay',
 };
