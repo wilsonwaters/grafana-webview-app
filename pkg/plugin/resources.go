@@ -15,6 +15,18 @@ func (a *App) handlePing(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// handleHealth is a bare liveness endpoint (FR2). It always returns HTTP 200
+// with a small JSON body and runs no security pipeline, no proxying and depends
+// on no settings — it only confirms the backend resource server is reachable.
+func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+}
+
 // handleEcho is an example HTTP POST resource that accepts a JSON with a "message" key and
 // returns to the client whatever it is sent.
 func (a *App) handleEcho(w http.ResponseWriter, req *http.Request) {
@@ -40,6 +52,7 @@ func (a *App) handleEcho(w http.ResponseWriter, req *http.Request) {
 // registerRoutes takes a *http.ServeMux and registers some HTTP handlers.
 func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ping", a.handlePing)
+	mux.HandleFunc("/health", a.handleHealth)
 	mux.HandleFunc("/echo", a.handleEcho)
 	if a.proxy != nil {
 		mux.Handle(proxyPath, a.proxy)
