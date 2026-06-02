@@ -43,5 +43,8 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/echo", a.handleEcho)
 	if a.proxy != nil {
 		mux.Handle(proxyPath, a.proxy)
+		// CR3: the subresource endpoint shares a.proxy's pipeline/transport/
+		// rate-limiter/audit/metrics via the proxyResourceHandler wrapper.
+		mux.Handle(proxyResourcePath, a.proxyResource)
 	}
 }

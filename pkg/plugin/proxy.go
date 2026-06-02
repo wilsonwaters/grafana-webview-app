@@ -328,24 +328,66 @@ func writeDenial(w http.ResponseWriter, reason, message string) string {
 	return reason
 }
 
-// ServeHTTP implements the /proxy endpoint. It runs the FULL security pipeline
-// in the handler — BEFORE any upstream connection — because httputil's
-// Director/Rewrite cannot return an error and must never be the place a denial
-// is decided. Only once every gate passes does it build and invoke a
-// ReverseProxy whose Transport is the SF4 secure dialer and whose ModifyResponse
-// strips framing headers.
+// endpointTopLevel / endpointResource name the two endpoints that share the
+// security pipeline. The value is recorded on the audit log's `endpoint` field
+// so the two streams are distinguishable even though they share the metrics
+// collectors (sharing is acceptable — see newProxyMetrics). endpointTopLevel is
+// the HTML-rewriting /proxy endpoint; endpointResource is the non-rewriting,
+// Content-Type-preserving /proxy-resource subresource endpoint (CR3).
+const (
+	endpointTopLevel = "proxy"
+	endpointResource = "proxy-resource"
+)
+
+// proxyResourceHandler adapts a proxyHandler to serve the /proxy-resource
+// subresource endpoint (CR3). It carries NO state of its own: it shares the SAME
+// pipeline, transport, rate limiter, audit logger and metrics as the owning
+// proxyHandler, and differs ONLY in the ModifyResponse step — no HTML rewriting,
+// so the upstream Content-Type and body (including a gzip Content-Encoding) are
+// passed through unchanged, subject to the P4 size limit. a.proxyResource is
+// constructed once alongside a.proxy and registered at proxyResourcePath.
+type proxyResourceHandler struct {
+	p *proxyHandler
+}
+
+// ServeHTTP implements the /proxy-resource endpoint. It runs the IDENTICAL
+// security pipeline + header policy as /proxy via the shared serve method,
+// selecting the resource ModifyResponse (framing + response-header strip only —
+// NO HTML rewrite; Content-Type and body streamed through unchanged).
+func (h proxyResourceHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	h.p.serve(w, req, endpointResource)
+}
+
+// ServeHTTP implements the /proxy endpoint. It delegates to the shared serve
+// method, which runs the full security pipeline; the endpoint argument selects
+// the HTML-rewriting ModifyResponse for /proxy.
+func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	p.serve(w, req, endpointTopLevel)
+}
+
+// serve runs the FULL security pipeline shared by /proxy and /proxy-resource —
+// BEFORE any upstream connection — because httputil's Director/Rewrite cannot
+// return an error and must never be the place a denial is decided. Only once
+// every gate passes does it build and invoke a ReverseProxy whose Transport is
+// the SF4 secure dialer and whose ModifyResponse is selected by `endpoint`:
+// /proxy strips framing headers and HTML-rewrites the body; /proxy-resource
+// strips framing/response headers only and streams the body (and Content-Type)
+// through unchanged.
 //
 // Pipeline order: parse url param → SF2 ValidateURL (scheme/userinfo/malformed) →
 // SF3 MatchHostname (empty allowlist ⇒ deny) → SF2 port re-check against the
 // matched domain's AllowedPorts → SF5 Allow (rate tiers) and Acquire
 // (concurrency). On any denial the handler writes the mapped status and returns
 // without contacting the upstream.
-func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	// P5 / AC 28: emit EXACTLY ONE structured audit entry per /proxy request,
-	// covering the success path AND every early-return denial below. The wrapper
-	// records the final status + body bytes; start/auditURL/auditUser feed the
-	// remaining fields. A single deferred Info call is the sole emission point —
-	// no per-branch logging — so it cannot be forgotten on a new denial path.
+//
+// Both endpoints share the audit log (P5) and metrics (P6); the `endpoint`
+// value distinguishes the two streams on the audit entry's `endpoint` field.
+func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint string) {
+	// P5 / AC 28: emit EXACTLY ONE structured audit entry per request, covering
+	// the success path AND every early-return denial below. The wrapper records
+	// the final status + body bytes; start/auditURL/auditUser feed the remaining
+	// fields. A single deferred Info call is the sole emission point — no
+	// per-branch logging — so it cannot be forgotten on a new denial path.
 	start := time.Now()
 	rec := newAuditResponseWriter(w)
 	w = rec
@@ -366,6 +408,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		p.metrics.inFlight.Dec()
 		p.metrics.observeRequest(rec.status, time.Since(start).Seconds(), denied)
 		p.logger.Info("proxy request",
+			"endpoint", endpoint,
 			"url", auditURL,
 			"user", auditUser(req.Context()),
 			"status", rec.status,
@@ -461,8 +504,10 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// ReverseProxy's ErrorHandler (a dial-time blocked IP/metadata host, an
 	// over-size response, an upstream timeout, or a gateway failure). serveProxy
 	// returns the denial-reason token for that outcome (empty when the upstream
-	// was served cleanly) so the deferred metrics emission records it.
-	denied = p.serveProxy(w, req, target)
+	// was served cleanly) so the deferred metrics emission records it. The
+	// endpoint selects the ModifyResponse: /proxy HTML-rewrites the body,
+	// /proxy-resource passes the body + Content-Type through unchanged.
+	denied = p.serveProxy(w, req, target, endpoint)
 }
 
 // hostnameOf extracts and normalises the hostname from rawTarget for the
@@ -517,11 +562,15 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 // status codes (403 for a blocked IP/metadata host caught at dial time, 502/504
 // otherwise).
 //
-// TODO(CR): content-rewriting (CR2/CR3) will extend ModifyResponse with HTML
-// body rewriting (base tag, subresource URL rewriting through a /proxy-resource
-// endpoint, frame-buster removal) and redirect Location rewriting. The
-// subresource URL scheme is intentionally NOT designed here (Q9: P1 only ships
-// the top-level /proxy?url= fetch).
+// The endpoint argument selects the ModifyResponse body handling AFTER the
+// shared size guard (P4) and framing/response-header strip (P1/P3):
+//   - endpointTopLevel (/proxy): prepareHTMLBody detects HTML, gzip-decodes when
+//     present, and HTML-rewrites the body (CR2). Non-HTML passes through.
+//   - endpointResource (/proxy-resource): NO rewriting. The upstream Content-Type
+//     is PRESERVED and the body (including a gzip Content-Encoding) streams through
+//     unchanged so the browser interprets CSS/JS/images and decompresses gzip
+//     itself. CR3 deliberately does NOT decode subresources — there is nothing to
+//     rewrite, so the compressed bytes pass straight through.
 //
 // It returns the denial-reason token for a request the ErrorHandler rejected
 // (size-limit / timeout / ip-blocklist / metadata / upstream) or the empty
@@ -529,7 +578,7 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 // metrics emission can record denials_total for the right reason. The ErrorHandler
 // runs synchronously inside rp.ServeHTTP, so capturing into a local here is
 // race-free for this single-goroutine-per-request handler.
-func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL) string {
+func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL, endpoint string) string {
 	maxBytes := p.cfg.MaxResponseBytes
 
 	var denied string
@@ -550,18 +599,25 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			stripRequestHeaders(r.Out.Header)
 		},
 		// P4: enforce the max-response-body size, then the P1/P3 framing/header
-		// strip, then (CR1) the HTML-detect + gzip-decode prep step. The size
-		// step runs FIRST so an over-Content-Length response short-circuits with
-		// errResponseTooLarge before any header rewriting; the framing/header
-		// strip (P1/P3) runs next on the headers; finally prepareHTMLBody decodes
-		// gzip for HTML responses so the body is plain and ready for CR2's
-		// rewrite, leaving non-HTML responses completely untouched.
+		// strip, then the endpoint-specific body step. The size step runs FIRST
+		// so an over-Content-Length response short-circuits with errResponseTooLarge
+		// before any header rewriting; the framing/header strip (P1/P3) runs next on
+		// the headers (identical for both endpoints); finally the body is either
+		// HTML-rewritten (/proxy) or left untouched (/proxy-resource — Content-Type
+		// and body, incl. gzip, streamed through unchanged).
 		ModifyResponse: func(resp *http.Response) error {
 			if err := enforceResponseSize(resp, maxBytes); err != nil {
 				return err
 			}
 			if err := stripFramingHeaders(resp); err != nil {
 				return err
+			}
+			if endpoint == endpointResource {
+				// CR3: subresource passthrough. No HTML rewrite, no gzip decode —
+				// the upstream Content-Type and (possibly gzip) body are preserved
+				// and streamed through, bounded only by the P4 limited body that
+				// enforceResponseSize already wrapped around resp.Body.
+				return nil
 			}
 			return prepareHTMLBody(resp, maxBytes, target, p.logger)
 		},
