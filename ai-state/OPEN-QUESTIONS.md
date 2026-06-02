@@ -5,8 +5,8 @@ an active blocker on dispatching `foundation`. Resolve before reaching the block
 
 | # | Question | Blocks | Stream |
 |---|----------|--------|--------|
-| Q1 | Exact packaging mechanics for a panel nested inside an app plugin (module registration vs a separate panel `plugin.json` under the app). | F4 | foundation |
-| Q2 | Keep or remove the scaffold's example app pages (Page One–Four) once the Web View panel is registered. | F4 | foundation |
+| Q1 | ~~Exact packaging mechanics for a panel nested inside an app plugin (module registration vs a separate panel `plugin.json` under the app).~~ **RESOLVED (F4):** Nested-plugin pattern per Grafana docs — the panel lives at `src/panels/webview/` with its own `plugin.json` (id `wilsonwaters-webview-panel`) + sibling `module.tsx`; the `.config` webpack `getEntries()` discovers it and emits `dist/panels/webview/`, and Grafana registers it as a child plugin (no separate package.json/.config). The app `plugin.json` also declares an `includes` entry of `type: panel`. | F4 | foundation |
+| Q2 | ~~Keep or remove the scaffold's example app pages (Page One–Four) once the Web View panel is registered.~~ **RESOLVED (F4):** Removed the demo Page One–Four, their routing (`utils.routing.ts`, `ROUTES`) and tests; kept the admin Configuration page and replaced the app root with a minimal `AppRoot` landing page. | F4 | foundation |
 | Q3 | How reliably config-vs-view mode can be detected from the panel editor context across the supported Grafana version range (`>=12.3.0`). | PC1 | panel-core |
 | Q4 | Whether hide-selectors and the debug overlay can apply to cross-origin direct iframes at all (DOM access is blocked), or are only meaningful for same-origin proxied content. | PC5 / CR5 | panel-core / content-rewriting |
 | Q5 | Whether per-domain private-IP opt-in needs an audit-log hook in the security library or only at the consuming endpoint. | SF4 | security-foundation |

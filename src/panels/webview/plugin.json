@@ -1,0 +1,24 @@
+{
+  "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
+  "type": "panel",
+  "name": "Web View",
+  "id": "wilsonwaters-webview-panel",
+  "info": {
+    "description": "Embed an external web page in a dashboard panel with a controllable viewport.",
+    "author": {
+      "name": "Wilsonwaters"
+    },
+    "logos": {
+      "small": "../../img/logo.svg",
+      "large": "../../img/logo.svg"
+    },
+    "screenshots": [],
+    "version": "%VERSION%",
+    "updated": "%TODAY%",
+    "keywords": ["webview", "iframe", "embed"]
+  },
+  "dependencies": {
+    "grafanaDependency": ">=12.3.0",
+    "plugins": []
+  }
+}
