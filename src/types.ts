@@ -18,7 +18,8 @@ export interface PanelOptions {
 
   /**
    * Determines how the URL is loaded.
-   * - `'auto'`   — use detectedMode if available, otherwise detect at render time
+   * - `'auto'`   — use the mode decided at config time (the stored detectedMode
+   *                from the "Test URL" check); view mode never re-detects
    * - `'direct'` — always use a plain iframe (no backend proxy)
    * - `'proxy'`  — always route through the backend proxy
    * @default 'auto'
