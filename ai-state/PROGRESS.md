@@ -45,10 +45,12 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **P6 (#33) Prometheus metrics** — proxy stream (M), in flight. requests_total{status}, denials_total{reason},
-  in-flight gauge, duration histogram on `/proxy`; registered to the default registry (SDK `/metrics`),
-  injectable registry in tests. Proxy chain after: P7 denial→response wiring (LAST proxy task), then
-  content-rewriting (CR1–CR5) makes the BOM radar render through the proxy.
+- **P7 (#34) denial→response wiring** — proxy stream (size S), in flight. The LAST proxy task: makes the
+  full denial→(HTTP status, metric reason) matrix correct/consistent + exhaustively tested (403 allowlist/
+  blocklist/metadata, 429 rate-limit/concurrency, 413 size, 400 scheme/port/malformed, 504 timeout, 502
+  upstream). Also folds in the tracked P4 exactly-at-limit boundary test. **After P7 merges the proxy
+  stream is COMPLETE** — then content-rewriting (CR1–CR5) makes a framing-blocked site like the BOM radar
+  actually render through the proxy. The backend `/proxy` is already testable via direct HTTP now.
 - **Tracked debt (P4 review nit):** add an exactly-at-limit Content-Length test (`== MaxResponseBytes`
   → 200) to lock the strict-`>` body-size boundary; code is confirmed correct, test-only. Fold into a
   later proxy_test touch.
@@ -101,6 +103,11 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#91 (P6)** merged — Prometheus metrics on `/proxy` exposed via the SDK `/metrics` (default registry):
+  `webview_proxy_requests_total{status}`, `denials_total{reason}`, `requests_in_flight` gauge,
+  `request_duration_seconds` histogram. `sync.Once` registers once; all handlers share the registered
+  collectors (no lost increments, no panic). Status codes unchanged (P7 refines). Bounded cardinality.
+  92.8% coverage, race-clean, go.mod tidy. Review APPROVE.
 - **#90 (P5)** merged — structured audit log per `/proxy` request (url/user/status/bytes/duration) via a
   single `defer` in `ServeHTTP` + an `auditResponseWriter` (status/byte recorder with `http.Flusher`
   passthrough so streaming is preserved); injectable `log.Logger`; emitted on success + all denials;

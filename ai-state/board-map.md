@@ -25,8 +25,8 @@
 | P3 | #30 | Incoming response header stripping — Set-Cookie, HSTS, HPKP, Clear-Site-Data | proxy | S | done |
 | P4 | #31 | Resource limits — max body size, connection and total timeout | proxy | M | done |
 | P5 | #32 | Audit logging — structured per-request log for proxy requests | proxy | M | done |
-| P6 | #33 | Prometheus metrics — request counters, denial reasons, in-flight gauge, duration histogram | proxy | M | in-progress |
-| P7 | #34 | Rate-limit and denial HTTP response wiring with metrics reasons | proxy | S | blocked |
+| P6 | #33 | Prometheus metrics — request counters, denial reasons, in-flight gauge, duration histogram | proxy | M | done |
+| P7 | #34 | Rate-limit and denial HTTP response wiring with metrics reasons | proxy | S | in-progress |
 | CR1 | #35 | gzip handling and HTML detection in ModifyResponse | content-rewriting | M | blocked |
 | CR2 | #36 | goquery HTML rewriting — base href, URL rewrite, frame-buster and CSP meta removal | content-rewriting | L | blocked |
 | CR3 | #37 | /proxy-resource subresource endpoint through full security pipeline | content-rewriting | M | blocked |
