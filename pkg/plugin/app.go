@@ -36,6 +36,12 @@ type App struct {
 	// concurrency cap, and the secure-dialer-backed HTTP transport, and is safe
 	// for concurrent use.
 	proxy *proxyHandler
+
+	// proxyResource is the /proxy-resource subresource handler (CR3). It wraps
+	// the SAME proxyHandler — sharing its pipeline, transport, rate limiter,
+	// audit logger and metrics — and differs only in serving subresources without
+	// HTML rewriting (Content-Type preserved, body streamed through unchanged).
+	proxyResource proxyResourceHandler
 }
 
 // NewApp creates a new *App instance. It parses the plugin settings from
@@ -55,6 +61,9 @@ func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemg
 	// limiter (including per-domain overrides) and the secure-dialer-backed
 	// transport; keyed rate-limit buckets are created lazily on first use.
 	app.proxy = newProxyHandler(cfg)
+	// The subresource endpoint shares the same proxyHandler (and thus the same
+	// pipeline, transport, rate limiter, audit logger and metrics).
+	app.proxyResource = proxyResourceHandler{p: app.proxy}
 
 	// Use a httpadapter (provided by the SDK) for resource calls. This allows us
 	// to use a *http.ServeMux for resource calls, so we can map multiple routes
