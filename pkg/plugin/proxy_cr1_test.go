@@ -7,10 +7,23 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
 )
+
+// cr1PageURL is a representative validated page URL passed to prepareHTMLBody in
+// the CR1 unit tests. The CR1 tests assert decode/passthrough behaviour; the
+// rewrite step (CR2) is covered separately in rewrite_test.go.
+func cr1PageURL(t *testing.T) *url.URL {
+	t.Helper()
+	u, err := url.Parse("http://example.com/page")
+	if err != nil {
+		t.Fatalf("parse page URL: %v", err)
+	}
+	return u
+}
 
 // gzipBytes gzip-compresses b for building upstream fixtures.
 func gzipBytes(t *testing.T, b []byte) []byte {
@@ -54,8 +67,10 @@ func TestCR1GzipHTMLDecompressed(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("gzip HTML: got status %d, want 200 (body=%q)", rec.Code, rec.Body.String())
 	}
-	if got := rec.Body.String(); got != html {
-		t.Fatalf("gzip HTML: body = %q, want decoded %q", got, html)
+	// CR2: the decoded HTML is rewritten (base injected); the original text and
+	// title must survive the decode+rewrite round-trip.
+	if got := rec.Body.String(); !strings.Contains(got, "hello") || !strings.Contains(got, "<title>hi</title>") {
+		t.Fatalf("gzip HTML: body = %q, want decoded content preserved", got)
 	}
 	if ce := rec.Header().Get("Content-Encoding"); ce != "" {
 		t.Fatalf("gzip HTML: Content-Encoding = %q, want removed", ce)
@@ -69,9 +84,9 @@ func TestCR1GzipHTMLDecompressed(t *testing.T) {
 	}
 }
 
-// CR1 Completion Criterion: "Non-HTML bodies pass through unmodified" — plain
-// (non-gzip) HTML must also be passed through with its body intact (CR1 only
-// decodes gzip; it does not otherwise touch the HTML body).
+// CR2 (supersedes the CR1 plain-HTML-passthrough expectation): plain (non-gzip)
+// HTML is now rewritten too — CR2 runs goquery on ALL HTML, not just gzip HTML.
+// The body's text content must survive the rewrite and the response must be 200.
 func TestCR1PlainHTMLPassthrough(t *testing.T) {
 	const html = "<html><body>plain</body></html>"
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -89,8 +104,8 @@ func TestCR1PlainHTMLPassthrough(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("plain HTML: got status %d, want 200", rec.Code)
 	}
-	if got := rec.Body.String(); got != html {
-		t.Fatalf("plain HTML: body = %q, want %q (must be untouched)", got, html)
+	if got := rec.Body.String(); !strings.Contains(got, "plain") {
+		t.Fatalf("plain HTML: body = %q, want decoded content preserved", got)
 	}
 }
 
@@ -112,7 +127,7 @@ func TestCR1NonHTMLGzipUntouched(t *testing.T) {
 	resp.Header.Set("Content-Encoding", "gzip")
 	resp.ContentLength = int64(len(gz))
 
-	if err := prepareHTMLBody(resp, 1<<20); err != nil {
+	if err := prepareHTMLBody(resp, 1<<20, cr1PageURL(t), nil); err != nil {
 		t.Fatalf("prepareHTMLBody(non-HTML gzip): %v", err)
 	}
 	if ce := resp.Header.Get("Content-Encoding"); ce != "gzip" {
@@ -139,7 +154,7 @@ func TestCR1NonHTMLPlainUntouched(t *testing.T) {
 	resp.Header.Set("Content-Type", "image/png")
 	resp.ContentLength = int64(len(png))
 
-	if err := prepareHTMLBody(resp, 1<<20); err != nil {
+	if err := prepareHTMLBody(resp, 1<<20, cr1PageURL(t), nil); err != nil {
 		t.Fatalf("prepareHTMLBody(non-HTML plain): %v", err)
 	}
 	body, err := io.ReadAll(resp.Body)
@@ -171,7 +186,7 @@ func TestCR1GzipBombBounded(t *testing.T) {
 	resp.ContentLength = int64(len(gz)) // small compressed length passes the wire guard
 
 	const limit = 1024 // decoded body (64 KiB+) far exceeds this
-	err := prepareHTMLBody(resp, limit)
+	err := prepareHTMLBody(resp, limit, cr1PageURL(t), nil)
 	if err == nil {
 		t.Fatalf("gzip bomb: prepareHTMLBody returned nil, want errResponseTooLarge")
 	}
@@ -223,7 +238,7 @@ func TestCR1MalformedGzipUnit(t *testing.T) {
 	resp.Header.Set("Content-Encoding", "gzip")
 	resp.ContentLength = int64(len(garbage))
 
-	err := prepareHTMLBody(resp, 1<<20)
+	err := prepareHTMLBody(resp, 1<<20, cr1PageURL(t), nil)
 	if err == nil {
 		t.Fatalf("malformed gzip: prepareHTMLBody returned nil, want a decode error")
 	}
@@ -270,7 +285,7 @@ func TestCR1GzipHTMLNoLimit(t *testing.T) {
 	resp.Header.Set("Content-Encoding", "gzip")
 	resp.ContentLength = int64(len(gz))
 
-	if err := prepareHTMLBody(resp, 0); err != nil {
+	if err := prepareHTMLBody(resp, 0, cr1PageURL(t), nil); err != nil {
 		t.Fatalf("prepareHTMLBody(no limit): %v", err)
 	}
 	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
@@ -280,23 +295,25 @@ func TestCR1GzipHTMLNoLimit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	if string(body) != html {
-		t.Errorf("no-limit gzip: body = %q, want %q", string(body), html)
+	// CR2: the decoded HTML is now rewritten (a <base> is injected). The original
+	// text content must survive and the no-limit decode branch must still work.
+	if !strings.Contains(string(body), "unbounded") {
+		t.Errorf("no-limit gzip: body = %q, want it to contain decoded content", string(body))
 	}
-	if resp.ContentLength != int64(len(html)) {
-		t.Errorf("no-limit gzip: ContentLength = %d, want %d", resp.ContentLength, len(html))
+	if resp.ContentLength != int64(len(body)) {
+		t.Errorf("no-limit gzip: ContentLength = %d, want %d", resp.ContentLength, len(body))
 	}
 }
 
 // TestCR1NilResponseGuard covers the defensive nil guards: a nil response or a
 // response with a nil body must be a no-op (no panic).
 func TestCR1NilResponseGuard(t *testing.T) {
-	if err := prepareHTMLBody(nil, 1<<20); err != nil {
+	if err := prepareHTMLBody(nil, 1<<20, cr1PageURL(t), nil); err != nil {
 		t.Fatalf("prepareHTMLBody(nil): %v", err)
 	}
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Set("Content-Type", "text/html")
-	if err := prepareHTMLBody(resp, 1<<20); err != nil {
+	if err := prepareHTMLBody(resp, 1<<20, cr1PageURL(t), nil); err != nil {
 		t.Fatalf("prepareHTMLBody(nil body): %v", err)
 	}
 }

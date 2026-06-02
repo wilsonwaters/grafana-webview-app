@@ -563,7 +563,7 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			if err := stripFramingHeaders(resp); err != nil {
 				return err
 			}
-			return prepareHTMLBody(resp, maxBytes)
+			return prepareHTMLBody(resp, maxBytes, target, p.logger)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			denied = proxyErrorHandler(w, r, err)
@@ -666,24 +666,23 @@ func isHTMLContentType(contentType string) bool {
 	return strings.EqualFold(strings.TrimSpace(mediaType), "text/html")
 }
 
-// prepareHTMLBody is the CR1 step: it detects HTML by Content-Type and, for
-// gzip-encoded HTML responses, decompresses the body in place so that what
-// remains is plain, ready-to-rewrite HTML. It runs AFTER the P4 size guard and
-// the P1/P3 framing/header strip, and is the seam CR2 will extend with goquery
-// rewriting (see the // CR2: marker below).
+// prepareHTMLBody detects HTML by Content-Type, obtains the plain HTML bytes
+// (gzip-decoding when needed, bounded), and rewrites them with goquery (CR2:
+// base-href, subresource/navigation URL rewriting, srcset, CSP/refresh-meta and
+// frame-buster removal). It runs AFTER the P4 size guard and the P1/P3
+// framing/header strip.
 //
 // Behaviour:
 //   - Non-HTML responses (any Content-Type that is not text/html) are passed
 //     through COMPLETELY UNCHANGED: no body read, no header touched. This keeps
 //     compressed JSON/images/etc. byte-identical to the upstream.
-//   - HTML responses NOT encoded with gzip are passed through unchanged too:
-//     there is nothing to decode, and CR1 must not otherwise mutate the body.
-//     (deflate/br are out of scope — see contentEncodingGzip — and are treated
-//     as non-decodable, i.e. left untouched.)
-//   - HTML responses with Content-Encoding: gzip are decompressed; resp.Body is
-//     replaced with the decoded bytes, the Content-Encoding header is removed,
-//     and Content-Length is set to the decoded length so the client does not try
-//     to re-decode or mis-frame the body.
+//   - HTML responses are read into memory (decoding Content-Encoding: gzip when
+//     present; deflate/br are out of scope — see contentEncodingGzip — so a body
+//     carrying one of those is left untouched and not rewritten), then rewritten
+//     by rewriteHTML. CR2 rewrites ALL HTML, not just gzip HTML.
+//   - After rewriting, resp.Body is replaced with the rewritten bytes,
+//     Content-Length is set to the new length, and (if the body was gzip) the
+//     Content-Encoding header is removed so the client does not re-decode.
 //
 // SECURITY (gzip-bomb guard): decompression is a decompression-bomb DoS vector,
 // so the DECODED size is bounded by the same MaxResponseBytes limit P4 enforces
@@ -691,7 +690,14 @@ func isHTMLContentType(contentType string) bool {
 // maxBytes+1; if the decoded body would exceed maxBytes we return the
 // errResponseTooLarge sentinel (→ clean 413 via proxyErrorHandler) instead of
 // reading the stream unbounded into memory. A maxBytes <= 0 means "no limit".
-func prepareHTMLBody(resp *http.Response, maxBytes int64) error {
+//
+// DEGRADATION: a gzip-DECODE failure (or over-size) returns an error so the
+// ReverseProxy's ErrorHandler emits a clean 413/502 before any body is written.
+// A rewriteHTML failure (parse quirk etc.) does NOT fail the gateway — the
+// security gates already ran — so the DECODED ORIGINAL HTML is served (200) and a
+// warning is logged. pageURL is the validated top-level target captured in the
+// ModifyResponse closure; it is the base for relative-URL resolution.
+func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logger log.Logger) error {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
@@ -701,13 +707,22 @@ func prepareHTMLBody(resp *http.Response, maxBytes int64) error {
 		return nil
 	}
 
-	// HTML, but not gzip-encoded ⇒ nothing to decode; pass through unchanged.
-	// (Content-Encoding values are case-insensitive tokens.)
-	if !strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), contentEncodingGzip) {
+	gzipped := strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), contentEncodingGzip)
+	hasOtherEncoding := !gzipped && strings.TrimSpace(resp.Header.Get("Content-Encoding")) != ""
+	if hasOtherEncoding {
+		// HTML carrying a non-gzip encoding (deflate/br) is out of scope to decode;
+		// leave the body untouched rather than rewrite a still-encoded payload.
 		return nil
 	}
 
-	decoded, err := decodeGzipBounded(resp.Body, maxBytes)
+	var decoded []byte
+	var err error
+	if gzipped {
+		decoded, err = decodeGzipBounded(resp.Body, maxBytes)
+	} else {
+		// Plain HTML: read the (already size-guarded) body into memory.
+		decoded, err = io.ReadAll(resp.Body)
+	}
 	// resp.Body is fully consumed (or errored) above; close the original reader
 	// regardless of outcome so the upstream connection can be reused/released.
 	if cerr := resp.Body.Close(); cerr != nil && err == nil {
@@ -721,18 +736,30 @@ func prepareHTMLBody(resp *http.Response, maxBytes int64) error {
 		return err
 	}
 
-	// CR2: insert HTML rewriting here — operate on `decoded` (plain HTML bytes)
-	// with goquery (base-tag injection, subresource URL rewriting, frame-buster
-	// and CSP-meta removal), then re-set resp.Body/Content-Length from the
-	// rewritten bytes. CR1 only decodes; it does NOT rewrite.
+	// CR2: rewrite the plain HTML with goquery. On failure, degrade to the decoded
+	// original (the security gates already ran — a parse quirk must not 502).
+	body := decoded
+	rewritten, rerr := htmlRewriter(decoded, pageURL, resp.Header.Get("Content-Type"))
+	if rerr != nil {
+		if logger != nil {
+			logger.Warn("html rewrite failed; serving decoded original", "url", pageURL.String(), "error", rerr)
+		}
+	} else {
+		body = rewritten
+		// rewriteHTML emits UTF-8; update the Content-Type charset so the client
+		// decodes it correctly regardless of the upstream's declared charset.
+		resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+	}
 
-	resp.Body = io.NopCloser(bytes.NewReader(decoded))
-	// The body is now plain HTML: drop the encoding header so the client does not
-	// attempt to re-decode, and set Content-Length to the decoded length so the
-	// framing is correct (no stale compressed length).
-	resp.Header.Del("Content-Encoding")
-	resp.ContentLength = int64(len(decoded))
-	resp.Header.Set("Content-Length", strconv.Itoa(len(decoded)))
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	// The body is now plain (rewritten) HTML: drop the encoding header so the
+	// client does not attempt to re-decode, and set Content-Length to the new
+	// length so the framing is correct (no stale compressed length).
+	if gzipped {
+		resp.Header.Del("Content-Encoding")
+	}
+	resp.ContentLength = int64(len(body))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
 	return nil
 }
 
