@@ -52,6 +52,18 @@ var strippedRequestHeaders = []string{
 	"Referer",           // the proxy/Grafana page that triggered the fetch
 	"Origin",            // the Grafana origin
 	"Via",               // proxy chain identifying intermediaries
+
+	// Edge/CDN-injected client-IP and mTLS identity — set by infrastructure in
+	// front of Grafana; could leak the viewer's IP or client-cert identity.
+	"X-Forwarded-Client-Cert",  // Envoy/Istio mTLS client-cert (XFCC)
+	"True-Client-IP",           // Akamai / Cloudflare Enterprise client IP
+	"Cf-Connecting-Ip",         // Cloudflare client IP
+	"Fastly-Client-Ip",         // Fastly client IP
+	"X-Client-Ip",              // generic client IP
+	"X-Cluster-Client-Ip",      // cluster ingress client IP
+	"X-Original-Forwarded-For", // pre-rewrite forwarding chain
+	"X-Original-Host",          // pre-rewrite Grafana host
+	"X-Original-Url",           // pre-rewrite request URL
 }
 
 // xGrafanaHeaderPrefix is swept (case-insensitively) off every outgoing request:

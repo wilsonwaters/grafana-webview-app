@@ -583,22 +583,31 @@ func TestProxyStripsRequestHeaders(t *testing.T) {
 	// Inbound request loaded with every category that must be stripped.
 	req := httptest.NewRequest(http.MethodGet, "/proxy?url="+url.QueryEscape("http://example.com/page"), nil)
 	inbound := map[string]string{
-		"Cookie":              "grafana_session=secret",
-		"Cookie2":             "$Version=1",
-		"Authorization":       "Bearer leaked-token",
-		"Proxy-Authorization": "Basic abc",
-		"X-Grafana-Id":        "id-token-value",
-		"X-Grafana-Org-Id":    "1",
-		"X-Grafana-Device-Id": "device-xyz",
-		"X-Forwarded-For":     "10.0.0.1",
-		"X-Forwarded-Host":    "grafana.internal",
-		"X-Forwarded-Proto":   "https",
-		"X-Forwarded-Port":    "3000",
-		"Forwarded":           "for=10.0.0.1;host=grafana.internal",
-		"X-Real-Ip":           "10.0.0.1",
-		"Referer":             "https://grafana.internal/d/abc",
-		"Origin":              "https://grafana.internal",
-		"Via":                 "1.1 grafana",
+		"Cookie":                   "grafana_session=secret",
+		"Cookie2":                  "$Version=1",
+		"Authorization":            "Bearer leaked-token",
+		"Proxy-Authorization":      "Basic abc",
+		"X-Grafana-Id":             "id-token-value",
+		"X-Grafana-Org-Id":         "1",
+		"X-Grafana-Device-Id":      "device-xyz",
+		"X-Forwarded-For":          "10.0.0.1",
+		"X-Forwarded-Host":         "grafana.internal",
+		"X-Forwarded-Proto":        "https",
+		"X-Forwarded-Port":         "3000",
+		"Forwarded":                "for=10.0.0.1;host=grafana.internal",
+		"X-Real-Ip":                "10.0.0.1",
+		"Referer":                  "https://grafana.internal/d/abc",
+		"Origin":                   "https://grafana.internal",
+		"Via":                      "1.1 grafana",
+		"X-Forwarded-Client-Cert":  "By=spiffe://x;Hash=abc",
+		"True-Client-IP":           "10.0.0.1",
+		"Cf-Connecting-Ip":         "10.0.0.1",
+		"Fastly-Client-Ip":         "10.0.0.1",
+		"X-Client-Ip":              "10.0.0.1",
+		"X-Cluster-Client-Ip":      "10.0.0.1",
+		"X-Original-Forwarded-For": "10.0.0.1",
+		"X-Original-Host":          "grafana.internal",
+		"X-Original-Url":           "/d/abc",
 	}
 	for k, v := range inbound {
 		req.Header.Set(k, v)
@@ -619,6 +628,8 @@ func TestProxyStripsRequestHeaders(t *testing.T) {
 		"X-Grafana-Id", "X-Grafana-Org-Id", "X-Grafana-Device-Id",
 		"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Forwarded-Port",
 		"Forwarded", "X-Real-Ip", "Referer", "Origin", "Via",
+		"X-Forwarded-Client-Cert", "True-Client-IP", "Cf-Connecting-Ip", "Fastly-Client-Ip",
+		"X-Client-Ip", "X-Cluster-Client-Ip", "X-Original-Forwarded-For", "X-Original-Host", "X-Original-Url",
 	} {
 		if v := received.Get(name); v != "" {
 			t.Errorf("header %q should be stripped, upstream got %q", name, v)
