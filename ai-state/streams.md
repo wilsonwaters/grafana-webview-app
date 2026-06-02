@@ -63,7 +63,11 @@ with per-domain options, DNS-resolve-then-dial helper, token-bucket rate limiter
 concurrency cap.
 **Depends on:** foundation.
 **Size:** L.
-**Status:** Not started.
+**Status:** ✅ Done — SF1–SF5 merged (#81, #82, #83, #84, #85). `pkg/security/` is a dependency-free
+leaf package: IP blocklist, URL validator, allowlist matcher, DNS-resolve-then-dial (rebind-safe),
+rate limiter + concurrency cap. All fail-closed, unit-tested (94–99% coverage), race-clean. No
+endpoint consumes them yet — the frameability/proxy endpoints map `plugin.AllowedDomain →
+security.AllowlistEntry` at the call site to preserve the leaf boundary.
 
 ### 4. Frameability Detection  —  `frameability`
 **Outcome:** Author can click "Test URL" and get a Direct/Proxied/Error result, persisted to

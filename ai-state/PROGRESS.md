@@ -5,13 +5,15 @@ Narrative log of project status, maintained primarily by the orchestrator agent.
 ## Status summary
 
 Setup complete and the **execution loop is running** (task branch → PR → review → CI-green →
-squash-merge into `main`). **foundation (F1–F4) and panel-core (PC1–PC5) are DONE; security-
-foundation is in progress (SF1 #81, SF2 #82 merged).** The plugin is a **shippable direct-mode Web View
+squash-merge into `main`). **foundation (F1–F4), panel-core (PC1–PC5), and security-foundation
+(SF1–SF5) are all DONE.** The plugin is a **shippable direct-mode Web View
 panel** today: sandboxed iframe at a configured viewport, interactive editor (drag-pan/wheel-zoom +
 numeric inputs/reset), auto-refresh, debug overlay, multi-instance — e2e-verified across Grafana
-12.3.6/12.4.3/13.0.1/nightly and privately signed. No proxy or security *enforcement* wired yet
-(SF1 is a standalone library); those come in security-foundation → frameability → proxy →
-content-rewriting, which is the path to a framing-blocked site like the BOM radar.
+12.3.6/12.4.3/13.0.1/nightly and privately signed. The backend now has a complete set of audited,
+unit-tested security building blocks in `pkg/security/` (IP blocklist, URL validator, allowlist
+matcher, DNS-resolve-then-dial, rate limiter) — a **dependency-free leaf package** — but **no
+endpoint consumes them yet**. Next is frameability → proxy → content-rewriting, which is the path
+to a framing-blocked site like the BOM radar.
 
 ## Handoff notes for the next orchestrator (2026-06-02)
 
@@ -43,16 +45,31 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **SF3 (#21) allowlist matcher** — next up; implementation sub-agent being dispatched. Pure backend
-  Go library in `pkg/security/`: exact + subdomain matching against the admin allowlist, per-domain
-  options (subdomains, private-IP opt-in, port/rate overrides), empty-list-denies-all (fail-closed).
-  Two carry-forward notes from the SF2 review are recorded on #21: reuse `security.NormalizeHostname`
-  to canonicalise BOTH the request host and the configured allowlist entries (IDN/homograph folding),
-  and don't treat obfuscated IP-literal encodings as matchable domains.
-- Then: SF4 (#22) DNS-resolve-then-dial → SF5 (#23) rate limiter. Then frameability (#24–27) →
-  proxy (#28–34) → content-rewriting (#35–39). The BOM radar test becomes possible once proxy +
-  content-rewriting land. (SF4 carry-forward note re: decimal/octal/hex IP-literal SSRF obfuscation
-  is recorded on #22.)
+- **None.** security-foundation just completed (SF2 #82, SF3 #83, SF5 #85, SF4 #84 all merged this
+  session, joining SF1 #81). A system-verification pass was run at stream completion.
+- **Next ready:** **frameability (FR1 #24 → FR4 #27)** — now unblocked (deps security-foundation +
+  panel-core both DONE). This is the FIRST stream to wire the `pkg/security` pipeline behind an HTTP
+  endpoint (`/check-frameable`), so it is also where the endpoint MAPS `plugin.AllowedDomain →
+  security.AllowlistEntry` (the leaf-decoupling shim — see SF3). **proxy (P1 #28 → P7 #34)** is also
+  unblocked (dep security-foundation) and is the higher-leverage path to the BOM radar; frameability
+  helps but is not blocking for proxy. Then content-rewriting (#35–39) makes the BOM radar testable.
+
+## Parallel execution (updated this session)
+
+The earlier "serial, single shared working tree" constraint is **obsolete**. Sub-agents are now
+dispatched with `isolation: worktree` (each gets its own git worktree off the shared `.git`), so
+multiple independent impl/review tasks run concurrently without colliding. This session ran SF4+SF5
+impl in parallel plus reviews/fixes. RULES that bit us and are now standing practice:
+- Do NOT run orchestrator git writes in the PRIMARY working tree while a non-isolated agent is on it
+  (the first SF2 impl agent raced our `main` commit). Always use `isolation: worktree` for agents,
+  and the orchestrator's own bookkeeping commits go to `main` in the primary tree.
+- **golangci-lint is BROKEN in this dev sandbox (go-version mismatch) but ENFORCED in CI.** Backend
+  lint issues (errcheck/staticcheck) only surface in CI — SF4 tripped 5 errcheck + 1 staticcheck that
+  local `go vet` missed. ALWAYS let CI's "Build, lint and unit tests" job go green before merging a
+  backend PR, and **update the PR branch to current `main` first** so CI builds/lints the COMBINED
+  package (this caught the SF4 lint failure that the standalone-branch CI would have shown only for
+  SF4's own files). Commit-signing also fails from a `/tmp` worktree ("missing source") — do
+  orchestrator commits from the primary repo dir.
 
 ## Screenshots convention (added 2026-06-02)
 
@@ -76,6 +93,21 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#84 (SF4)** merged — DNS-resolve-then-dial (`pkg/security/resolvedial.go`): injectable resolver,
+  validate every resolved IP via SF1, FAIL CLOSED if any record blocked (Q6), pin dial to validated IP +
+  re-validate the exact connect IP in `net.Dialer.Control` (rebind defense), GCP metadata-by-name (IP
+  layer covers the rest). Obfuscated decimal/octal/hex literals fail DNS → `resolve-failed` (review
+  corrected a false "Go canonicalises at Control" claim + the test that mis-asserted it). Leaf, 94.9%,
+  race-clean. A golangci-lint failure (5 errcheck + 1 staticcheck), caught only in CI, was fixed.
+- **#85 (SF5)** merged — rate limiter (`pkg/security/ratelimiter.go`): two-tier token bucket
+  (per-instance + per-domain, per-domain overrides) + in-flight concurrency cap; thread-safe,
+  injectable Clock, fail-closed on non-positive limits, stable reason tokens. Leaf, 98.6%, race-clean,
+  no new deps. Review APPROVE.
+- **#83 (SF3)** merged — allowlist matcher (`pkg/security/allowlist.go`): exact + opt-in subdomain
+  matching, per-domain options, empty/nil denies all; reuses `NormalizeHostname` on BOTH sides
+  (homograph-safe), rejects partial-label/suffix-trick bypasses, skips un-normalisable entries.
+  Review caught a latent IMPORT CYCLE (security imported plugin); fixed via Option B — security-owned
+  `AllowlistEntry`/`EntryOptions`, keeping `pkg/security` a dependency-free leaf. 97.2%.
 - **#82 (SF2)** merged — URL validator library (`pkg/security/urlvalidator.go`): http/https scheme
   allowlist, port restriction (80/443 + per-domain `DomainOptions.AllowedPorts`), hostname
   normalisation (lowercase, trailing-dot strip) + IDN→punycode via `x/net/idna` (Lookup profile,

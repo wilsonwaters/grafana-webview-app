@@ -53,3 +53,17 @@ written here.
   entries via `NormalizeHostname` (homograph/IDN folding) and not treat obfuscated IP-literals as
   domains; (2) SF4 must resolve/classify decimal/octal/hex IP-literal encodings through SF1 before
   dialling (SSRF obfuscation). Notes recorded on #21 and #22.
+- **SF3 (#83) merged** — allowlist matcher (`allowlist.go`): exact + opt-in subdomain matching,
+  per-domain options, empty/nil denies all; `NormalizeHostname` on both sides. Review caught a latent
+  import cycle (security→plugin); resolved via Option B — security-owned `AllowlistEntry`/`EntryOptions`
+  so `pkg/security` stays a dependency-free leaf. The consuming endpoint maps `plugin.AllowedDomain →
+  security.AllowlistEntry`. 97.2%.
+- **SF5 (#85) merged** — rate limiter (`ratelimiter.go`): two-tier token bucket (instance + domain,
+  per-domain overrides) + concurrency cap; thread-safe, injectable Clock, fail-closed. 98.6%, race-clean.
+- **SF4 (#84) merged** — resolve-then-dial (`resolvedial.go`): validate all resolved IPs via SF1, fail
+  closed if any blocked (Q6), pin dial + `Control` re-validates the connect IP (rebind defense), GCP
+  metadata-by-name. Obfuscated literals fail DNS → resolve-failed (doc/test corrected in review). 94.9%.
+- **STREAM COMPLETE (SF1–SF5).** System-verification run at completion. Q5 resolved (private-IP opt-in
+  lives at the consuming endpoint, not the library); Q6 resolved (fail closed if any resolved record is
+  denied). Lesson: golangci-lint is enforced in CI but broken in the dev sandbox — let CI go green and
+  update PR branches to current `main` before merging backend PRs.
