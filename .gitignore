@@ -46,3 +46,6 @@ ci/
 .idea
 
 .eslintcache
+
+# Claude Code harness-managed agent worktrees (ephemeral)
+.claude/worktrees/
