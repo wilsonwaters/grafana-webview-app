@@ -45,11 +45,11 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **P3 (#30) incoming response-header stripping** — proxy stream (size S), in flight. Extends P1's
-  `ModifyResponse` to strip `Set-Cookie`, `Strict-Transport-Security`, `Public-Key-Pins`(+report-only),
-  `Clear-Site-Data`. P3 and P4 both touch `ModifyResponse`/proxy.go so they are SEQUENCED (P3 then P4),
-  not parallelised. Proxy chain after: P4 limits → P5 audit log → P6 metrics → P7 denial wiring, then
-  content-rewriting (CR1–CR5) makes the BOM radar render through the proxy.
+- **P4 (#31) resource limits** — proxy stream (M), in flight. Max response body size → 413 (Content-Length
+  path is clean; streaming caps/truncates — documented), total per-request timeout → 504 via a
+  `context.WithTimeout` budget. Q10 RESOLVED: one total budget (`RequestTimeoutSec`), dialer connection
+  timeout is a sub-bound — no new setting. Proxy chain after: P5 audit log → P6 metrics → P7 denial
+  wiring, then content-rewriting (CR1–CR5) makes the BOM radar render through the proxy.
 - **Decision made (this session): proxy-first.** Per the stakeholder, drive the backend proxy
   (P1→P7) → content-rewriting so the proxy is testable against the BOM radar via direct HTTP ASAP;
   frameability's frontend mode-wiring (FR1→FR4) follows after. (P1's issue listed FR4 as a dep, but
@@ -99,6 +99,10 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#88 (P3)** merged — incoming response-header stripping in `stripFramingHeaders`: `Set-Cookie`,
+  `Strict-Transport-Security`, `Public-Key-Pins`(+report-only), `Clear-Site-Data` — upstream can't set
+  cookies on / pin policy against / clear data for the Grafana origin. 91.8% coverage. Self-reviewed
+  (trivial S task); CI green.
 - **#87 (P2)** merged — outgoing request-header stripping in the ReverseProxy Rewrite hook (on `r.Out`):
   Cookie/Authorization/Proxy-Authorization, all `X-Grafana-*` (prefix sweep), forwarding/identity
   (`X-Forwarded-*`, Forwarded, X-Real-Ip, Referer, Origin, Via), and edge/CDN client-IP + mTLS identity
