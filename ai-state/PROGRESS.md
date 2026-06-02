@@ -43,10 +43,14 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- None. **foundation + panel-core COMPLETE; security-foundation STARTED (SF1 #81 merged).**
-  Next: SF2 (#20) URL validator → SF3 (#21) allowlist matcher → SF4 (#22) DNS-resolve-then-dial
-  → SF5 (#23) rate limiter. Then frameability (#24–27) → proxy (#28–34) → content-rewriting
-  (#35–39). The BOM radar test becomes possible once proxy + content-rewriting land.
+- **SF2 (#20) URL validator** — implementation sub-agent dispatched (branch `sf2-url-validator`,
+  PR into `main`). Pure backend Go library in `pkg/security/` (sibling of SF1): scheme allowlist
+  (http/https), port restriction (80/443 + per-domain extra ports from `DomainOptions.AllowedPorts`),
+  hostname normalisation + IDN→punycode. Issue labelled `status:in-progress`. Awaiting PR, then an
+  independent review pass (no runtime verification needed — internal library, no endpoint).
+- Then: SF3 (#21) allowlist matcher → SF4 (#22) DNS-resolve-then-dial → SF5 (#23) rate limiter.
+  Then frameability (#24–27) → proxy (#28–34) → content-rewriting (#35–39). The BOM radar test
+  becomes possible once proxy + content-rewriting land.
 
 ## Screenshots convention (added 2026-06-02)
 
