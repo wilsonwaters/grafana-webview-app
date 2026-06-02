@@ -99,17 +99,17 @@ var blockedRanges = func() []blockedRange {
 		{"ff00::/8", ReasonMulticast},
 
 		// Other reserved / special-use ranges that must never be reachable.
-		{"0.0.0.0/8", ReasonReserved},        // "this network"
-		{"192.0.0.0/24", ReasonReserved},     // IETF protocol assignments
-		{"192.0.2.0/24", ReasonReserved},     // TEST-NET-1 documentation
-		{"198.18.0.0/15", ReasonReserved},    // benchmarking (RFC 2544)
-		{"198.51.100.0/24", ReasonReserved},  // TEST-NET-2 documentation
-		{"203.0.113.0/24", ReasonReserved},   // TEST-NET-3 documentation
-		{"240.0.0.0/4", ReasonReserved},      // former Class E / reserved
-		{"::/8", ReasonReserved},             // IPv6 reserved (includes ::)
-		{"2001:db8::/32", ReasonReserved},    // IPv6 documentation
-		{"100::/64", ReasonReserved},         // IPv6 discard-only (RFC 6666)
-		{"2001::/23", ReasonReserved},        // IETF protocol assignments
+		{"0.0.0.0/8", ReasonReserved},       // "this network"
+		{"192.0.0.0/24", ReasonReserved},    // IETF protocol assignments
+		{"192.0.2.0/24", ReasonReserved},    // TEST-NET-1 documentation
+		{"198.18.0.0/15", ReasonReserved},   // benchmarking (RFC 2544)
+		{"198.51.100.0/24", ReasonReserved}, // TEST-NET-2 documentation
+		{"203.0.113.0/24", ReasonReserved},  // TEST-NET-3 documentation
+		{"240.0.0.0/4", ReasonReserved},     // former Class E / reserved
+		{"::/8", ReasonReserved},            // IPv6 reserved (includes ::)
+		{"2001:db8::/32", ReasonReserved},   // IPv6 documentation
+		{"100::/64", ReasonReserved},        // IPv6 discard-only (RFC 6666)
+		{"2001::/23", ReasonReserved},       // IETF protocol assignments
 	}
 	ranges := make([]blockedRange, 0, len(specs))
 	for _, s := range specs {
