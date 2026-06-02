@@ -17,7 +17,7 @@
 | SF4 | #22 | DNS-resolve-then-dial helper — validate resolved IP before connecting | security-foundation | M | done |
 | SF5 | #23 | Rate limiter and concurrency cap with configurable defaults | security-foundation | M | done |
 | FR1 | #24 | Backend /check-frameable endpoint through full security pipeline | frameability | M | in-progress |
-| FR2 | #25 | Backend /health liveness endpoint | frameability | S | in-progress |
+| FR2 | #25 | Backend /health liveness endpoint | frameability | S | done |
 | FR3 | #26 | Frontend "Test URL" button with result display and persistence | frameability | M | blocked (FR1) |
 | FR4 | #27 | Load-mode selector — Auto / Direct / Proxy with view-mode wiring | frameability | M | blocked (FR3) |
 | P1 | #28 | Core proxy slice — /proxy endpoint with security pipeline and framing-header removal | proxy | M | done |
