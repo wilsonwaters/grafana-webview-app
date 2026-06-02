@@ -281,7 +281,7 @@ func TestObfuscatedHost_RejectedByResolveFailure(t *testing.T) {
 			d := NewDialer(rd, &net.Dialer{})
 			conn, derr := d.DialContext(context.Background(), "tcp", net.JoinHostPort(host, "80"))
 			if conn != nil {
-				conn.Close()
+				_ = conn.Close()
 				t.Fatalf("DialContext(%q) connected; must fail closed on resolve failure", host)
 			}
 			if DialReasonOf(derr) != ReasonResolveFailed {
@@ -318,7 +318,7 @@ func TestDialContext_FailsClosedOnBlockedResolvedIP(t *testing.T) {
 	d := NewDialer(r, &net.Dialer{})
 	conn, err := d.DialContext(context.Background(), "tcp", "blocked.example:80")
 	if conn != nil {
-		conn.Close()
+		_ = conn.Close()
 		t.Fatal("dialer connected to a blocked IP; must fail closed")
 	}
 	if err == nil || DialReasonOf(err) != ReasonBlockedIP {
@@ -372,14 +372,14 @@ func TestDialer_BaseDialerReachesListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 
 	accepted := make(chan struct{}, 1)
 	go func() {
 		c, err := ln.Accept()
 		if err == nil {
 			accepted <- struct{}{}
-			c.Close()
+			_ = c.Close()
 		}
 	}()
 
@@ -392,7 +392,7 @@ func TestDialer_BaseDialerReachesListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("dial listener: %v", err)
 	}
-	conn.Close()
+	_ = conn.Close()
 	<-accepted
 }
 

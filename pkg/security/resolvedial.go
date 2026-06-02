@@ -138,10 +138,7 @@ type Resolver interface {
 // It is exported so a consuming endpoint can reject metadata names early in its
 // own pipeline if desired; DialContext applies it unconditionally.
 func IsMetadataHostname(host string) bool {
-	h := strings.ToLower(strings.TrimSpace(host))
-	if strings.HasSuffix(h, ".") {
-		h = strings.TrimSuffix(h, ".")
-	}
+	h := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
 	_, ok := metadataHostnames[h]
 	return ok
 }
