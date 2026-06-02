@@ -241,6 +241,50 @@ func TestProxyNeutralisesCSPFrameAncestors(t *testing.T) {
 	}
 }
 
+// TestProxyStripsResponseHeaders covers Completion Criterion (P3): the dangerous
+// incoming response headers — Set-Cookie (incl. multiple values), HSTS, HPKP (both
+// variants), and Clear-Site-Data — are ABSENT on the proxied response after the
+// real path through ModifyResponse, while a benign header survives.
+func TestProxyStripsResponseHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		h := w.Header()
+		// Multiple Set-Cookie values: all must be cleared, not just the first.
+		h.Add("Set-Cookie", "sid=secret; Path=/; HttpOnly")
+		h.Add("Set-Cookie", "track=abc; Path=/")
+		h.Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+		h.Set("Public-Key-Pins", `pin-sha256="abc"; max-age=5184000`)
+		h.Set("Public-Key-Pins-Report-Only", `pin-sha256="def"; report-uri="https://x/r"`)
+		h.Set("Clear-Site-Data", `"cookies", "storage"`)
+		h.Set("Content-Type", "text/html; charset=utf-8") // benign: must survive
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := settingsWith(allowExample(DomainOptions{}))
+	p := newTestHandler(t, cfg, upstream)
+	rec := doProxy(p, "http://example.com/page")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200", rec.Code)
+	}
+
+	for _, name := range []string{
+		"Set-Cookie",
+		"Strict-Transport-Security",
+		"Public-Key-Pins",
+		"Public-Key-Pins-Report-Only",
+		"Clear-Site-Data",
+	} {
+		if v := rec.Header().Values(name); len(v) != 0 {
+			t.Errorf("header %q should be stripped from the proxied response, got %v", name, v)
+		}
+	}
+
+	// A benign, render-relevant header must NOT be removed.
+	if got := rec.Header().Get("Content-Type"); got == "" {
+		t.Error("Content-Type should be preserved on the proxied response")
+	}
+}
+
 // TestProxyCORSHeaderPresent covers Completion Criterion: permissive CORS header present.
 func TestProxyCORSHeaderPresent(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -679,6 +723,40 @@ func TestStripRequestHeadersUnit(t *testing.T) {
 	}
 	if got := h.Get("Accept-Language"); got != "en" {
 		t.Errorf("Accept-Language should be preserved, got %q", got)
+	}
+}
+
+// TestStripFramingHeadersStripsResponseHeadersUnit exercises stripFramingHeaders
+// directly (no proxy) to confirm the P3 strip removes every dangerous incoming
+// response header — including ALL values of a multi-valued Set-Cookie — while
+// leaving a benign render-relevant header intact. It also returns no error.
+func TestStripFramingHeadersStripsResponseHeadersUnit(t *testing.T) {
+	resp := &http.Response{Header: http.Header{}}
+	resp.Header.Add("Set-Cookie", "sid=secret")
+	resp.Header.Add("Set-Cookie", "track=abc")
+	resp.Header.Set("Strict-Transport-Security", "max-age=63072000")
+	resp.Header.Set("Public-Key-Pins", `pin-sha256="abc"`)
+	resp.Header.Set("Public-Key-Pins-Report-Only", `pin-sha256="def"`)
+	resp.Header.Set("Clear-Site-Data", `"cookies"`)
+	resp.Header.Set("Content-Type", "text/html") // benign: must survive
+
+	if err := stripFramingHeaders(resp); err != nil {
+		t.Fatalf("stripFramingHeaders returned error: %v", err)
+	}
+
+	for _, name := range []string{
+		"Set-Cookie",
+		"Strict-Transport-Security",
+		"Public-Key-Pins",
+		"Public-Key-Pins-Report-Only",
+		"Clear-Site-Data",
+	} {
+		if v := resp.Header.Values(name); len(v) != 0 {
+			t.Errorf("%q should be deleted, got %v", name, v)
+		}
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/html" {
+		t.Errorf("Content-Type should be preserved, got %q", got)
 	}
 }
 
