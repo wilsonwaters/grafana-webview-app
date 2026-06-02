@@ -39,4 +39,7 @@ visible, saved result.
 
 ## Changelog
 
-- Initialised at project kickoff (planning). No tasks dispatched yet.
+- Initialised at project kickoff (planning).
+- **Stream STARTED** (after content-rewriting completed; stakeholder chose frameability next). Open questions
+  RESOLVED: Q7 (recommendedMode — denials→error codes; pass→200 with direct/proxy, ambiguous/error→proxy);
+  Q8 (/health = bare liveness). FR1 (#24) + FR2 (#25) dispatched in parallel (both backend, independent).
