@@ -49,3 +49,10 @@ demonstrable panel state.
   (the basic CSS transform helper) that PC2 had been scoped to create. Refined PC2 to focus
   on the still-needed *interaction* maths (cursor-anchored wheel-zoom, pan-delta, clamp) built
   on PC1's helper, avoiding redundant work. Issue #15 updated to match.
+- 2026-06-02: PC2 (#76) merged. Minor tracked debt (review INFO): zoom bounds
+  `VIEWPORT_ZOOM_MIN/MAX` are duplicated (private in `types.ts`, exported in `viewport.ts`) with
+  identical values — no numeric divergence. A future cleanup can centralise to one source.
+- 2026-06-02: Resolved OPEN-QUESTIONS Q3 — the interactive viewport positioning is implemented as
+  a **custom panel options editor** (rendered by Grafana only in the edit pane), so the panel
+  component never needs to detect edit-vs-view mode and view mode stays non-interactive. PC3
+  follows this approach.
