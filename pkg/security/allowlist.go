@@ -22,9 +22,43 @@
 // spoof — an allowlist entry.
 package security
 
-import (
-	"github.com/wilsonwaters/webview/pkg/plugin"
-)
+// AllowlistEntry pairs a configured hostname with its per-domain options, as
+// consumed by MatchHostname. It is a security-owned input type: the fields
+// mirror plugin.AllowedDomain / plugin.DomainOptions exactly, but the type is
+// defined here so that pkg/security imports no project package and stays a
+// dependency-free leaf (consistent with the IP blocklist taking net.IP and the
+// URL validator taking string+[]int).
+//
+// The consuming proxy/frameability endpoint is responsible for mapping each
+// configured plugin.AllowedDomain to an AllowlistEntry at the call site; this
+// package deliberately does not import pkg/plugin to perform that mapping.
+type AllowlistEntry struct {
+	// Domain is the configured hostname (e.g. "example.com") without scheme,
+	// port, or path. Mirrors plugin.AllowedDomain.Domain.
+	Domain string
+	// Options carries the per-domain controls for a matched entry. Mirrors
+	// plugin.AllowedDomain.Options.
+	Options EntryOptions
+}
+
+// EntryOptions carries the per-domain security controls for an allowlist entry.
+// Its fields mirror plugin.DomainOptions exactly; it is defined here to keep
+// pkg/security a leaf package. The endpoint maps plugin.DomainOptions →
+// EntryOptions when constructing the AllowlistEntry slice it passes in.
+type EntryOptions struct {
+	// AllowSubdomains controls whether the entry also covers all subdomains of
+	// the configured domain (e.g. "example.com" also covers "api.example.com").
+	AllowSubdomains bool
+	// AllowPrivateIP is an explicit opt-in permitting the resolved IP to fall
+	// within private/link-local/loopback ranges (consumed by SF4).
+	AllowPrivateIP bool
+	// RateLimitPerMin overrides the global per-domain rate limit for this domain
+	// (consumed by SF5). 0 means "use the global default".
+	RateLimitPerMin int
+	// AllowedPorts lists additional TCP ports (beyond 80 and 443) permitted for
+	// this domain (consumed by SF2). Empty means standard ports only.
+	AllowedPorts []int
+}
 
 // Result tokens returned by MatchHostname. These are short, stable, machine
 // readable identifiers suitable for use as metric and audit-log labels. They
@@ -60,9 +94,9 @@ type Match struct {
 	Domain string
 	// Options is a copy of the matched entry's per-domain options (subdomain
 	// flag, private-IP opt-in, rate-limit override, extra allowed ports). It is
-	// the zero DomainOptions when not allowed. Callers feed these into SF2
+	// the zero EntryOptions when not allowed. Callers feed these into SF2
 	// (AllowedPorts), SF4 (AllowPrivateIP), and SF5 (RateLimitPerMin).
-	Options plugin.DomainOptions
+	Options EntryOptions
 }
 
 // MatchHostname reports whether hostname is permitted by the supplied
@@ -92,7 +126,7 @@ type Match struct {
 // When more than one entry matches, an exact match is preferred over a
 // subdomain match; among entries of the same kind the first in allowlist order
 // wins, so the returned Options are deterministic.
-func MatchHostname(hostname string, allowlist []plugin.AllowedDomain) Match {
+func MatchHostname(hostname string, allowlist []AllowlistEntry) Match {
 	canonHost, err := NormalizeHostname(hostname)
 	if err != nil {
 		// The query hostname cannot be proven to be a valid name, so it cannot
@@ -105,7 +139,7 @@ func MatchHostname(hostname string, allowlist []plugin.AllowedDomain) Match {
 	var (
 		haveSubdomain   bool
 		subdomainDomain string
-		subdomainOpts   plugin.DomainOptions
+		subdomainOpts   EntryOptions
 	)
 
 	// A nil or empty allowlist denies everything (the loop simply never runs).
@@ -157,7 +191,7 @@ func MatchHostname(hostname string, allowlist []plugin.AllowedDomain) Match {
 // IsHostnameAllowed is a convenience wrapper around MatchHostname for call sites
 // that need a plain boolean gate and do not care about the matched options or
 // the reason. It fails closed identically to MatchHostname.
-func IsHostnameAllowed(hostname string, allowlist []plugin.AllowedDomain) bool {
+func IsHostnameAllowed(hostname string, allowlist []AllowlistEntry) bool {
 	return MatchHostname(hostname, allowlist).Allowed
 }
 
@@ -169,6 +203,9 @@ func IsHostnameAllowed(hostname string, allowlist []plugin.AllowedDomain) bool {
 // against "example.com") is rejected because it does not contain the leading
 // dot separator.
 func isSubdomainOf(host, domain string) bool {
+	// Belt-and-suspenders: callers only reach here with a non-empty, normalised
+	// domain (empty/un-normalisable entries are skipped before this call), but
+	// guard anyway so an empty domain can never make every host a "subdomain".
 	if domain == "" {
 		return false
 	}

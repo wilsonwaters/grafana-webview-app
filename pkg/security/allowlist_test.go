@@ -2,16 +2,14 @@ package security
 
 import (
 	"testing"
-
-	"github.com/wilsonwaters/webview/pkg/plugin"
 )
 
-// dom is a small helper to build an AllowedDomain with the subdomain flag and
+// dom is a small helper to build an AllowlistEntry with the subdomain flag and
 // (optionally) per-domain options, keeping the table rows compact.
-func dom(domain string, allowSubdomains bool) plugin.AllowedDomain {
-	return plugin.AllowedDomain{
+func dom(domain string, allowSubdomains bool) AllowlistEntry {
+	return AllowlistEntry{
 		Domain:  domain,
-		Options: plugin.DomainOptions{AllowSubdomains: allowSubdomains},
+		Options: EntryOptions{AllowSubdomains: allowSubdomains},
 	}
 }
 
@@ -21,7 +19,7 @@ func dom(domain string, allowSubdomains bool) plugin.AllowedDomain {
 //
 // Completion Criterion: "Exact and subdomain matching work correctly" (exact half).
 func TestMatchHostnameExact(t *testing.T) {
-	allow := []plugin.AllowedDomain{
+	allow := []AllowlistEntry{
 		dom("example.com", false),
 		dom("api.internal.test", false),
 	}
@@ -54,7 +52,7 @@ func TestMatchHostnameExact(t *testing.T) {
 //
 // Completion Criterion: "Exact and subdomain matching work correctly" (subdomain half).
 func TestMatchHostnameSubdomain(t *testing.T) {
-	allow := []plugin.AllowedDomain{dom("example.com", true)}
+	allow := []AllowlistEntry{dom("example.com", true)}
 	tests := []struct {
 		name       string
 		host       string
@@ -86,7 +84,7 @@ func TestMatchHostnameSubdomain(t *testing.T) {
 // Completion Criterion: "Exact and subdomain matching work correctly"
 // (AllowSubdomains=false rejecting subdomains).
 func TestMatchHostnameSubdomainDisabled(t *testing.T) {
-	allow := []plugin.AllowedDomain{dom("example.com", false)}
+	allow := []AllowlistEntry{dom("example.com", false)}
 	for _, host := range []string{"api.example.com", "a.b.example.com", "www.example.com"} {
 		if got := MatchHostname(host, allow); got.Allowed {
 			t.Errorf("MatchHostname(%q) allowed with AllowSubdomains=false, want denied (result=%q)", host, got.Result)
@@ -105,7 +103,7 @@ func TestMatchHostnameSubdomainDisabled(t *testing.T) {
 // Completion Criterion: "Exact and subdomain matching work correctly"
 // (partial-label and suffix-trick non-match).
 func TestMatchHostnamePartialAndSuffixTricks(t *testing.T) {
-	allow := []plugin.AllowedDomain{dom("example.com", true)}
+	allow := []AllowlistEntry{dom("example.com", true)}
 	tricks := []string{
 		"notexample.com",       // partial label, shares suffix without a dot boundary
 		"badexample.com",       // partial label
@@ -139,7 +137,7 @@ func TestMatchHostnameEmptyAndNilAllowlist(t *testing.T) {
 			}
 		})
 		t.Run("empty/"+host, func(t *testing.T) {
-			got := MatchHostname(host, []plugin.AllowedDomain{})
+			got := MatchHostname(host, []AllowlistEntry{})
 			if got.Allowed {
 				t.Errorf("empty allowlist allowed %q, want denied", host)
 			}
@@ -157,13 +155,13 @@ func TestMatchHostnameEmptyAndNilAllowlist(t *testing.T) {
 //
 // Completion Criterion: "Per-domain options are returned to the caller on match".
 func TestMatchHostnameOptionsReturned(t *testing.T) {
-	opts := plugin.DomainOptions{
+	opts := EntryOptions{
 		AllowSubdomains: true,
 		AllowPrivateIP:  true,
 		RateLimitPerMin: 42,
 		AllowedPorts:    []int{8443, 9000},
 	}
-	allow := []plugin.AllowedDomain{{Domain: "example.com", Options: opts}}
+	allow := []AllowlistEntry{{Domain: "example.com", Options: opts}}
 
 	assertOpts := func(t *testing.T, host string, wantResult string) {
 		t.Helper()
@@ -225,7 +223,7 @@ func TestMatchHostnameCanonicalisation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			allow := []plugin.AllowedDomain{dom(tt.domain, tt.sub)}
+			allow := []AllowlistEntry{dom(tt.domain, tt.sub)}
 			got := MatchHostname(tt.host, allow)
 			if got.Allowed != tt.want {
 				t.Fatalf("MatchHostname(%q) against domain %q = %v, want %v (result=%q)", tt.host, tt.domain, got.Allowed, tt.want, got.Result)
@@ -242,7 +240,7 @@ func TestMatchHostnameCanonicalisation(t *testing.T) {
 // Completion Criterion: fail-closed handling of an unusable configured entry.
 func TestMatchHostnameUnnormalisableEntrySkipped(t *testing.T) {
 	// A bad entry followed by a good one: the good entry must still match.
-	allow := []plugin.AllowedDomain{
+	allow := []AllowlistEntry{
 		dom("", false),                 // empty domain -> unnormalisable, skipped
 		dom("exa mple.com", false),     // space is a disallowed label char -> skipped
 		dom("\x00bad.com", false),      // control char -> skipped
@@ -258,9 +256,45 @@ func TestMatchHostnameUnnormalisableEntrySkipped(t *testing.T) {
 		}
 	}
 	// An allowlist consisting ONLY of unusable entries denies everything.
-	onlyBad := []plugin.AllowedDomain{dom("", false), dom("exa mple.com", true)}
+	onlyBad := []AllowlistEntry{dom("", false), dom("exa mple.com", true)}
 	if got := MatchHostname("anything.com", onlyBad); got.Allowed {
 		t.Errorf("MatchHostname against only-unusable allowlist allowed, want denied (result=%q)", got.Result)
+	}
+}
+
+// TestMatchHostnameWildcardAndLeadingDotEntry documents that configured entries
+// written as glob/wildcard patterns ("*.example.com") or with a leading dot
+// (".example.com") are NOT special-cased into wildcard semantics. Subdomain
+// coverage is opt-in via Options.AllowSubdomains, never via syntax in the Domain
+// string. Concretely:
+//
+//   - "*.example.com" fails NormalizeHostname/IDNA (the "*" is a disallowed
+//     rune) and is skipped exactly like any other unnormalisable entry.
+//   - ".example.com" survives normalisation as the literal ".example.com" (a
+//     leading empty label), so it is treated as an ordinary host string: it
+//     covers NEITHER the apex "example.com" NOR any real subdomain
+//     "api.example.com". It is harmless but grants no wildcard coverage.
+func TestMatchHostnameWildcardAndLeadingDotEntry(t *testing.T) {
+	for _, pattern := range []string{"*.example.com", ".example.com"} {
+		t.Run(pattern, func(t *testing.T) {
+			// The pattern entry alone must not grant wildcard coverage: neither
+			// the apex nor a real subdomain may match, even with AllowSubdomains.
+			allow := []AllowlistEntry{dom(pattern, true)}
+			for _, host := range []string{"example.com", "api.example.com", "a.b.example.com"} {
+				if got := MatchHostname(host, allow); got.Allowed {
+					t.Errorf("MatchHostname(%q) allowed via pattern entry %q, want denied (result=%q)", host, pattern, got.Result)
+				}
+			}
+			// Mixed with a usable entry, the pattern must not poison it: the
+			// good entry still matches and the pattern still grants no wildcard.
+			mixed := []AllowlistEntry{dom(pattern, true), dom("good.example.com", false)}
+			if got := MatchHostname("good.example.com", mixed); !got.Allowed || got.Result != ResultExact {
+				t.Errorf("MatchHostname(good.example.com) = %+v, want allowed exact despite pattern entry %q", got, pattern)
+			}
+			if got := MatchHostname("api.example.com", mixed); got.Allowed {
+				t.Errorf("MatchHostname(api.example.com) allowed via pattern entry %q, want denied (result=%q)", pattern, got.Result)
+			}
+		})
 	}
 }
 
@@ -270,7 +304,7 @@ func TestMatchHostnameUnnormalisableEntrySkipped(t *testing.T) {
 //
 // Completion Criterion: fail-closed handling of invalid query input.
 func TestMatchHostnameInvalidQueryDenied(t *testing.T) {
-	allow := []plugin.AllowedDomain{dom("example.com", true)}
+	allow := []AllowlistEntry{dom("example.com", true)}
 	bad := []string{
 		"",             // empty
 		".",            // only a trailing dot
@@ -298,7 +332,7 @@ func TestMatchHostnameInvalidQueryDenied(t *testing.T) {
 //
 // Completion Criterion: SF2 carry-forward (no IP-literal-as-domain matching).
 func TestMatchHostnameIPLiteralEncodings(t *testing.T) {
-	allow := []plugin.AllowedDomain{dom("example.com", true)}
+	allow := []AllowlistEntry{dom("example.com", true)}
 	// None of these are the allowlisted domain, so none must match.
 	literals := []string{
 		"2130706433",      // decimal 127.0.0.1
@@ -323,9 +357,9 @@ func TestMatchHostnameIPLiteralEncodings(t *testing.T) {
 // selection: when both an exact entry and a broader subdomain entry could cover
 // a host, the exact match wins and its options are returned.
 func TestMatchHostnameExactPreferredOverSubdomain(t *testing.T) {
-	allow := []plugin.AllowedDomain{
-		{Domain: "example.com", Options: plugin.DomainOptions{AllowSubdomains: true, RateLimitPerMin: 10}},
-		{Domain: "api.example.com", Options: plugin.DomainOptions{AllowSubdomains: false, RateLimitPerMin: 99}},
+	allow := []AllowlistEntry{
+		{Domain: "example.com", Options: EntryOptions{AllowSubdomains: true, RateLimitPerMin: 10}},
+		{Domain: "api.example.com", Options: EntryOptions{AllowSubdomains: false, RateLimitPerMin: 99}},
 	}
 	got := MatchHostname("api.example.com", allow)
 	if !got.Allowed || got.Result != ResultExact {
@@ -338,7 +372,7 @@ func TestMatchHostnameExactPreferredOverSubdomain(t *testing.T) {
 
 // TestIsHostnameAllowed exercises the boolean convenience wrapper.
 func TestIsHostnameAllowed(t *testing.T) {
-	allow := []plugin.AllowedDomain{dom("example.com", true)}
+	allow := []AllowlistEntry{dom("example.com", true)}
 	if !IsHostnameAllowed("api.example.com", allow) {
 		t.Error("IsHostnameAllowed(api.example.com) = false, want true")
 	}
