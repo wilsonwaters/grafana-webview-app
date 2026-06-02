@@ -66,6 +66,26 @@ var strippedRequestHeaders = []string{
 	"X-Original-Url",           // pre-rewrite request URL
 }
 
+// strippedResponseHeaders are the exact-match headers removed from every proxied
+// response, in addition to the framing strip (X-Frame-Options / CSP
+// frame-ancestors) P1 already performs. Header.Del canonicalises the key, so these
+// match case-insensitively and remove ALL values of a multi-valued header (e.g.
+// every Set-Cookie line). The goal is that the proxied page cannot set state on,
+// or impose origin-level security policy against, the viewer's browser via the
+// Grafana origin: the proxy is a stateless, unauthenticated fetch and the response
+// is served from Grafana's own origin. Each removal is justified inline.
+var strippedResponseHeaders = []string{
+	// State-setting — must never write cookies into the viewer's Grafana origin.
+	"Set-Cookie", // upstream session/tracking cookies (all values removed)
+
+	// Origin-level security policy the upstream tries to pin onto the Grafana
+	// origin — would persist beyond this single fetch and affect Grafana itself.
+	"Strict-Transport-Security",   // HSTS: would force HTTPS-only on the Grafana origin
+	"Public-Key-Pins",             // HPKP: would pin cert keys against the Grafana origin
+	"Public-Key-Pins-Report-Only", // HPKP report-only sibling: same pinning policy, report mode
+	"Clear-Site-Data",             // could wipe the viewer's cookies/storage/cache for the Grafana origin
+}
+
 // xGrafanaHeaderPrefix is swept (case-insensitively) off every outgoing request:
 // Grafana injects auth/identity context headers under this prefix (e.g.
 // X-Grafana-Id, X-Grafana-Org-Id, X-Grafana-Device-Id). Deleting the whole prefix
@@ -383,13 +403,23 @@ func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) {
 // otherwise-frameable page embeddable in a Grafana panel.
 const frameAncestorsDirective = "frame-ancestors"
 
-// stripFramingHeaders removes the response headers that prevent the proxied page
-// from being framed: it deletes X-Frame-Options outright and neutralises any
-// frame-ancestors directive inside Content-Security-Policy while leaving all
-// other CSP directives intact. It also re-applies CORS (ReverseProxy may have
-// copied upstream CORS headers over ours). Body/base-tag/frame-buster rewriting
-// is OUT OF SCOPE here — that is content-rewriting (see TODO(CR) above).
+// stripFramingHeaders sanitises the proxied response. It removes the headers that
+// prevent the page from being framed (X-Frame-Options outright; the
+// frame-ancestors directive inside Content-Security-Policy while leaving all other
+// CSP directives intact — P1) AND deletes the dangerous incoming response headers
+// in strippedResponseHeaders (Set-Cookie, HSTS, HPKP, Clear-Site-Data — P3) so the
+// upstream cannot set cookies on, or pin origin-level security policy onto, the
+// Grafana origin the response is served from. It also re-applies CORS (ReverseProxy
+// may have copied upstream CORS headers over ours). Body/base-tag/frame-buster
+// rewriting is OUT OF SCOPE here — that is content-rewriting (see TODO(CR) above).
 func stripFramingHeaders(resp *http.Response) error {
+	// P3: drop dangerous incoming response headers (state-setting + origin-level
+	// security policy). Header.Del canonicalises the key and removes every value,
+	// so multi-valued headers (e.g. several Set-Cookie lines) are fully cleared.
+	for _, name := range strippedResponseHeaders {
+		resp.Header.Del(name)
+	}
+
 	// X-Frame-Options: delete entirely. There is no partial form to preserve.
 	resp.Header.Del("X-Frame-Options")
 
