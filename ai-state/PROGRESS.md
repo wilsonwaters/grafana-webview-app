@@ -45,9 +45,11 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **P2 (#29) outgoing request-header stripping** — proxy stream, being dispatched. Builds on P1's
-  `pkg/plugin/proxy.go`: strip `Cookie`, `Authorization`, `X-Grafana-*`/auth headers from the outgoing
-  request and set a conservative `User-Agent`/`Accept` (stateless, unauthenticated fetch).
+- **P3 (#30) incoming response-header stripping** — proxy stream (size S), in flight. Extends P1's
+  `ModifyResponse` to strip `Set-Cookie`, `Strict-Transport-Security`, `Public-Key-Pins`(+report-only),
+  `Clear-Site-Data`. P3 and P4 both touch `ModifyResponse`/proxy.go so they are SEQUENCED (P3 then P4),
+  not parallelised. Proxy chain after: P4 limits → P5 audit log → P6 metrics → P7 denial wiring, then
+  content-rewriting (CR1–CR5) makes the BOM radar render through the proxy.
 - **Decision made (this session): proxy-first.** Per the stakeholder, drive the backend proxy
   (P1→P7) → content-rewriting so the proxy is testable against the BOM radar via direct HTTP ASAP;
   frameability's frontend mode-wiring (FR1→FR4) follows after. (P1's issue listed FR4 as a dep, but
@@ -97,6 +99,12 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#87 (P2)** merged — outgoing request-header stripping in the ReverseProxy Rewrite hook (on `r.Out`):
+  Cookie/Authorization/Proxy-Authorization, all `X-Grafana-*` (prefix sweep), forwarding/identity
+  (`X-Forwarded-*`, Forwarded, X-Real-Ip, Referer, Origin, Via), and edge/CDN client-IP + mTLS identity
+  (`X-Forwarded-Client-Cert`, True-Client-IP, CF/Fastly-Client-IP, X-Client-IP, X-Cluster-Client-IP,
+  `X-Original-*` — folded in from review). Conservative UA/Accept. Forwarded request leaks nothing about
+  Grafana/viewer. 91.7% coverage. Review APPROVE-WITH-NITS (nit folded in).
 - **#86 (P1)** merged — **core `/proxy` endpoint** (`pkg/plugin/proxy.go`), first assembly of the
   security pipeline behind HTTP. `GET /proxy?url=<encoded>` on `httputil.ReverseProxy`: pipeline runs
   in the handler BEFORE any upstream connect (SF3 allowlist → SF2 validate w/ matched ports → SF5
