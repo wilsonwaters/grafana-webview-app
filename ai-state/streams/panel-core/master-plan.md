@@ -64,3 +64,10 @@ demonstrable panel state.
   capture is redundant. AC 6 is satisfied implicitly by live capture; PC4 adds a "Reset view"
   button instead of a no-op capture button. Issue #17 updated. (Spec update, not a copout —
   per methodology, fix-or-update-spec rather than interpret.)
+- 2026-06-02: PC4 (#17) — numeric X/Y/zoom inputs (two-way sync with preview, zoom clamped
+  0.1–5.0 via `clampZoom`), iframeWidth/iframeHeight dimension inputs (defaults 1920/1080,
+  non-positive values fall back to defaults), "Reset view" button (X0/Y0/zoom1). URL control
+  reconciled: the standard `url` field registered in module.tsx (F4) is the canonical URL
+  input; ViewportEditor reads `context.options.url` and reacts via Grafana re-renders — no
+  duplicate URL input. 26 component tests added; e2e runtime-verified (pc4-editor.png).
+  All quality gates green.
