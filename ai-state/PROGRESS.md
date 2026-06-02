@@ -48,12 +48,13 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **CR3 (#37) `/proxy-resource` endpoint** — content-rewriting (M), in flight. Serves the subresource
-  URLs CR2 rewrites HTML to, through the IDENTICAL security pipeline (SF2→SF3→SF5→SF4) + header policy
-  as `/proxy`, but with NO HTML rewriting and Content-Type PRESERVED (CSS/JS/images stream through,
-  size-limited). Refactors the shared pipeline/audit/metrics from `/proxy` (which must stay unchanged).
-  **CR3 is the last piece before an allowlisted framing-blocked page RENDERS** (HTML via `/proxy` +
-  subresources via `/proxy-resource`). Then CR4 (redirects) + CR5 (hide-selectors) finish the stream.
+- **CR4 (#38) redirect handling** — content-rewriting (M), in flight. Security-critical (redirect SSRF).
+  Rewrites 3xx `Location` → proxy URL so the browser re-enters the proxy per hop (full pipeline re-validates
+  the hop: allowlist/scheme/rate + SF4 IP gate at dial); depth capped via a `_wvredir` counter (default
+  `MaxRedirects`=3 → over-depth errors); ModifyResponse allowlist pre-block denies a redirect to a
+  non-allowlisted host at the redirect step; both endpoints. **The HTML+subresource render path (CR1–CR3)
+  is COMPLETE** — an allowlisted framing-blocked page renders (HTML via `/proxy`, subresources via
+  `/proxy-resource`). After CR4: only CR5 (hide-selectors) remains in content-rewriting.
 - **Proxy stream COMPLETE and runtime-verified** (P1–P7; see Runtime verification section). The frontend
   Proxy load-mode selector (frameability FR4) is the OTHER remaining piece for a true *in-panel* BOM test.
 - **Tracked debt:** the P4 exactly-at-limit boundary test was folded into P7 — that nit is CLOSED.
@@ -120,6 +121,11 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#95 (CR3)** merged — `/proxy-resource` endpoint. Extracted a shared `(*proxyHandler).serve(w,r,endpoint)`
+  so `/proxy` and `/proxy-resource` run the IDENTICAL pipeline/header-policy/audit/metrics (`/proxy`
+  byte-for-byte unchanged, no test touched). Resource branch: framing/header strip, NO HTML rewrite,
+  Content-Type preserved, gzip subresources stream compressed, size-limited; same validated-host dial path
+  (SSRF-safe). 92.8% coverage. Review APPROVE (no findings). HTML+subresource render path (CR1–CR3) complete.
 - **#94 (CR2)** merged — goquery HTML rewriting (`pkg/plugin/rewrite.go`): rewrites subresource refs →
   `/proxy-resource?url=` and navigation → `/proxy?url=` (Q9 query-encoded), injects/fixes `<base href>`,
   removes CSP/refresh `<meta>`, removes inline frame-busters (Q11 comparison-AND-navigation marker pair),

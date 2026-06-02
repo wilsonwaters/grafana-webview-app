@@ -51,6 +51,9 @@ radar) renders with working CSS/images/JS in the panel.
   frame-buster marker-pair set; see `architecture-notes.md`). Rewrites subresource/navigation URLs,
   injects/fixes `<base href>`, removes CSP/refresh meta + inline frame-busters; restructured the seam so
   ALL HTML is rewritten; goquery-escaped (XSS-safe); degrades to original on rewrite error. 92.7%.
-- **CR3 (#37) — in flight** — `/proxy-resource` endpoint serving the rewritten subresource URLs through
-  the SAME pipeline/header policy as `/proxy` (no rewrite, Content-Type preserved, size-limited). After
-  CR3, an allowlisted framing-blocked page renders. Then CR4 (redirects) + CR5 (hide-selectors).
+- **CR3 (#95) merged** — `/proxy-resource` endpoint via a shared `serve(w,r,endpoint)` (identical pipeline/
+  header policy/audit/metrics; `/proxy` unchanged); resource branch: no rewrite, Content-Type preserved,
+  gzip passthrough, size-limited. **HTML+subresource render path (CR1–CR3) COMPLETE.**
+- **CR4 (#38) — in flight** — redirect handling: rewrite 3xx Location → proxy URL (browser re-enters proxy
+  per hop → full pipeline re-validates), `_wvredir` depth cap (MaxRedirects=3), ModifyResponse allowlist
+  pre-block of denied hops, both endpoints. Then CR5 (hide-selectors) finishes the stream.
