@@ -42,6 +42,12 @@ type App struct {
 	// audit logger and metrics — and differs only in serving subresources without
 	// HTML rewriting (Content-Type preserved, body streamed through unchanged).
 	proxyResource proxyResourceHandler
+
+	// checkFrameable is the /check-frameable endpoint handler (FR1). It wraps the
+	// SAME proxyHandler — sharing its settings, allowlist, rate limiter and SF4
+	// secure-dialer transport — and runs the identical pre-fetch security pipeline
+	// before issuing a single non-following GET to inspect framing headers.
+	checkFrameable checkFrameableHandler
 }
 
 // NewApp creates a new *App instance. It parses the plugin settings from
@@ -64,6 +70,9 @@ func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemg
 	// The subresource endpoint shares the same proxyHandler (and thus the same
 	// pipeline, transport, rate limiter, audit logger and metrics).
 	app.proxyResource = proxyResourceHandler{p: app.proxy}
+	// FR1: the /check-frameable endpoint shares the same proxyHandler (pipeline,
+	// transport, rate limiter) and runs the identical validation before fetching.
+	app.checkFrameable = checkFrameableHandler{p: app.proxy}
 
 	// Use a httpadapter (provided by the SDK) for resource calls. This allows us
 	// to use a *http.ServeMux for resource calls, so we can map multiple routes
