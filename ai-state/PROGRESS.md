@@ -11,10 +11,29 @@ plugin settings schema/loader are in place. No real viewport, proxy, or security
 
 ## Currently in flight
 
-- None at this instant — about to dispatch `panel-core` PC1 (#14).
+- About to dispatch `panel-core` PC4 (#17).
+
+## CI / signing health (resolved 2026-06-02)
+
+Full CI is **green**, including the e2e matrix across Grafana 12.3.6 / 12.4.3 / 13.0.1 / nightly.
+Two CI issues were found (by checking GitHub Actions, not just local gates) and fixed in #78:
+1. The compatibility check broke once F4 added a second `module.tsx`; now runs as a matrix over
+   all module entrypoints (also covers the panel module).
+2. `npm run sign` returned HTTP 409 (public/community signing is rejected for an unpublished
+   plugin). Now **private signing** in both `ci.yml` and `release.yml`, using the `QA-Alintech`
+   GitHub Actions environment variable `GRAFANA_INSTANCE_URL` (+ `http://localhost:3000`) as root
+   URLs, with the token from the `GRAFANA_ACCESS_POLICY_TOKEN` repo secret. See `docs/signing.md`.
+   The `QA-Alintech` environment has no blocking approval rule (PR CI runs unattended).
+LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#78 (CI fix)** merged — multi-module compatibility matrix + private signing (QA-Alintech).
+  Full CI incl. 4-version e2e matrix now green.
+- **#77 (PC3)** merged — interactive viewport editor (custom options editor: drag-pan,
+  cursor-anchored wheel-zoom, live readout). Q3 resolved.
+- **#76 (PC2)** merged — viewport interaction maths (pan-delta, cursor-anchored zoom, clamp).
+- **#75 (PC1)** merged — view-mode direct iframe render with CSS-transform viewport.
 - **#74 (F4)** merged — nested Web View panel registered (`src/panels/webview/` with its own
   `plugin.json`, globbed to `dist/panels/webview/`, registered as a child of the app). Demo pages
   removed. Runtime-verified: "Web View" appears in the visualization picker. OPEN-QUESTIONS Q1/Q2
