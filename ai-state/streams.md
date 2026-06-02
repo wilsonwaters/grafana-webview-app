@@ -40,7 +40,7 @@ SECURITY stub, issue/PR templates), plugin settings schema for allowlist/limits,
 Web View panel registration, shared TypeScript options type and Go config type.
 **Depends on:** scaffold (done).
 **Size:** M.
-**Status:** Not started.
+**Status:** ✅ Done — F1–F4 merged (#1, #72, #73, #74).
 
 ### 2. Panel Core & Direct Mode  —  `panel-core`
 **Outcome:** A working Web View panel that renders a direct-iframe URL with a configured
@@ -50,7 +50,9 @@ editor, capture-view, numeric inputs, virtual dimensions, refresh, hide-selector
 multi-instance.
 **Depends on:** foundation.
 **Size:** L.
-**Status:** Not started.
+**Status:** ✅ Done — PC1–PC5 merged (#75, #76, #77, #79, #80). Direct-mode panel shippable;
+verified in Grafana 12.3.6/12.4.3/13.0.1/nightly e2e. (AC 6 reconciled to live-capture;
+hide-selectors deferred to proxy/CR5.)
 
 ### 3. Security Foundation (backend libraries)  —  `security-foundation`
 **Outcome:** Audited, unit-tested Go building blocks (IP blocklist, URL validator,

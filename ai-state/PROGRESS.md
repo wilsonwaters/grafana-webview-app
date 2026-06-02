@@ -11,7 +11,9 @@ plugin settings schema/loader are in place. No real viewport, proxy, or security
 
 ## Currently in flight
 
-- About to dispatch `panel-core` PC4 (#17).
+- None. **foundation + panel-core streams COMPLETE.** Next stream to start:
+  `security-foundation` (#19–#23) — the backend security building blocks required before any
+  proxy work. (BOM radar specifically needs the proxy, which depends on this stream.)
 
 ## CI / signing health (resolved 2026-06-02)
 
@@ -28,6 +30,9 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#80 (PC5)** merged — view-mode behaviours: auto-refresh, debug overlay, multi-instance.
+  hide-selectors deferred to proxy (CR5); OPEN-QUESTIONS Q4 resolved. **panel-core stream done.**
+- **#79 (PC4)** merged — editor numeric inputs, dimension inputs, reset; URL deduped. AC6 reconciled.
 - **#78 (CI fix)** merged — multi-module compatibility matrix + private signing (QA-Alintech).
   Full CI incl. 4-version e2e matrix now green.
 - **#77 (PC3)** merged — interactive viewport editor (custom options editor: drag-pan,
