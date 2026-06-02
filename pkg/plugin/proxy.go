@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/wilsonwaters/webview/pkg/security"
 )
 
@@ -110,6 +111,21 @@ const xGrafanaHeaderPrefix = "x-grafana-"
 // in user) is left to later phases.
 const defaultInstanceID = "default"
 
+// auditAnonymousUser is the user value logged when the proxy request carries no
+// identifiable Grafana user in its plugin context (e.g. a backend-initiated
+// request, or a unit test calling ServeHTTP without a plugin context). Audit
+// entries always carry a user field; this constant keeps it non-empty.
+const auditAnonymousUser = "anonymous"
+
+// auditMissingURL / auditInvalidURL are the placeholder url values logged when
+// the request never yielded a usable target: missing/blank url param, or a url
+// param that could not even be parsed for its hostname. They keep the audit
+// entry meaningful (and the field always present) on the earliest denial paths.
+const (
+	auditMissingURL = "<missing>"
+	auditInvalidURL = "<invalid>"
+)
+
 // proxyHandler holds the per-instance state for the /proxy endpoint: the loaded
 // settings, the rate limiter built from them, and the secure dialer-backed HTTP
 // transport that every upstream fetch flows through. It is constructed once per
@@ -121,6 +137,11 @@ type proxyHandler struct {
 	allowlist   []security.AllowlistEntry
 	rateLimiter *security.RateLimiter
 	transport   http.RoundTripper
+
+	// logger is the structured logger used to emit the per-request audit entry
+	// (P5 / AC 28). It defaults to log.DefaultLogger in newProxyHandler and is
+	// injectable so tests can capture the emitted msg + key/value fields.
+	logger log.Logger
 }
 
 // newProxyHandler builds a proxyHandler from the loaded plugin settings. The
@@ -151,7 +172,69 @@ func newProxyHandler(cfg PluginSettings) *proxyHandler {
 		allowlist:   toAllowlistEntries(cfg.AllowedDomains),
 		rateLimiter: security.NewRateLimiter(cfg.RateLimitPerInstancePerMin, cfg.RateLimitPerDomainPerMin, cfg.MaxConcurrentRequests, domainRateOverrides(cfg.AllowedDomains)),
 		transport:   transport,
+		logger:      log.DefaultLogger,
 	}
+}
+
+// auditResponseWriter wraps the http.ResponseWriter for one /proxy request so
+// the single audit-log emission point can record the final HTTP status and the
+// number of body bytes written — accurately across the success path, the early
+// denial helpers (http.Error), and the ReverseProxy/ErrorHandler writes. It is
+// used by exactly one goroutine per request (the handler), so it needs no
+// locking. WriteHeader is intercepted to capture the status (defaulting to 200
+// if the wrapped writer streams a body without an explicit WriteHeader), and
+// Write counts bytes while propagating the underlying writer's (n, err).
+type auditResponseWriter struct {
+	http.ResponseWriter
+	status      int
+	bytes       int64
+	wroteHeader bool
+}
+
+func newAuditResponseWriter(w http.ResponseWriter) *auditResponseWriter {
+	return &auditResponseWriter{ResponseWriter: w, status: http.StatusOK}
+}
+
+func (a *auditResponseWriter) WriteHeader(status int) {
+	if !a.wroteHeader {
+		a.status = status
+		a.wroteHeader = true
+	}
+	a.ResponseWriter.WriteHeader(status)
+}
+
+func (a *auditResponseWriter) Write(b []byte) (int, error) {
+	// An implicit 200 happens on the first Write without a prior WriteHeader;
+	// mark it so a later (illegal) WriteHeader does not overwrite the captured
+	// status, mirroring net/http's own behaviour.
+	a.wroteHeader = true
+	n, err := a.ResponseWriter.Write(b)
+	a.bytes += int64(n)
+	return n, err
+}
+
+// Flush forwards to the underlying writer when it supports http.Flusher.
+// httputil.ReverseProxy streams responses and flushes periodically; without
+// this passthrough the wrapper would silently swallow those flushes. Guarded by
+// a type assertion so wrapping a non-flushing writer (e.g. some test recorders)
+// is a no-op rather than a panic.
+func (a *auditResponseWriter) Flush() {
+	if f, ok := a.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+// auditUser derives the source Grafana user for the audit entry from the plugin
+// request context. The Grafana user is carried in the plugin context's User
+// (a *backend.User); we log its Login when present. This is the server-side
+// audit of WHO (which Grafana viewer) triggered the fetch — distinct from the
+// outbound request, which P2 deliberately strips of all identity. When no user
+// is identifiable we fall back to auditAnonymousUser so the field is never empty.
+func auditUser(ctx context.Context) string {
+	if u := backend.PluginConfigFromContext(ctx).User; u != nil && u.Login != "" {
+		return u.Login
+	}
+	return auditAnonymousUser
 }
 
 // instanceIDFromContext derives the per-instance rate-limit key from the plugin
@@ -189,6 +272,28 @@ func setCORSHeaders(h http.Header) {
 // (concurrency). On any denial the handler writes the mapped status and returns
 // without contacting the upstream.
 func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// P5 / AC 28: emit EXACTLY ONE structured audit entry per /proxy request,
+	// covering the success path AND every early-return denial below. The wrapper
+	// records the final status + body bytes; start/auditURL/auditUser feed the
+	// remaining fields. A single deferred Info call is the sole emission point —
+	// no per-branch logging — so it cannot be forgotten on a new denial path.
+	start := time.Now()
+	rec := newAuditResponseWriter(w)
+	w = rec
+	// auditURL holds the best-known target for the log line. It starts as the raw
+	// `url` query value (or a placeholder when missing/unparseable) and is
+	// upgraded to the validated, normalised target once the pipeline approves it.
+	auditURL := auditMissingURL
+	defer func() {
+		p.logger.Info("proxy request",
+			"url", auditURL,
+			"user", auditUser(req.Context()),
+			"status", rec.status,
+			"bytes", rec.bytes,
+			"duration", time.Since(start),
+		)
+	}()
+
 	setCORSHeaders(w.Header())
 
 	// CORS preflight: answer and return without running the pipeline.
@@ -209,6 +314,8 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "missing required 'url' query parameter", http.StatusBadRequest)
 		return
 	}
+	// We now have a caller-supplied target; log it even on the denial paths below.
+	auditURL = rawTarget
 
 	// Derive the normalised hostname for the allowlist match BEFORE the full
 	// SF2 validation. We must match the allowlist first to learn the matched
@@ -217,6 +324,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// (declared per-domain) would be rejected before the allowlist is consulted.
 	hostname, herr := hostnameOf(rawTarget)
 	if herr != nil {
+		auditURL = auditInvalidURL
 		http.Error(w, "invalid target URL: "+security.ReasonOf(herr), validationStatus(security.ReasonOf(herr)))
 		return
 	}
@@ -264,6 +372,8 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "invalid target URL", http.StatusBadRequest)
 		return
 	}
+	// Log the validated, normalised target rather than the raw caller string.
+	auditURL = target.String()
 
 	p.serveProxy(w, req, target)
 }
