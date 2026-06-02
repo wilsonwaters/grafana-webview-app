@@ -30,6 +30,12 @@ type App struct {
 	// It is populated once in NewApp and is safe for concurrent read access
 	// thereafter (the SDK creates a new App when settings change).
 	Config PluginSettings
+
+	// proxy is the /proxy endpoint handler, built once in NewApp from Config.
+	// It owns the per-instance/per-domain rate limiter, the in-flight
+	// concurrency cap, and the secure-dialer-backed HTTP transport, and is safe
+	// for concurrent use.
+	proxy *proxyHandler
 }
 
 // NewApp creates a new *App instance. It parses the plugin settings from
@@ -44,6 +50,11 @@ func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemg
 
 	var app App
 	app.Config = cfg
+
+	// Build the proxy handler once from settings. It constructs the rate
+	// limiter (including per-domain overrides) and the secure-dialer-backed
+	// transport; keyed rate-limit buckets are created lazily on first use.
+	app.proxy = newProxyHandler(cfg)
 
 	// Use a httpadapter (provided by the SDK) for resource calls. This allows us
 	// to use a *http.ServeMux for resource calls, so we can map multiple routes

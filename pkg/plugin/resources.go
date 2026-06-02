@@ -41,4 +41,7 @@ func (a *App) handleEcho(w http.ResponseWriter, req *http.Request) {
 func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ping", a.handlePing)
 	mux.HandleFunc("/echo", a.handleEcho)
+	if a.proxy != nil {
+		mux.Handle(proxyPath, a.proxy)
+	}
 }
