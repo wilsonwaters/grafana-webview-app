@@ -3,17 +3,17 @@
 | Task | Issue # | Title | Stream | Size | Status |
 |------|---------|-------|--------|------|--------|
 | F1 | #1 | Repo hygiene files | foundation | S | done |
-| F2 | #11 | Define shared panel options type (TS + Go) | foundation | M | ready |
-| F3 | #12 | Define plugin settings schema with safe defaults | foundation | M | ready |
-| F4 | #13 | Register nested Web View panel inside the app plugin | foundation | M | ready |
-| PC1 | #14 | View-mode iframe render with CSS transform viewport | panel-core | M | blocked |
-| PC2 | #15 | Viewport transform math helpers and unit tests | panel-core | M | blocked |
-| PC3 | #16 | Config-mode editor — drag-pan and wheel-zoom interactive preview | panel-core | M | blocked |
-| PC4 | #17 | Config-mode editor — capture view and manual inputs | panel-core | M | blocked |
-| PC5 | #18 | View-mode behaviours: refresh, hide-selectors, debug overlay, multi-instance | panel-core | M | blocked |
-| SF1 | #19 | IP blocklist library — classify private/reserved/special-use ranges | security-foundation | M | blocked |
-| SF2 | #20 | URL validator — scheme allowlist, port restriction, hostname normalisation | security-foundation | M | blocked |
-| SF3 | #21 | Allowlist matcher — exact/subdomain matching with per-domain options | security-foundation | M | blocked |
+| F2 | #11 | Define shared panel options type (TS + Go) | foundation | M | done |
+| F3 | #12 | Define plugin settings schema with safe defaults | foundation | M | done |
+| F4 | #13 | Register nested Web View panel inside the app plugin | foundation | M | done |
+| PC1 | #14 | View-mode iframe render with CSS transform viewport | panel-core | M | done |
+| PC2 | #15 | Viewport transform math helpers and unit tests | panel-core | M | done |
+| PC3 | #16 | Config-mode editor — drag-pan and wheel-zoom interactive preview | panel-core | M | done |
+| PC4 | #17 | Config-mode editor — capture view and manual inputs | panel-core | M | done |
+| PC5 | #18 | View-mode behaviours: refresh, hide-selectors, debug overlay, multi-instance | panel-core | M | done |
+| SF1 | #19 | IP blocklist library — classify private/reserved/special-use ranges | security-foundation | M | done |
+| SF2 | #20 | URL validator — scheme allowlist, port restriction, hostname normalisation | security-foundation | M | done |
+| SF3 | #21 | Allowlist matcher — exact/subdomain matching with per-domain options | security-foundation | M | ready |
 | SF4 | #22 | DNS-resolve-then-dial helper — validate resolved IP before connecting | security-foundation | M | blocked |
 | SF5 | #23 | Rate limiter and concurrency cap with configurable defaults | security-foundation | M | blocked |
 | FR1 | #24 | Backend /check-frameable endpoint through full security pipeline | frameability | M | blocked |

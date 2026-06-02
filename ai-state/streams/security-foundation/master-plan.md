@@ -43,3 +43,13 @@ written here.
 ## Changelog
 
 - Initialised at project kickoff (planning). No tasks dispatched yet.
+- **SF1 (#81) merged** — hardcoded IP blocklist (`pkg/security/ipblocklist.go`), `ClassifyIP`/`IsAllowed`,
+  fail-closed, IPv4-mapped-IPv6 unwrap, ~96% coverage.
+- **SF2 (#82) merged** — URL validator (`pkg/security/urlvalidator.go`): `ValidateURL` +
+  `NormalizeHostname` + `ReasonOf`, http/https scheme allowlist, port restriction (80/443 +
+  per-domain `DomainOptions.AllowedPorts`), lowercase/trailing-dot/IDN→punycode normalisation
+  (`x/net/idna` Lookup profile), IP-literal short-circuit consistent with SF1, 97.6% coverage.
+  Review APPROVE, CI green. **Carry-forward to consumers:** (1) SF3 must canonicalise admin allowlist
+  entries via `NormalizeHostname` (homograph/IDN folding) and not treat obfuscated IP-literals as
+  domains; (2) SF4 must resolve/classify decimal/octal/hex IP-literal encodings through SF1 before
+  dialling (SSRF obfuscation). Notes recorded on #21 and #22.

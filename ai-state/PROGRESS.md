@@ -6,7 +6,7 @@ Narrative log of project status, maintained primarily by the orchestrator agent.
 
 Setup complete and the **execution loop is running** (task branch → PR → review → CI-green →
 squash-merge into `main`). **foundation (F1–F4) and panel-core (PC1–PC5) are DONE; security-
-foundation is in progress (SF1 #81 merged).** The plugin is a **shippable direct-mode Web View
+foundation is in progress (SF1 #81, SF2 #82 merged).** The plugin is a **shippable direct-mode Web View
 panel** today: sandboxed iframe at a configured viewport, interactive editor (drag-pan/wheel-zoom +
 numeric inputs/reset), auto-refresh, debug overlay, multi-instance — e2e-verified across Grafana
 12.3.6/12.4.3/13.0.1/nightly and privately signed. No proxy or security *enforcement* wired yet
@@ -17,7 +17,7 @@ content-rewriting, which is the path to a framing-blocked site like the BOM rada
 
 Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `streams.md`,
 `board-map.md`, `OPEN-QUESTIONS.md`, and the relevant `streams/<name>/master-plan.md`. Then
-`mcp__github__list_issues` (label `status:ready`) and continue at **SF2 (#20)**. A few quirks
+`mcp__github__list_issues` (label `status:ready`) and continue at **SF3 (#21)**. A few quirks
 that are NOT obvious from the code:
 
 - **Always check real GitHub CI on each PR** (`pull_request_read get_check_runs`), not just local
@@ -43,14 +43,16 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **SF2 (#20) URL validator** — implementation sub-agent dispatched (branch `sf2-url-validator`,
-  PR into `main`). Pure backend Go library in `pkg/security/` (sibling of SF1): scheme allowlist
-  (http/https), port restriction (80/443 + per-domain extra ports from `DomainOptions.AllowedPorts`),
-  hostname normalisation + IDN→punycode. Issue labelled `status:in-progress`. Awaiting PR, then an
-  independent review pass (no runtime verification needed — internal library, no endpoint).
-- Then: SF3 (#21) allowlist matcher → SF4 (#22) DNS-resolve-then-dial → SF5 (#23) rate limiter.
-  Then frameability (#24–27) → proxy (#28–34) → content-rewriting (#35–39). The BOM radar test
-  becomes possible once proxy + content-rewriting land.
+- **SF3 (#21) allowlist matcher** — next up; implementation sub-agent being dispatched. Pure backend
+  Go library in `pkg/security/`: exact + subdomain matching against the admin allowlist, per-domain
+  options (subdomains, private-IP opt-in, port/rate overrides), empty-list-denies-all (fail-closed).
+  Two carry-forward notes from the SF2 review are recorded on #21: reuse `security.NormalizeHostname`
+  to canonicalise BOTH the request host and the configured allowlist entries (IDN/homograph folding),
+  and don't treat obfuscated IP-literal encodings as matchable domains.
+- Then: SF4 (#22) DNS-resolve-then-dial → SF5 (#23) rate limiter. Then frameability (#24–27) →
+  proxy (#28–34) → content-rewriting (#35–39). The BOM radar test becomes possible once proxy +
+  content-rewriting land. (SF4 carry-forward note re: decimal/octal/hex IP-literal SSRF obfuscation
+  is recorded on #22.)
 
 ## Screenshots convention (added 2026-06-02)
 
@@ -74,6 +76,13 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#82 (SF2)** merged — URL validator library (`pkg/security/urlvalidator.go`): http/https scheme
+  allowlist, port restriction (80/443 + per-domain `DomainOptions.AllowedPorts`), hostname
+  normalisation (lowercase, trailing-dot strip) + IDN→punycode via `x/net/idna` (Lookup profile,
+  fails closed), stable `Reason*` tokens, userinfo/malformed rejection. IP-literal hosts short-circuit
+  IDNA and canonicalise to match SF1's form. 97.6% coverage, 128 subtests. Independent review APPROVE,
+  full CI green (incl. 4-version e2e). Also brought SF1's `ipblocklist.go` to gofmt-clean (whitespace
+  only). Carry-forward security notes propagated to #21 (SF3) and #22 (SF4).
 - **#81 (SF1)** merged — hardcoded IP-blocklist library (`pkg/security/`), fail-closed, IPv4-mapped
   IPv6 unwrap, ~50 tests, 96% coverage. (security-foundation stream started.)
 - **#80 (PC5)** merged — view-mode behaviours: auto-refresh, debug overlay, multi-instance.
