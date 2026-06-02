@@ -51,6 +51,16 @@ needed; do not paste large chunks into your context.
 - **Headless tester.** Playwright Chromium is installed (`PLAYWRIGHT_BROWSERS_PATH`
   may point at `/opt/pw-browsers`). Runtime/system-verification agents drive it
   via `@grafana/plugin-e2e` / Playwright scripts.
+- **PR screenshots MUST be viewable, not `/tmp` paths.** Runtime-verification
+  screenshots live only in the ephemeral sandbox, so a bare `/tmp/...` path in a PR
+  body is invisible to reviewers. Convention: save verification screenshots into
+  `docs/screenshots/issue-<N>/<name>.png`, commit them on the task branch, and embed
+  them in the PR body with a raw URL:
+  `![desc](https://raw.githubusercontent.com/wilsonwaters/grafana-webview-app/<branch>/docs/screenshots/issue-<N>/<name>.png)`.
+  They render during review and (because we squash-merge) persist on `main`
+  afterwards. Keep to a few key shots per PR; curate/prune in the docs milestone.
+  Instruct every runtime/impl sub-agent to do this — never leave a `/tmp` path as the
+  only reference.
 
 ## Security-content handling (MANDATORY)
 
