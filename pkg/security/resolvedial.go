@@ -14,8 +14,16 @@
 //  4. Dial the exact validated IP, not the hostname, so a later DNS answer
 //     cannot redirect the connection. A net.Dialer.Control hook independently
 //     re-validates the concrete IP the OS is about to connect to, catching a
-//     rebind that slips between resolution and connect and canonicalising any
-//     obfuscated IP-literal encoding (decimal/octal/hex) before the SF1 check.
+//     rebind that slips between resolution and connect. It is the authoritative
+//     gate for any IP that reaches the dial path.
+//
+// A note on obfuscated IP-literal encodings (decimal "2130706433", octal
+// "0177.0.0.1", hex "0x7f.0.0.1"): Go's resolver does NOT parse these forms.
+// Passed as a host they are treated as a hostname, sent to DNS, fail to resolve
+// (NXDOMAIN) and are rejected with ReasonResolveFailed (fail closed) — they
+// never reach Control. The residual risk is a *caller* that pre-parses such a
+// form into a real IP (some libc getaddrinfo configurations do); that caller
+// must classify the result through SF1 (ClassifyIP) before passing it here.
 //
 // Like the rest of this package it is a pure standard-library leaf: it imports
 // no project packages, takes its only dependency (the resolver) as an injected
@@ -66,6 +74,10 @@ const (
 // The corresponding metadata IP (169.254.169.254) is already blocked by SF1's
 // link-local range; blocking by name as well stops a request whose hostname is
 // a metadata alias from ever being resolved, and documents intent.
+//
+// This name set is GCP-specific by design: AWS, Azure and Alibaba expose their
+// metadata service only via the bare 169.254.169.254 IP (no DNS name), which
+// SF1 already blocks at the IP layer, so no name entries are needed for them.
 var metadataHostnames = map[string]struct{}{
 	"metadata.google.internal": {}, // GCP
 	"metadata.goog":            {}, // GCP short alias
@@ -179,13 +191,16 @@ func ResolveAndValidate(ctx context.Context, resolver Resolver, host string) ([]
 	return ips, nil
 }
 
-// validateConnectAddr is the net.Dialer.Control body. It runs for the concrete
-// address the OS is about to connect to, after Go's net stack has parsed and
-// canonicalised the host (so obfuscated literals such as decimal "2130706433",
-// octal "0177.0.0.1", or hex "0x7f.0.0.1" arrive here as their canonical
-// 127.0.0.1). Re-classifying here is the defence-in-depth check that defeats a
-// DNS rebind landing between resolution and connect: it does not trust the
-// earlier ResolveAndValidate result, it validates the actual wire address.
+// validateConnectAddr is the net.Dialer.Control body and the authoritative
+// connect-time gate. It runs for the concrete address the OS is about to
+// connect to, parses it as an IP literal, and re-classifies it through SF1.
+// Re-classifying here is the defence-in-depth check that defeats a DNS rebind
+// landing between resolution and connect: it does not trust the earlier
+// ResolveAndValidate result, it validates the actual wire address. The address
+// it receives is always a canonical dotted/colon IP literal because DialContext
+// dials a net.JoinHostPort of an already-resolved net.IP; obfuscated literal
+// encodings never reach this point (see the package doc — they fail DNS
+// resolution upstream).
 func validateConnectAddr(address string) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
@@ -281,11 +296,10 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	// Take a copy of the base dialer per call and install the connect-time
 	// re-validation guard. All resolved IPs already passed SF1; the Control
 	// hook is the defence-in-depth check against a rebind between resolve and
-	// connect and the canonicaliser for any obfuscated literal.
+	// connect. It is the single authoritative gate (NewControl), shared with
+	// callers that assemble their own dialer, so the gate has one definition.
 	dialer := *d.base
-	dialer.Control = func(_, address string, _ syscall.RawConn) error {
-		return validateConnectAddr(address)
-	}
+	dialer.Control = NewControl()
 
 	// Dial the first validated IP directly. Every IP in the slice has already
 	// been validated, so the choice of the first is purely for determinism; the

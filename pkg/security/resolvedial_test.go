@@ -221,46 +221,73 @@ func TestControl_AllowsPublicIP(t *testing.T) {
 	}
 }
 
-// Carry-forward (SF2 review): obfuscated IP-literal encodings (decimal, octal,
-// hex) all canonicalise to 127.0.0.1 (or the metadata IP) by the time Go's net
-// stack hands the address to Control. We assert the canonical connect addresses
-// are blocked at the Control layer — the exact layer that sees the wire IP.
-func TestControl_BlocksObfuscatedLoopbackAndMetadata(t *testing.T) {
+// Control blocks the *canonical* loopback and metadata connect addresses. This
+// is what Control actually sees in production: DialContext hands it the
+// net.JoinHostPort of an already-resolved net.IP, i.e. a canonical dotted-IP
+// literal. It does NOT exercise obfuscated encodings (those never reach Control
+// — see TestObfuscatedHost_RejectedByResolveFailure for the real #22 path).
+func TestControl_BlocksCanonicalLoopbackAndMetadataConnectAddr(t *testing.T) {
 	ctrl := NewControl()
-	// These are the canonical addresses Go produces from the obfuscated forms
-	// noted on #22: decimal 2130706433, octal 0177.0.0.1, hex 0x7f.0.0.1 all
-	// decode to 127.0.0.1; decimal 2852039166 / 0xA9FEA9FE decode to the
-	// metadata IP 169.254.169.254.
 	cases := []struct {
 		name string
 		addr string
 	}{
-		{"decimal_loopback_2130706433", "127.0.0.1:80"},
-		{"octal_loopback_0177.0.0.1", "127.0.0.1:80"},
-		{"hex_loopback_0x7f.0.0.1", "127.0.0.1:80"},
-		{"decimal_metadata", "169.254.169.254:80"},
-		{"hex_metadata", "169.254.169.254:80"},
+		{"loopback", "127.0.0.1:80"},
+		{"metadata", "169.254.169.254:80"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if err := ctrl("tcp4", tc.addr, nil); err == nil {
-				t.Fatalf("Control must block canonicalised obfuscated address %s", tc.addr)
+				t.Fatalf("Control must block canonical address %s", tc.addr)
 			}
 		})
 	}
 }
 
-// Sanity: Go's net.ParseIP actually canonicalises the obfuscated decimal/octal
-// /hex forms, so the SF1 ClassifyIP path blocks them. This pins the assumption
-// behind TestControl_BlocksObfuscatedLoopbackAndMetadata.
-func TestObfuscatedLiterals_CanonicaliseAndClassifyBlocked(t *testing.T) {
-	// net.ParseIP does not parse non-dotted decimal/octal/hex; those are
-	// canonicalised by the resolver/dial path, not ParseIP. What we can pin
-	// here is that the canonical 127.0.0.1 / metadata IP classify as blocked.
-	for _, ip := range []string{"127.0.0.1", "169.254.169.254"} {
-		if blocked, _ := ClassifyIP(net.ParseIP(ip)); !blocked {
-			t.Fatalf("expected %s to be blocked by SF1", ip)
+// Pin the empirical fact the #22 rationale rests on: Go's net.ParseIP does NOT
+// parse obfuscated IP-literal encodings (non-dotted decimal, octal, hex). It
+// returns nil for each, which is why a net.Dialer treats such a string as a
+// hostname and sends it to DNS rather than dialing a loopback IP.
+func TestObfuscatedLiterals_NotParsedByParseIP(t *testing.T) {
+	for _, s := range []string{"2130706433", "0177.0.0.1", "0x7f.0.0.1"} {
+		if ip := net.ParseIP(s); ip != nil {
+			t.Fatalf("net.ParseIP(%q) = %v, want nil (obfuscated forms are not parsed)", s, ip)
 		}
+	}
+}
+
+// Genuine #22 carry-forward test. An obfuscated IP-literal encoding passed as a
+// host is NOT canonicalised by Go's resolver; it is treated as a hostname and
+// fails DNS resolution (NXDOMAIN). The stub resolver mirrors that real
+// behaviour by returning a resolution error for these inputs, and we assert the
+// request is rejected with ReasonResolveFailed (fail closed). The safe outcome
+// here is resolution failure, NOT any canonicalisation at Control.
+func TestObfuscatedHost_RejectedByResolveFailure(t *testing.T) {
+	obfuscated := []string{"2130706433", "0177.0.0.1", "0x7f.0.0.1"}
+	for _, host := range obfuscated {
+		t.Run(host, func(t *testing.T) {
+			// Real resolvers return NXDOMAIN for these non-hostname strings.
+			r := &stubResolver{err: errors.New("nxdomain")}
+			if _, err := ResolveAndValidate(context.Background(), r, host); err == nil ||
+				DialReasonOf(err) != ReasonResolveFailed {
+				t.Fatalf("ResolveAndValidate(%q): expected ReasonResolveFailed, got %v", host, err)
+			}
+			if r.lastHost != host {
+				t.Fatalf("resolver asked for %q, want the obfuscated host %q (passed as a name, not canonicalised)", r.lastHost, host)
+			}
+
+			// And through DialContext (host:port form): same fail-closed result.
+			rd := &stubResolver{err: errors.New("nxdomain")}
+			d := NewDialer(rd, &net.Dialer{})
+			conn, derr := d.DialContext(context.Background(), "tcp", net.JoinHostPort(host, "80"))
+			if conn != nil {
+				conn.Close()
+				t.Fatalf("DialContext(%q) connected; must fail closed on resolve failure", host)
+			}
+			if DialReasonOf(derr) != ReasonResolveFailed {
+				t.Fatalf("DialContext(%q): expected ReasonResolveFailed, got %v", host, derr)
+			}
+		})
 	}
 }
 
