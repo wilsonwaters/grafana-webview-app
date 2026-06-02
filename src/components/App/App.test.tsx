@@ -25,14 +25,13 @@ describe('Components/App', () => {
     } as unknown as AppRootProps;
   });
 
-  test('renders without an error"', async () => {
+  test('renders the app root without an error', async () => {
     const { queryByText } = render(
       <MemoryRouter>
         <App {...props} />
       </MemoryRouter>
     );
 
-    // Application is lazy loaded, so we need to wait for the component and routes to be rendered
-    await waitFor(() => expect(queryByText(/this is page one./i)).toBeInTheDocument(), { timeout: 2000 });
+    await waitFor(() => expect(queryByText(/Web View/i)).toBeInTheDocument(), { timeout: 2000 });
   });
 });
