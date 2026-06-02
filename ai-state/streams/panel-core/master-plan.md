@@ -56,3 +56,11 @@ demonstrable panel state.
   a **custom panel options editor** (rendered by Grafana only in the edit pane), so the panel
   component never needs to detect edit-vs-view mode and view mode stays non-interactive. PC3
   follows this approach.
+- 2026-06-02: CI/signing fixed (#78) — compatibility check runs as a matrix over both module
+  entrypoints; private signing via the QA-Alintech env `GRAFANA_INSTANCE_URL` (+ localhost).
+  Full CI incl. the 4-version e2e matrix is green.
+- 2026-06-02: AC 6 ("Capture current view" button) reconciled with the Q3 custom-editor design:
+  the editor commits viewport changes live as the author positions the preview, so explicit
+  capture is redundant. AC 6 is satisfied implicitly by live capture; PC4 adds a "Reset view"
+  button instead of a no-op capture button. Issue #17 updated. (Spec update, not a copout —
+  per methodology, fix-or-update-spec rather than interpret.)
