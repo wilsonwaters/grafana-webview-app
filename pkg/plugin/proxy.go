@@ -10,10 +10,12 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/wilsonwaters/webview/pkg/security"
 )
 
@@ -142,6 +144,11 @@ type proxyHandler struct {
 	// (P5 / AC 28). It defaults to log.DefaultLogger in newProxyHandler and is
 	// injectable so tests can capture the emitted msg + key/value fields.
 	logger log.Logger
+
+	// metrics holds the Prometheus collectors for the endpoint (P6 / AC 29).
+	// newProxyHandler registers them against prometheus.DefaultRegisterer so they
+	// surface on the SDK's /metrics endpoint; tests inject a fresh registry.
+	metrics *proxyMetrics
 }
 
 // newProxyHandler builds a proxyHandler from the loaded plugin settings. The
@@ -151,6 +158,53 @@ type proxyHandler struct {
 // per-request connection timeout from settings (the trivial transport-timeout
 // wiring permitted in P1; full body-size/total-timeout enforcement is P4).
 func newProxyHandler(cfg PluginSettings) *proxyHandler {
+	return newProxyHandlerWithRegistry(cfg, defaultProxyMetricsRegisterer())
+}
+
+// defaultProxyMetricsRegisterer returns the Prometheus registerer the production
+// /proxy handler registers its collectors against. It is prometheus.DefaultRegisterer
+// — whose default registry backs prometheus.DefaultGatherer, which the SDK's
+// diagnostics adapter serves on the plugin's standard /metrics endpoint
+// (see grafana-plugin-sdk-go backend/serve.go: the DiagnosticsServer is built
+// with newDiagnosticsSDKAdapter(prometheus.DefaultGatherer, handler)).
+//
+// The collectors are built exactly ONCE via sync.Once and reused on every
+// subsequent newProxyHandler call. A Grafana app instance constructs a single
+// proxyHandler, but the unit-test suite constructs many through newProxyHandler;
+// without the once-guard the second construction would panic on duplicate
+// registration against the shared default registry. Tests that need to assert
+// metric values in isolation call newProxyHandlerWithRegistry with a fresh
+// prometheus.NewRegistry() instead.
+func defaultProxyMetricsRegisterer() prometheus.Registerer {
+	return prometheus.DefaultRegisterer
+}
+
+var (
+	defaultProxyMetricsOnce sync.Once
+	defaultProxyMetrics     *proxyMetrics
+)
+
+// newProxyHandlerWithRegistry builds a proxyHandler exactly like newProxyHandler
+// but registers the Prometheus collectors against the supplied registerer. When
+// reg is prometheus.DefaultRegisterer the once-built shared metrics are reused
+// (so repeated construction never double-registers); any other registerer (a
+// fresh test registry) gets its own freshly-built collectors for isolated
+// assertions.
+func newProxyHandlerWithRegistry(cfg PluginSettings, reg prometheus.Registerer) *proxyHandler {
+	h := buildProxyHandler(cfg)
+	if reg == prometheus.DefaultRegisterer {
+		defaultProxyMetricsOnce.Do(func() {
+			defaultProxyMetrics = newProxyMetrics(reg)
+		})
+		h.metrics = defaultProxyMetrics
+	} else {
+		h.metrics = newProxyMetrics(reg)
+	}
+	return h
+}
+
+// buildProxyHandler constructs the proxyHandler's non-metrics state.
+func buildProxyHandler(cfg PluginSettings) *proxyHandler {
 	timeout := time.Duration(cfg.RequestTimeoutSec) * time.Second
 
 	secureDialer := security.NewDialer(nil, &net.Dialer{
@@ -284,7 +338,18 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// `url` query value (or a placeholder when missing/unparseable) and is
 	// upgraded to the validated, normalised target once the pipeline approves it.
 	auditURL := auditMissingURL
+
+	// P6 / AC 29: count this request as in-flight for the whole handler, and emit
+	// the per-request metrics once in the SAME single deferred block as the audit
+	// log. denied carries the denial-reason token a branch sets on its way out
+	// (empty for the success/upstream-served path); observeRequest records the
+	// requests_total{status} counter + duration histogram always, and the
+	// denials_total{reason} counter only when denied is non-empty.
+	p.metrics.inFlight.Inc()
+	var denied string
 	defer func() {
+		p.metrics.inFlight.Dec()
+		p.metrics.observeRequest(rec.status, time.Since(start).Seconds(), denied)
 		p.logger.Info("proxy request",
 			"url", auditURL,
 			"user", auditUser(req.Context()),
@@ -303,6 +368,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if req.Method != http.MethodGet {
+		denied = denialReasonMethod
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -311,6 +377,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// req.URL.Query() decodes it for us.
 	rawTarget := req.URL.Query().Get("url")
 	if strings.TrimSpace(rawTarget) == "" {
+		denied = denialReasonBadRequest
 		http.Error(w, "missing required 'url' query parameter", http.StatusBadRequest)
 		return
 	}
@@ -325,6 +392,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	hostname, herr := hostnameOf(rawTarget)
 	if herr != nil {
 		auditURL = auditInvalidURL
+		denied = denialReasonScheme
 		http.Error(w, "invalid target URL: "+security.ReasonOf(herr), validationStatus(security.ReasonOf(herr)))
 		return
 	}
@@ -333,6 +401,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// denies everything (fail-closed default).
 	match := security.MatchHostname(hostname, p.allowlist)
 	if !match.Allowed {
+		denied = denialReasonAllowlist
 		http.Error(w, "target host is not allowlisted", http.StatusForbidden)
 		return
 	}
@@ -342,6 +411,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// all map to 400 (P7 will formalise reason-specific handling and metrics).
 	validated, err := security.ValidateURL(rawTarget, match.Options.AllowedPorts)
 	if err != nil {
+		denied = denialReasonScheme
 		http.Error(w, "invalid target URL: "+security.ReasonOf(err), validationStatus(security.ReasonOf(err)))
 		return
 	}
@@ -349,12 +419,14 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// SF5: rate-limit tiers (per instance, per domain), then concurrency cap.
 	instanceID := instanceIDFromContext(req)
 	if allowed, reason := p.rateLimiter.Allow(instanceID, validated.Hostname); !allowed {
+		denied = denialReasonRateLimit
 		http.Error(w, "rate limit exceeded: "+reason, http.StatusTooManyRequests)
 		return
 	}
 
 	release, ok := p.rateLimiter.Acquire()
 	if !ok {
+		denied = denialReasonConcurrency
 		http.Error(w, "too many concurrent proxy requests", http.StatusTooManyRequests)
 		return
 	}
@@ -369,13 +441,19 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if perr != nil {
 		// Should not happen — rawTarget already parsed cleanly in ValidateURL —
 		// but fail closed.
+		denied = denialReasonBadRequest
 		http.Error(w, "invalid target URL", http.StatusBadRequest)
 		return
 	}
 	// Log the validated, normalised target rather than the raw caller string.
 	auditURL = target.String()
 
-	p.serveProxy(w, req, target)
+	// The pipeline approved the request; any further denial is decided by the
+	// ReverseProxy's ErrorHandler (a dial-time blocked IP/metadata host, an
+	// over-size response, an upstream timeout, or a gateway failure). serveProxy
+	// returns the denial-reason token for that outcome (empty when the upstream
+	// was served cleanly) so the deferred metrics emission records it.
+	denied = p.serveProxy(w, req, target)
 }
 
 // hostnameOf extracts and normalises the hostname from rawTarget for the
@@ -442,9 +520,17 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 // endpoint, frame-buster removal) and redirect Location rewriting. The
 // subresource URL scheme is intentionally NOT designed here (Q9: P1 only ships
 // the top-level /proxy?url= fetch).
-func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL) {
+//
+// It returns the denial-reason token for a request the ErrorHandler rejected
+// (size-limit / timeout / ip-blocklist / metadata / upstream) or the empty
+// string when the upstream response was served cleanly, so the caller's deferred
+// metrics emission can record denials_total for the right reason. The ErrorHandler
+// runs synchronously inside rp.ServeHTTP, so capturing into a local here is
+// race-free for this single-goroutine-per-request handler.
+func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL) string {
 	maxBytes := p.cfg.MaxResponseBytes
 
+	var denied string
 	rp := &httputil.ReverseProxy{
 		Transport: p.transport,
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -470,7 +556,9 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			}
 			return stripFramingHeaders(resp)
 		},
-		ErrorHandler: proxyErrorHandler,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			denied = proxyErrorHandler(w, r, err)
+		},
 	}
 
 	// P4 / Q10: ONE total per-request budget. RequestTimeoutSec is the whole
@@ -483,6 +571,7 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 	defer cancel()
 
 	rp.ServeHTTP(w, req.WithContext(ctx))
+	return denied
 }
 
 // enforceResponseSize applies the MaxResponseBytes cap to an upstream response.
@@ -580,21 +669,25 @@ func stripRequestHeaders(h http.Header) {
 // response (P4) maps to 413; a per-request timeout (P4: the total-budget context
 // deadline, or any net.Error timeout) maps to 504; everything else is an
 // upstream/gateway failure (502).
-func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) {
+//
+// It returns the P6 denial-reason token for the outcome it wrote, so the handler
+// can increment denials_total{reason} for ErrorHandler-driven denials. P6 only
+// OBSERVES the reason; the status mapping itself is unchanged (P7 refines it).
+func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) string {
 	setCORSHeaders(w.Header())
 	switch reason := security.DialReasonOf(err); reason {
 	case security.ReasonBlockedIP, security.ReasonMetadataHost:
 		http.Error(w, "target resolves to a blocked address", http.StatusForbidden)
-		return
+		return denialReasonIPBlocklist
 	case security.ReasonResolveFailed, security.ReasonNoHost:
 		http.Error(w, "target host could not be resolved", http.StatusBadGateway)
-		return
+		return denialReasonMetadata
 	}
 	// P4: response body exceeded the configured size limit (clean Content-Length
 	// path — no body bytes streamed yet) ⇒ 413.
 	if errors.Is(err, errResponseTooLarge) {
 		http.Error(w, "upstream response exceeds maximum allowed size", http.StatusRequestEntityTooLarge)
-		return
+		return denialReasonSizeLimit
 	}
 	// P4: the total per-request budget (Q10) expired ⇒ 504. The transport
 	// surfaces the context deadline as context.DeadlineExceeded; a stalled
@@ -602,9 +695,10 @@ func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) {
 	var netErr net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
 		http.Error(w, "upstream request timed out", http.StatusGatewayTimeout)
-		return
+		return denialReasonTimeout
 	}
 	http.Error(w, "upstream request failed", http.StatusBadGateway)
+	return denialReasonUpstream
 }
 
 // frameAncestorsDirective is the CSP directive that controls who may frame a
