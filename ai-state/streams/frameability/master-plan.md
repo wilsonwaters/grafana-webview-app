@@ -43,3 +43,7 @@ visible, saved result.
 - **Stream STARTED** (after content-rewriting completed; stakeholder chose frameability next). Open questions
   RESOLVED: Q7 (recommendedMode — denials→error codes; pass→200 with direct/proxy, ambiguous/error→proxy);
   Q8 (/health = bare liveness). FR1 (#24) + FR2 (#25) dispatched in parallel (both backend, independent).
+- **FR1 (#99) + FR2 (#98) merged.** `/check-frameable` (full pipeline + SF4 transport, SSRF-safe, Q7 contract,
+  reuses proxyHandler) and `/health` (bare liveness). Backend frameability done. **FR3 (#26) — in flight**:
+  frontend Test-URL button (React/TS) calling `/check-frameable` via `getBackendSrv()`, showing Direct/
+  Proxied/Error, persisting `detectedMode`. Then FR4 (load-mode selector + view-mode wiring).
