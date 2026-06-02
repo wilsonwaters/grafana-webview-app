@@ -17,6 +17,9 @@ jobs:
   build:
     name: Build, lint and unit tests
     runs-on: ubuntu-latest
+    # The QA-Alintech environment provides the GRAFANA_INSTANCE_URL variable used
+    # as a private-signing root URL. The access policy token is a repository secret.
+    environment: QA-Alintech
     outputs:
       plugin-id: ${{ steps.metadata.outputs.plugin-id }}
       plugin-version: ${{ steps.metadata.outputs.plugin-version }}
@@ -89,8 +92,12 @@ jobs:
             echo "has-e2e=true" >> $GITHUB_OUTPUT
           fi
 
-      - name: Sign plugin
-        run: npm run sign
+      # Private signing. The plugin is not in the Grafana catalog, so a public/
+      # community signature would be rejected (HTTP 409). We sign privately for the
+      # deployment host (GRAFANA_INSTANCE_URL) plus http://localhost:3000 so the
+      # signed build also loads in the CI e2e Grafana and in local testing.
+      - name: Sign plugin (private)
+        run: npm run sign -- --rootUrls "http://localhost:3000,${{ vars.GRAFANA_INSTANCE_URL }}"
         if: ${{ env.GRAFANA_ACCESS_POLICY_TOKEN != '' }}
 
       - name: Get plugin metadata
