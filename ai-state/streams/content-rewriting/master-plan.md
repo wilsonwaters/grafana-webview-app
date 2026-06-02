@@ -47,6 +47,10 @@ radar) renders with working CSS/images/JS in the panel.
   `// CR2:` rewrite seam. Security: `Accept-Encoding: gzip` pinned outbound to stop net/http's transparent
   unbounded auto-decompress; single decode bounded by `MaxResponseBytes` (gzip-bomb → 413). deflate/br
   out of scope (pass through).
-- **CR2 (#36) — design pass in progress** (L task). Resolving Q9 (subresource URL scheme: query-encoded
-  vs path-embedded) + the `<base href>` strategy, which attributes to rewrite, and Q11 (frame-buster
-  pattern set) BEFORE implementation, per the L-task methodology.
+- **CR2 (#94) merged** — goquery HTML rewriting per the approved design (Q9 query-encoded, Q11
+  frame-buster marker-pair set; see `architecture-notes.md`). Rewrites subresource/navigation URLs,
+  injects/fixes `<base href>`, removes CSP/refresh meta + inline frame-busters; restructured the seam so
+  ALL HTML is rewritten; goquery-escaped (XSS-safe); degrades to original on rewrite error. 92.7%.
+- **CR3 (#37) — in flight** — `/proxy-resource` endpoint serving the rewritten subresource URLs through
+  the SAME pipeline/header policy as `/proxy` (no rewrite, Content-Type preserved, size-limited). After
+  CR3, an allowlisted framing-blocked page renders. Then CR4 (redirects) + CR5 (hide-selectors).

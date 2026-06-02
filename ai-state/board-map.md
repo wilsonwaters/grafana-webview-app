@@ -28,8 +28,8 @@
 | P6 | #33 | Prometheus metrics — request counters, denial reasons, in-flight gauge, duration histogram | proxy | M | done |
 | P7 | #34 | Rate-limit and denial HTTP response wiring with metrics reasons | proxy | S | done |
 | CR1 | #35 | gzip handling and HTML detection in ModifyResponse | content-rewriting | M | done |
-| CR2 | #36 | goquery HTML rewriting — base href, URL rewrite, frame-buster and CSP meta removal | content-rewriting | L | in-progress (design) |
-| CR3 | #37 | /proxy-resource subresource endpoint through full security pipeline | content-rewriting | M | blocked |
+| CR2 | #36 | goquery HTML rewriting — base href, URL rewrite, frame-buster and CSP meta removal | content-rewriting | L | done |
+| CR3 | #37 | /proxy-resource subresource endpoint through full security pipeline | content-rewriting | M | in-progress |
 | CR4 | #38 | Redirect handling — cap depth, re-validate each hop, rewrite Location headers | content-rewriting | M | blocked |
 | CR5 | #39 | Hide-selector application to proxied HTML with CSS selector safety validation | content-rewriting | M | blocked |
 | DF1 | #40 | Backend-availability detection hook with caching | direct-only-fallback | M | blocked |

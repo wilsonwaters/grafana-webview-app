@@ -48,21 +48,15 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **CR2 (#36) goquery HTML rewriting (size L) — DESIGN pass first** (methodology: L tasks get a design
-  before impl). A Plan sub-agent is resolving the pivotal architecture: Q9 subresource URL scheme
-  (query-encoded `?url=` vs path-embedded) and how `<base href>` composes with rewritten relative/root-
-  relative/absolute/protocol-relative/data/anchor URLs; which attributes to rewrite (img/script/link/
-  source/srcset/iframe…); Q11 the bounded frame-buster JS pattern set; CSP `<meta>` removal; the test
-  plan. Then review the design, lock Q9/Q11, dispatch impl. CR2 feeds CR3 (`/proxy-resource`), which
-  serves the rewritten subresource URLs through the same security pipeline. **CR2+CR3 are the gate to a
-  BOM radar that RENDERS** (the backend `/proxy` itself is already runtime-verified — see below).
+- **CR3 (#37) `/proxy-resource` endpoint** — content-rewriting (M), in flight. Serves the subresource
+  URLs CR2 rewrites HTML to, through the IDENTICAL security pipeline (SF2→SF3→SF5→SF4) + header policy
+  as `/proxy`, but with NO HTML rewriting and Content-Type PRESERVED (CSS/JS/images stream through,
+  size-limited). Refactors the shared pipeline/audit/metrics from `/proxy` (which must stay unchanged).
+  **CR3 is the last piece before an allowlisted framing-blocked page RENDERS** (HTML via `/proxy` +
+  subresources via `/proxy-resource`). Then CR4 (redirects) + CR5 (hide-selectors) finish the stream.
 - **Proxy stream COMPLETE and runtime-verified** (P1–P7; see Runtime verification section). The frontend
   Proxy load-mode selector (frameability FR4) is the OTHER remaining piece for a true *in-panel* BOM test.
-- **Tracked debt:** P4 exactly-at-limit boundary test was FOLDED INTO P7 (`TestProxyResponseAtExactLimitSucceeds`),
-  so that nit is now closed. (Historic note kept below for context.)
-- **Tracked debt (P4 review nit, NOW CLOSED in P7):** exactly-at-limit Content-Length test (`== MaxResponseBytes`
-  → 200) to lock the strict-`>` body-size boundary; code is confirmed correct, test-only. Fold into a
-  later proxy_test touch.
+- **Tracked debt:** the P4 exactly-at-limit boundary test was folded into P7 — that nit is CLOSED.
 - **Decision made (this session): proxy-first.** Per the stakeholder, drive the backend proxy
   (P1→P7) → content-rewriting so the proxy is testable against the BOM radar via direct HTTP ASAP;
   frameability's frontend mode-wiring (FR1→FR4) follows after. (P1's issue listed FR4 as a dep, but
@@ -126,6 +120,13 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#94 (CR2)** merged — goquery HTML rewriting (`pkg/plugin/rewrite.go`): rewrites subresource refs →
+  `/proxy-resource?url=` and navigation → `/proxy?url=` (Q9 query-encoded), injects/fixes `<base href>`,
+  removes CSP/refresh `<meta>`, removes inline frame-busters (Q11 comparison-AND-navigation marker pair),
+  charset-aware. Restructured the CR1 seam so rewriting runs on ALL HTML (fixing CR1's plain-HTML gap);
+  non-HTML still byte-identical. goquery-escaped output (XSS-safe, independently verified); rewrite error
+  degrades to serving the decoded original (200, not 502). Added `github.com/PuerkitoBio/goquery`. 92.7%
+  coverage, race-clean. Design pass (Plan agent) → review APPROVE (no blocking).
 - **#93 (CR1)** merged — gzip decode + HTML detection in `ModifyResponse` (content-rewriting started).
   HTML detected by Content-Type; gzip HTML decoded (Content-Encoding removed, Content-Length fixed) with
   a `// CR2:` rewrite seam; non-HTML passes through byte-identical. **Security fix:** pins
