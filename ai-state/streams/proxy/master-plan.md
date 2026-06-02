@@ -47,4 +47,16 @@ in the panel via proxy mode by the end of P1, hardened progressively after.
 
 ## Changelog
 
-- Initialised at project kickoff (planning). No tasks dispatched yet.
+- Initialised at project kickoff (planning).
+- **Sequencing (stakeholder): proxy-first.** Build P1→P7 + content-rewriting before frameability's
+  frontend wiring, so the backend proxy is testable against the BOM radar via direct HTTP ASAP. P1's
+  listed FR4 dependency was only for the in-panel demo; P1's concrete criteria are backend-only.
+- **Q9 resolved for P1:** top-level fetch is `/proxy?url=<percent-encoded absolute URL>`. The
+  subresource (`/proxy-resource`) URL scheme remains open and is decided in content-rewriting (CR2/CR3);
+  `TODO(CR)` marker left in `proxy.go serveProxy`.
+- **P1 (#86) merged** — `/proxy` via `httputil.ReverseProxy`; security pipeline in the handler (SF3→SF2
+  →SF5) + SF4 dialer transport (rebind guard); target rebuilt from validated components (parser-
+  differential SSRF regression test); `ModifyResponse` strips X-Frame-Options + CSP frame-ancestors;
+  CORS; denial→code mapping; fail-closed empty allowlist. Leaf preserved via `plugin→security` shim.
+  Follow-up: `AllowPrivateIP` is mapped but inert (fails closed) until a private-IP-relaxing dialer is
+  added at the endpoint layer (Q5). Body-size cap + total timeout are P4; header stripping is P2/P3.

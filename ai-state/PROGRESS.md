@@ -45,14 +45,18 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **None.** security-foundation just completed (SF2 #82, SF3 #83, SF5 #85, SF4 #84 all merged this
-  session, joining SF1 #81). A system-verification pass was run at stream completion.
-- **Next ready:** **frameability (FR1 #24 → FR4 #27)** — now unblocked (deps security-foundation +
-  panel-core both DONE). This is the FIRST stream to wire the `pkg/security` pipeline behind an HTTP
-  endpoint (`/check-frameable`), so it is also where the endpoint MAPS `plugin.AllowedDomain →
-  security.AllowlistEntry` (the leaf-decoupling shim — see SF3). **proxy (P1 #28 → P7 #34)** is also
-  unblocked (dep security-foundation) and is the higher-leverage path to the BOM radar; frameability
-  helps but is not blocking for proxy. Then content-rewriting (#35–39) makes the BOM radar testable.
+- **P2 (#29) outgoing request-header stripping** — proxy stream, being dispatched. Builds on P1's
+  `pkg/plugin/proxy.go`: strip `Cookie`, `Authorization`, `X-Grafana-*`/auth headers from the outgoing
+  request and set a conservative `User-Agent`/`Accept` (stateless, unauthenticated fetch).
+- **Decision made (this session): proxy-first.** Per the stakeholder, drive the backend proxy
+  (P1→P7) → content-rewriting so the proxy is testable against the BOM radar via direct HTTP ASAP;
+  frameability's frontend mode-wiring (FR1→FR4) follows after. (P1's issue listed FR4 as a dep, but
+  P1's concrete criteria are backend-only; the FR4 dep was only for the in-panel demo.)
+- **Tracked follow-up (P1 review):** `DomainOptions.AllowPrivateIP` is mapped into
+  `security.AllowlistEntry` but currently INERT — SF4's dialer enforces the SF1 blocklist
+  unconditionally, so a domain with `allowPrivateIP: true` is still blocked at dial (fails CLOSED =
+  safe). Per Q5 the opt-in plumbing belongs to a later endpoint task; wire a private-IP-relaxing
+  dialer variant then. Don't advertise the option as working until then.
 
 ## Parallel execution (updated this session)
 
@@ -93,6 +97,16 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#86 (P1)** merged — **core `/proxy` endpoint** (`pkg/plugin/proxy.go`), first assembly of the
+  security pipeline behind HTTP. `GET /proxy?url=<encoded>` on `httputil.ReverseProxy`: pipeline runs
+  in the handler BEFORE any upstream connect (SF3 allowlist → SF2 validate w/ matched ports → SF5
+  rate-limit + Acquire), SF4 resolve-then-dial wired as the transport (IP validation + rebind guard).
+  Target reconstructed from VALIDATED components → no parser-differential SSRF (locked by
+  `TestProxySSRFParserDifferentialResistance`). `ModifyResponse` strips `X-Frame-Options` + neutralises
+  CSP `frame-ancestors`; permissive CORS; denial→code mapping; empty allowlist fails closed.
+  `plugin.AllowedDomain → security.AllowlistEntry` shim (`security_map.go`) keeps `pkg/security` a leaf.
+  Rate-limit keyed on tenant `Namespace`. 91.2% coverage. Review APPROVE-WITH-NITS (no blocking). TWO CI
+  golangci-lint round-trips fixed (errcheck-style + SA1019 `OrgID`→`Namespace`) that local gates missed.
 - **#84 (SF4)** merged — DNS-resolve-then-dial (`pkg/security/resolvedial.go`): injectable resolver,
   validate every resolved IP via SF1, FAIL CLOSED if any record blocked (Q6), pin dial to validated IP +
   re-validate the exact connect IP in `net.Dialer.Control` (rebind defense), GCP metadata-by-name (IP

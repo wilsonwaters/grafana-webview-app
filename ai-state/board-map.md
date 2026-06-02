@@ -20,8 +20,8 @@
 | FR2 | #25 | Backend /health liveness endpoint | frameability | S | ready |
 | FR3 | #26 | Frontend "Test URL" button with result display and persistence | frameability | M | blocked (FR1) |
 | FR4 | #27 | Load-mode selector — Auto / Direct / Proxy with view-mode wiring | frameability | M | blocked (FR3) |
-| P1 | #28 | Core proxy slice — /proxy endpoint with security pipeline and framing-header removal | proxy | M | ready |
-| P2 | #29 | Outgoing request header stripping — remove auth and Grafana headers | proxy | M | blocked |
+| P1 | #28 | Core proxy slice — /proxy endpoint with security pipeline and framing-header removal | proxy | M | done |
+| P2 | #29 | Outgoing request header stripping — remove auth and Grafana headers | proxy | M | ready |
 | P3 | #30 | Incoming response header stripping — Set-Cookie, HSTS, HPKP, Clear-Site-Data | proxy | S | blocked |
 | P4 | #31 | Resource limits — max body size, connection and total timeout | proxy | M | blocked |
 | P5 | #32 | Audit logging — structured per-request log for proxy requests | proxy | M | blocked |
