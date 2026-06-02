@@ -89,7 +89,21 @@ impl in parallel plus reviews/fixes. RULES that bit us and are now standing prac
   SF4's own files). Commit-signing also fails from a `/tmp` worktree ("missing source") — do
   orchestrator commits from the primary repo dir.
 
-## Screenshots convention (added 2026-06-02)
+## Runtime verification (proxy, 2026-06-02)
+
+First live exercise of `/proxy` in Grafana 12.4.0 (dev env) after the proxy stream completed — **PROXY-RUNTIME-OK**:
+- Plugin builds (`mage -v build:linux` + `npm ci && npm run build`), loads (unsigned), resource routes serve under
+  `/api/plugins/wilsonwaters-webview-app/resources/proxy?url=`. Anonymous auth suffices for resource calls.
+- Probe matrix correct: non-allowlisted→403, bad scheme→400, missing url→400, metadata IP→403 (denied at the
+  allowlist stage), CORS present. Structured audit log emits one entry/request (url/user/status/bytes/duration).
+- **Prometheus metrics are LIVE + accurate** at `/api/plugins/wilsonwaters-webview-app/metrics` (NOT `…/resources/metrics`):
+  `webview_proxy_requests_total{status}`, `denials_total{reason}`, `requests_in_flight`, `request_duration_seconds`.
+- No panics/real errors. Dev env LEFT RUNNING (container `wilsonwaters-webview-app` Up) for content-rewriting tests.
+- **Env limitation (NOT a code defect):** the sandbox container has no untampered outbound HTTPS (TLS-intercepting
+  proxy), so a real allowlisted fetch returns 502 `upstream request failed`. A live 200 + `X-Frame-Options`/CSP
+  `frame-ancestors` stripping could NOT be observed at runtime (it IS unit-tested). To verify live: use a plain-HTTP
+  framable upstream reachable from the container, supply the interception CA, or test in the real target network.
+- Quirk: dev `node_modules` was corrupt; `rm -rf node_modules && npm ci` fixed the frontend build.
 
 PR runtime screenshots must be committed to `docs/screenshots/issue-<N>/` and embedded via raw
 GitHub URLs in the PR body (a bare `/tmp/...` path is invisible to reviewers). Codified in
