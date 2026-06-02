@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
 
-      - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.0.2
+      - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.2.0
         # Private signing for self-hosted distribution (Path 1). Reads the Grafana
         # Cloud access policy token from the GRAFANA_ACCESS_POLICY_TOKEN secret and
         # signs for the deployment host (GRAFANA_INSTANCE_URL) plus localhost so the
