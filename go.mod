@@ -4,6 +4,7 @@ go 1.26.3
 
 require (
 	github.com/PuerkitoBio/goquery v1.12.0
+	github.com/andybalholm/cascadia v1.3.3
 	github.com/grafana/grafana-plugin-sdk-go v0.292.1
 	github.com/prometheus/client_golang v1.23.2
 	golang.org/x/net v0.55.0
@@ -11,7 +12,6 @@ require (
 
 require (
 	github.com/BurntSushi/toml v1.5.0 // indirect
-	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/apache/arrow-go/v18 v18.6.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect

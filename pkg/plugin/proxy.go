@@ -537,6 +537,13 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// onto the upstream request (the outbound URL is rebuilt from `url` alone).
 	depth := redirectDepthOf(req)
 
+	// CR5: read the author hide-selectors from the repeated `hide` query params.
+	// These are applied ONLY to top-level proxied HTML (in prepareHTMLBody via
+	// rewriteHTML); they are a PROXY-request-only control and are never forwarded
+	// upstream (the outbound URL is rebuilt from `url` alone). For /proxy-resource
+	// the values are read but unused — subresources are not HTML documents.
+	hideSelectors := hideSelectorsOf(req)
+
 	// The pipeline approved the request; any further denial is decided by the
 	// ReverseProxy's ErrorHandler (a dial-time blocked IP/metadata host, an
 	// over-size response, an upstream timeout, or a gateway failure). serveProxy
@@ -544,7 +551,28 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// was served cleanly) so the deferred metrics emission records it. The
 	// endpoint selects the ModifyResponse: /proxy HTML-rewrites the body,
 	// /proxy-resource passes the body + Content-Type through unchanged.
-	denied = p.serveProxy(w, req, target, endpoint, depth)
+	denied = p.serveProxy(w, req, target, endpoint, depth, hideSelectors)
+}
+
+// hideSelectorsOf reads the repeated `hide` query params (CR5) from the inbound
+// proxy request, returning each non-blank value (trimmed) in order. Each value is
+// ONE CSS selector (selectors may contain commas/whitespace, so they are passed as
+// repeated params, never comma-joined). Validation (length / count caps and
+// cascadia compilation) is the rewriter's job in applyHideSelectors; this only
+// lifts the raw values. A request with no `hide` params yields nil (a no-op
+// downstream). The param is internal to the proxy URL and never sent upstream.
+func hideSelectorsOf(req *http.Request) []string {
+	values := req.URL.Query()[hideParam]
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
 }
 
 // redirectDepthOf reads the reserved redirect-hop depth control param from the
@@ -632,7 +660,7 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 // metrics emission can record denials_total for the right reason. The ErrorHandler
 // runs synchronously inside rp.ServeHTTP, so capturing into a local here is
 // race-free for this single-goroutine-per-request handler.
-func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL, endpoint string, depth int) string {
+func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL, endpoint string, depth int, hideSelectors []string) string {
 	maxBytes := p.cfg.MaxResponseBytes
 
 	var denied string
@@ -683,7 +711,7 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 				// enforceResponseSize already wrapped around resp.Body.
 				return nil
 			}
-			return prepareHTMLBody(resp, maxBytes, target, p.logger)
+			return prepareHTMLBody(resp, maxBytes, target, p.logger, hideSelectors)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			denied = proxyErrorHandler(w, r, err)
@@ -929,8 +957,10 @@ func isHTMLContentType(contentType string) bool {
 // A rewriteHTML failure (parse quirk etc.) does NOT fail the gateway — the
 // security gates already ran — so the DECODED ORIGINAL HTML is served (200) and a
 // warning is logged. pageURL is the validated top-level target captured in the
-// ModifyResponse closure; it is the base for relative-URL resolution.
-func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logger log.Logger) error {
+// ModifyResponse closure; it is the base for relative-URL resolution. hideSelectors
+// are the CR5 author hide-selectors threaded from the inbound request; rewriteHTML
+// validates and applies them (a nil/empty slice is a no-op).
+func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logger log.Logger, hideSelectors []string) error {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
@@ -972,7 +1002,7 @@ func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logg
 	// CR2: rewrite the plain HTML with goquery. On failure, degrade to the decoded
 	// original (the security gates already ran — a parse quirk must not 502).
 	body := decoded
-	rewritten, rerr := htmlRewriter(decoded, pageURL, resp.Header.Get("Content-Type"))
+	rewritten, rerr := htmlRewriter(decoded, pageURL, resp.Header.Get("Content-Type"), hideSelectors)
 	if rerr != nil {
 		if logger != nil {
 			logger.Warn("html rewrite failed; serving decoded original", "url", pageURL.String(), "error", rerr)

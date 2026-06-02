@@ -44,7 +44,7 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 // rather than scraping the serialized string.
 func rewriteDoc(t *testing.T, htmlIn, pageURL string) *goquery.Document {
 	t.Helper()
-	out, err := rewriteHTML([]byte(htmlIn), mustParseURL(t, pageURL), "text/html")
+	out, err := rewriteHTML([]byte(htmlIn), mustParseURL(t, pageURL), "text/html", nil)
 	if err != nil {
 		t.Fatalf("rewriteHTML(%q): %v", htmlIn, err)
 	}
@@ -427,7 +427,7 @@ func TestFrameBusterModuleAndTextJavascriptScanned(t *testing.T) {
 // containing \"><script> ends up escaped inside the attribute (no breakout)".
 func TestRewriteEscapesHostileURL(t *testing.T) {
 	hostile := `/p"><script>alert(1)</script>`
-	out, err := rewriteHTML([]byte(`<a href='`+hostile+`'>x</a>`), mustParseURL(t, examplePage), "text/html")
+	out, err := rewriteHTML([]byte(`<a href='`+hostile+`'>x</a>`), mustParseURL(t, examplePage), "text/html", nil)
 	if err != nil {
 		t.Fatalf("rewriteHTML: %v", err)
 	}
@@ -457,7 +457,7 @@ func TestRewriteEscapesHostileURL(t *testing.T) {
 func TestRewriteCharsetAware(t *testing.T) {
 	// "café" in ISO-8859-1: é is 0xE9.
 	body := []byte("<html><head><meta charset=\"ISO-8859-1\"></head><body>caf\xe9</body></html>")
-	out, err := rewriteHTML(body, mustParseURL(t, examplePage), "text/html; charset=ISO-8859-1")
+	out, err := rewriteHTML(body, mustParseURL(t, examplePage), "text/html; charset=ISO-8859-1", nil)
 	if err != nil {
 		t.Fatalf("rewriteHTML: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestRewriteMalformedNoPanic(t *testing.T) {
 		`<!doctype html><HtMl><BoDy>x</BoDy>`, // mixed case, missing close
 	}
 	for _, in := range cases {
-		out, err := rewriteHTML([]byte(in), mustParseURL(t, examplePage), "text/html")
+		out, err := rewriteHTML([]byte(in), mustParseURL(t, examplePage), "text/html", nil)
 		if err != nil {
 			t.Errorf("rewriteHTML(%q) errored: %v", in, err)
 		}
@@ -488,7 +488,7 @@ func TestRewriteMalformedNoPanic(t *testing.T) {
 		}
 	}
 	// Empty input is returned unchanged (no parse, no error).
-	if out, err := rewriteHTML([]byte(``), mustParseURL(t, examplePage), "text/html"); err != nil || len(out) != 0 {
+	if out, err := rewriteHTML([]byte(``), mustParseURL(t, examplePage), "text/html", nil); err != nil || len(out) != 0 {
 		t.Errorf("rewriteHTML(empty) = (%q, %v), want ([], nil)", string(out), err)
 	}
 }
@@ -534,7 +534,7 @@ func TestRewriteContentLengthUpdated(t *testing.T) {
 	const html = `<html><body><img src="/a.png"></body></html>`
 	resp := &http.Response{Header: http.Header{}, Body: nopBody(html)}
 	resp.Header.Set("Content-Type", "text/html")
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
+	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil); err != nil {
 		t.Fatalf("prepareHTMLBody: %v", err)
 	}
 	body := readAllString(t, resp)
@@ -557,7 +557,7 @@ func TestNonHTMLByteIdenticalPassthrough(t *testing.T) {
 	resp := &http.Response{Header: http.Header{}, Body: nopBody(payload)}
 	resp.Header.Set("Content-Type", "application/json")
 	resp.ContentLength = int64(len(payload))
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
+	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil); err != nil {
 		t.Fatalf("prepareHTMLBody: %v", err)
 	}
 	if body := readAllString(t, resp); body != payload {
@@ -574,7 +574,7 @@ func TestNonHTMLByteIdenticalPassthrough(t *testing.T) {
 func TestRewriteFailureDegradesToOriginal(t *testing.T) {
 	orig := htmlRewriter
 	t.Cleanup(func() { htmlRewriter = orig })
-	htmlRewriter = func(_ []byte, _ *url.URL, _ string) ([]byte, error) {
+	htmlRewriter = func(_ []byte, _ *url.URL, _ string, _ []string) ([]byte, error) {
 		return nil, errInjectedRewriteFailure
 	}
 
@@ -582,7 +582,7 @@ func TestRewriteFailureDegradesToOriginal(t *testing.T) {
 	resp := &http.Response{Header: http.Header{}, Body: nopBody(html)}
 	resp.Header.Set("Content-Type", "text/html")
 
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
+	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil); err != nil {
 		t.Fatalf("prepareHTMLBody must NOT return an error on rewrite failure (degrade): %v", err)
 	}
 	body := readAllString(t, resp)
