@@ -48,18 +48,19 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **None.** Proxy stream just COMPLETED (P1–P7 merged this session). **No runtime verification has been
-  done yet** — all 11+ backend merges are unit-tested + full-CI-green but the `/proxy` endpoint has never
-  been exercised in a running Grafana. Awaiting a stakeholder steer (see OPEN-QUESTIONS / chat) on:
-  runtime smoke-test the proxy now vs proceed to content-rewriting and do the full BOM-radar runtime
-  test after.
-- **Next ready:** **content-rewriting (CR1 #35 → CR5 #39)** — depends on proxy (done). This is what makes
-  a framing-blocked site (BOM radar) RENDER through the proxy: gzip/HTML detection in ModifyResponse (CR1),
-  goquery HTML rewrite — base href, URL rewrite, frame-buster + CSP-meta removal (CR2), `/proxy-resource`
-  subresource endpoint (CR3), redirect re-validation (CR4), hide-selector application (CR5). Shares
-  Q9 (subresource URL scheme — top-level `/proxy?url=` fixed in P1; subresource scheme still open).
-  Frameability (FR1–FR4, frontend wiring) is the OTHER remaining path; proxy-first per stakeholder.
-- **Tracked debt (P4 review nit):** add an exactly-at-limit Content-Length test (`== MaxResponseBytes`
+- **CR2 (#36) goquery HTML rewriting (size L) — DESIGN pass first** (methodology: L tasks get a design
+  before impl). A Plan sub-agent is resolving the pivotal architecture: Q9 subresource URL scheme
+  (query-encoded `?url=` vs path-embedded) and how `<base href>` composes with rewritten relative/root-
+  relative/absolute/protocol-relative/data/anchor URLs; which attributes to rewrite (img/script/link/
+  source/srcset/iframe…); Q11 the bounded frame-buster JS pattern set; CSP `<meta>` removal; the test
+  plan. Then review the design, lock Q9/Q11, dispatch impl. CR2 feeds CR3 (`/proxy-resource`), which
+  serves the rewritten subresource URLs through the same security pipeline. **CR2+CR3 are the gate to a
+  BOM radar that RENDERS** (the backend `/proxy` itself is already runtime-verified — see below).
+- **Proxy stream COMPLETE and runtime-verified** (P1–P7; see Runtime verification section). The frontend
+  Proxy load-mode selector (frameability FR4) is the OTHER remaining piece for a true *in-panel* BOM test.
+- **Tracked debt:** P4 exactly-at-limit boundary test was FOLDED INTO P7 (`TestProxyResponseAtExactLimitSucceeds`),
+  so that nit is now closed. (Historic note kept below for context.)
+- **Tracked debt (P4 review nit, NOW CLOSED in P7):** exactly-at-limit Content-Length test (`== MaxResponseBytes`
   → 200) to lock the strict-`>` body-size boundary; code is confirmed correct, test-only. Fold into a
   later proxy_test touch.
 - **Decision made (this session): proxy-first.** Per the stakeholder, drive the backend proxy
@@ -125,6 +126,12 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#93 (CR1)** merged — gzip decode + HTML detection in `ModifyResponse` (content-rewriting started).
+  HTML detected by Content-Type; gzip HTML decoded (Content-Encoding removed, Content-Length fixed) with
+  a `// CR2:` rewrite seam; non-HTML passes through byte-identical. **Security fix:** pins
+  `Accept-Encoding: gzip` on the outbound request so net/http does NOT transparently/unboundedly
+  auto-decompress before ModifyResponse — the single decode is bounded by `MaxResponseBytes`
+  (gzip-bomb → 413); malformed gzip → 502, no panic. 93.8% coverage. Review APPROVE.
 - **#92 (P7)** merged — **proxy stream COMPLETE.** Single `reasonStatus` table + `writeDenial` wires every
   denial→(HTTP status, `denials_total{reason}`) so they can't drift; fixed two metric-reason-drift bugs
   (metadata mislabeled ip-blocklist; resolve-failure mislabeled metadata) — reason-only, status unchanged;

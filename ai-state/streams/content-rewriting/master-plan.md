@@ -42,4 +42,11 @@ radar) renders with working CSS/images/JS in the panel.
 
 ## Changelog
 
-- Initialised at project kickoff (planning). No tasks dispatched yet.
+- Initialised at project kickoff (planning).
+- **CR1 (#93) merged** — gzip decode + HTML-detection in `ModifyResponse`; non-HTML passthrough; the
+  `// CR2:` rewrite seam. Security: `Accept-Encoding: gzip` pinned outbound to stop net/http's transparent
+  unbounded auto-decompress; single decode bounded by `MaxResponseBytes` (gzip-bomb → 413). deflate/br
+  out of scope (pass through).
+- **CR2 (#36) — design pass in progress** (L task). Resolving Q9 (subresource URL scheme: query-encoded
+  vs path-embedded) + the `<base href>` strategy, which attributes to rewrite, and Q11 (frame-buster
+  pattern set) BEFORE implementation, per the L-task methodology.
