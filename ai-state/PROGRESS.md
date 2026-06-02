@@ -6,9 +6,12 @@ Narrative log of project status, maintained primarily by the orchestrator agent.
 
 Setup complete and the **execution loop is running** (task branch → PR → review → CI-green →
 squash-merge into `main`). **foundation (F1–F4), panel-core (PC1–PC5), security-foundation (SF1–SF5),
-and the backend PROXY stream (P1–P7) are all DONE.** A security-hardened `/proxy?url=` endpoint now
-runs the full pipeline (allowlist→validate→rate-limit→resolve-then-dial), strips framing + identity +
-dangerous response headers, enforces body-size/timeout, and emits audit logs + Prometheus metrics.
+the backend PROXY stream (P1–P7), and CONTENT-REWRITING (CR1–CR5) are all DONE.** A security-hardened
+`/proxy?url=` endpoint runs the full pipeline (allowlist→validate→rate-limit→resolve-then-dial), strips
+framing + identity + dangerous response headers, enforces body-size/timeout, emits audit logs + Prometheus
+metrics, AND now fully RENDERS a framing-blocked page: goquery HTML rewrite, `/proxy-resource` subresources,
+safe redirect re-validation, and hide-selectors. (Backend runtime-verified live; in-panel use awaits the
+frameability frontend wiring.)
 The plugin is also still a **shippable direct-mode Web View
 panel** today: sandboxed iframe at a configured viewport, interactive editor (drag-pan/wheel-zoom +
 numeric inputs/reset), auto-refresh, debug overlay, multi-instance — e2e-verified across Grafana
@@ -48,22 +51,21 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **CR5 (#39) hide-selector application** — content-rewriting (M), in flight. The LAST content-rewriting
-  task. Applies author `hideSelectors` (from a `hide` query param on the `/proxy` URL) to proxied HTML
-  via goquery `Find(sel)` + inline `style="display:none!important"` (escaped SetAttr) — markup-injection-
-  proof by construction (selector text never enters markup); selectors validated via `cascadia.Compile`
-  + length/count caps. Top-level HTML only. Frontend wiring (panel passing hideSelectors) lands with
-  FR4/proxy-mode later. **After CR5, content-rewriting is COMPLETE** — the proxy fully renders a
-  framing-blocked page (HTML rewrite + subresources + redirects + hide-selectors).
-- **Proxy stream COMPLETE + runtime-verified** (P1–P7). HTML+subresource render path (CR1–CR3) + redirects
-  (CR4) done. Remaining streams after content-rewriting: frameability (frontend wiring), direct-only-fallback,
-  testing-cicd, docs-release, catalog-prep.
-- **Tracked debt:** P4 boundary test folded into P7 (closed). CR4 nit (non-http(s) Location passed through
-  verbatim — not SSRF, documented in-code) accepted as-is.
-- **Decision (this session): proxy-first** (stakeholder). Backend proxy → content-rewriting first; frameability
-  frontend wiring after.
-- **Tracked follow-up (P1 review):** `DomainOptions.AllowPrivateIP` is mapped but INERT (fails closed); the
-  private-IP-relaxing dialer is a later endpoint task (Q5).
+- **None.** CONTENT-REWRITING COMPLETE (CR1–CR5 merged this session). The backend proxy is feature-complete:
+  it can fully render a framing-blocked site end-to-end (HTML rewrite + subresources + safe redirects +
+  hide-selectors), all through the security pipeline, runtime-verified live (pipeline/denials/audit/metrics).
+- **Milestone — awaiting stakeholder steer on next stream.** Candidates: **frameability** (FR1 /check-frameable,
+  FR2 /health, FR3 Test-URL button, FR4 Proxy load-mode selector) — the frontend wiring that lets a panel
+  actually select Proxy mode and point its iframe at `/proxy?url=…` (the last piece for a true *in-panel*
+  BOM-radar render); **direct-only-fallback** (needs frameability); **testing-cicd** (security suite AC 17–31,
+  e2e); **docs-release**. 
+- **BOM-radar runtime test caveat:** the backend renders, but a live in-sandbox fetch of the real BOM radar
+  is blocked by the sandbox's HTTPS TLS-interception (container gets 502). A true BOM render test needs the
+  stakeholder's network (or a CA / a reachable target) + frameability FR4 for in-panel.
+- **Tracked debt:** P4 boundary test folded into P7 (closed); CR4 non-http(s)-Location passthrough (not SSRF,
+  documented); CSS `url()` inside stylesheets not rewritten (CR-deferred); `AllowPrivateIP` mapped but INERT
+  (fails closed; private-IP-relaxing dialer is a later endpoint task, Q5).
+- **Decision (this session): proxy-first** (stakeholder) — delivered: backend proxy + content-rewriting first.
 
 ## Parallel execution (updated this session)
 
@@ -118,6 +120,10 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#97 (CR5)** merged — **content-rewriting stream COMPLETE.** Hide-selectors applied to proxied HTML via
+  goquery `Find`+inline `display:none!important` (markup-injection-proof: selector text never enters markup;
+  cascadia-validated + length/count caps; `hide` query param, not forwarded upstream). 93.3% coverage. Review
+  APPROVE (no findings). The proxy now fully renders a framing-blocked page.
 - **#96 (CR4)** merged — redirect handling: 3xx `Location` rewritten → proxy URL (browser re-enters proxy
   per hop → full pipeline re-validates: allowlist/scheme/rate + SF4 IP gate); `_wvredir` depth cap
   (MaxRedirects=3 → 502 redirect-loop; loops terminate); ModifyResponse allowlist pre-block of denied hops

@@ -56,6 +56,9 @@ radar) renders with working CSS/images/JS in the panel.
   gzip passthrough, size-limited. **HTML+subresource render path (CR1–CR3) COMPLETE.**
 - **CR4 (#96) merged** — redirect handling: 3xx Location → proxy URL (browser re-enters per hop), `_wvredir`
   depth cap (MaxRedirects=3 → 502), allowlist pre-block of denied hops, both endpoints; no raw Location escapes.
-- **CR5 (#39) — in flight** — hide-selector application: goquery `Find(sel)` + inline `display:none!important`
-  (markup-injection-proof; selectors validated via `cascadia.Compile` + caps), top-level HTML only, from a
-  `hide` query param. **Last content-rewriting task — after it, the stream is COMPLETE.**
+- **CR5 (#97) merged** — hide-selector application: goquery `Find(sel)` + inline `display:none!important`
+  (markup-injection-proof; selectors validated via `cascadia.Compile` + length/count caps), top-level HTML
+  only, from repeated `hide` query params (not forwarded upstream). 93.3% coverage.
+- **STREAM COMPLETE (CR1–CR5).** The proxy fully renders a framing-blocked page (HTML rewrite + subresources
+  + safe redirects + hide-selectors). Remaining for in-panel use: the frontend Proxy load-mode selector
+  (frameability FR4). Known limitation: CSS `url()` inside stylesheets is not rewritten (deferred).

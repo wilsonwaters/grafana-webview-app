@@ -104,7 +104,14 @@ CSP meta removal), `/proxy-resource` subresource endpoint, redirect handling wit
 allowlist re-check, gzip handling.
 **Depends on:** proxy.
 **Size:** L.
-**Status:** Not started.
+**Status:** ✅ Done — CR1–CR5 merged (#93, #94, #95, #96, #97). Proxied HTML now renders: CR1 gzip-decode +
+HTML detection (size-bounded, Accept-Encoding pinned); CR2 goquery rewrite (subresource→/proxy-resource,
+nav→/proxy, base-href, frame-buster + CSP/refresh-meta removal, XSS-safe); CR3 /proxy-resource endpoint
+(same pipeline, Content-Type preserved, size-limited); CR4 redirect handling (Location→proxy URL, _wvredir
+depth cap, per-hop allowlist+IP re-validation, no raw Location escapes); CR5 hide-selectors (goquery inline
+display:none, cascadia-validated, markup-injection-proof). The proxy can fully render a framing-blocked page
+end-to-end. NOT yet wired: the frontend Proxy load-mode selector (frameability FR4) so a panel points its
+iframe at /proxy?url=… in-panel.
 
 ### 7. Direct-Only Fallback / Graceful Degradation  —  `direct-only-fallback`
 **Outcome:** When the backend is unavailable, the panel is still creatable in
