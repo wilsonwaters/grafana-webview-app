@@ -45,11 +45,10 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **P5 (#32) audit logging** — proxy stream (M), in flight. One structured info log per `/proxy` request
-  (target URL, source Grafana user, status, bytes, duration) via a single `defer` in `ServeHTTP` + a
-  status/size-recording ResponseWriter; injectable `log.Logger` for tests; emitted on success AND
-  denial. Proxy chain after: P6 metrics → P7 denial wiring, then content-rewriting (CR1–CR5) makes the
-  BOM radar render through the proxy.
+- **P6 (#33) Prometheus metrics** — proxy stream (M), in flight. requests_total{status}, denials_total{reason},
+  in-flight gauge, duration histogram on `/proxy`; registered to the default registry (SDK `/metrics`),
+  injectable registry in tests. Proxy chain after: P7 denial→response wiring (LAST proxy task), then
+  content-rewriting (CR1–CR5) makes the BOM radar render through the proxy.
 - **Tracked debt (P4 review nit):** add an exactly-at-limit Content-Length test (`== MaxResponseBytes`
   → 200) to lock the strict-`>` body-size boundary; code is confirmed correct, test-only. Fold into a
   later proxy_test touch.
@@ -102,6 +101,10 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#90 (P5)** merged — structured audit log per `/proxy` request (url/user/status/bytes/duration) via a
+  single `defer` in `ServeHTTP` + an `auditResponseWriter` (status/byte recorder with `http.Flusher`
+  passthrough so streaming is preserved); injectable `log.Logger`; emitted on success + all denials;
+  nil-safe user (`anonymous` fallback); logs no secrets. 92.6% coverage. Review APPROVE.
 - **#89 (P4)** merged — resource limits: max body size → 413 (clean Content-Length path; `limitedBody`
   caps chunked/undeclared as defense-in-depth), total per-request timeout → 504 (`context.WithTimeout`,
   deferred cancel can't truncate a legit body), error mapping via `errors.Is` (413/504; 403/502 intact).
