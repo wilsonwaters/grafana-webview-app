@@ -19,14 +19,31 @@ var (
 	_ backend.CheckHealthHandler    = (*App)(nil)
 )
 
-// App is an example app plugin with a backend which can respond to data queries.
+// App is the Web View app plugin backend instance. Each Grafana instance that
+// has the plugin installed gets its own App (managed by the SDK's instance
+// manager). The Config field holds the parsed, defaults-applied plugin
+// settings loaded from Grafana's non-secret jsonData at startup.
 type App struct {
 	backend.CallResourceHandler
+
+	// Config holds the admin-configured plugin settings for this instance.
+	// It is populated once in NewApp and is safe for concurrent read access
+	// thereafter (the SDK creates a new App when settings change).
+	Config PluginSettings
 }
 
-// NewApp creates a new example *App instance.
-func NewApp(_ context.Context, _ backend.AppInstanceSettings) (instancemgmt.Instance, error) {
+// NewApp creates a new *App instance. It parses the plugin settings from
+// AppInstanceSettings.JSONData and applies safe defaults before storing the
+// resulting Config. If the settings JSON is malformed, NewApp returns an error
+// and the plugin instance is not started.
+func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemgmt.Instance, error) {
+	cfg, err := LoadSettings(settings)
+	if err != nil {
+		return nil, err
+	}
+
 	var app App
+	app.Config = cfg
 
 	// Use a httpadapter (provided by the SDK) for resource calls. This allows us
 	// to use a *http.ServeMux for resource calls, so we can map multiple routes
