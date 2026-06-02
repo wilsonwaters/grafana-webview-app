@@ -60,3 +60,14 @@ in the panel via proxy mode by the end of P1, hardened progressively after.
   CORS; denial→code mapping; fail-closed empty allowlist. Leaf preserved via `plugin→security` shim.
   Follow-up: `AllowPrivateIP` is mapped but inert (fails closed) until a private-IP-relaxing dialer is
   added at the endpoint layer (Q5). Body-size cap + total timeout are P4; header stripping is P2/P3.
+- **P2 (#87)** outgoing request-header stripping (auth/identity/`X-Grafana-*`/forwarding/edge-CDN) + UA/Accept.
+- **P3 (#88)** incoming response-header stripping (Set-Cookie/HSTS/HPKP/Clear-Site-Data).
+- **P4 (#89)** resource limits: body size → 413 (Content-Length clean; `limitedBody` defense), total timeout
+  → 504 (context budget). Q10 = one total budget; dialer timeout is a sub-bound.
+- **P5 (#90)** structured audit log per request (url/user/status/bytes/duration), success + denials.
+- **P6 (#91)** Prometheus metrics (requests/denials/in-flight/duration) on the SDK `/metrics` default registry.
+- **P7 (#92)** denial→(status, reason) consolidation behind one `reasonStatus` table; fixed 2 reason-label
+  bugs (status unchanged); exhaustive matrix test + P4 boundary test.
+- **STREAM COMPLETE (P1–P7).** Remaining for a fully-rendering BOM radar: content-rewriting (HTML/subresource
+  rewrite, frame-buster/CSP-meta removal, redirect re-validation). Open: still NO runtime verification of
+  `/proxy` in a live Grafana (unit + CI only); Q9 subresource URL scheme still open (decided in CR2/CR3).

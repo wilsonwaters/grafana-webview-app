@@ -5,8 +5,11 @@ Narrative log of project status, maintained primarily by the orchestrator agent.
 ## Status summary
 
 Setup complete and the **execution loop is running** (task branch → PR → review → CI-green →
-squash-merge into `main`). **foundation (F1–F4), panel-core (PC1–PC5), and security-foundation
-(SF1–SF5) are all DONE.** The plugin is a **shippable direct-mode Web View
+squash-merge into `main`). **foundation (F1–F4), panel-core (PC1–PC5), security-foundation (SF1–SF5),
+and the backend PROXY stream (P1–P7) are all DONE.** A security-hardened `/proxy?url=` endpoint now
+runs the full pipeline (allowlist→validate→rate-limit→resolve-then-dial), strips framing + identity +
+dangerous response headers, enforces body-size/timeout, and emits audit logs + Prometheus metrics.
+The plugin is also still a **shippable direct-mode Web View
 panel** today: sandboxed iframe at a configured viewport, interactive editor (drag-pan/wheel-zoom +
 numeric inputs/reset), auto-refresh, debug overlay, multi-instance — e2e-verified across Grafana
 12.3.6/12.4.3/13.0.1/nightly and privately signed. The backend now has a complete set of audited,
@@ -45,12 +48,17 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **P7 (#34) denial→response wiring** — proxy stream (size S), in flight. The LAST proxy task: makes the
-  full denial→(HTTP status, metric reason) matrix correct/consistent + exhaustively tested (403 allowlist/
-  blocklist/metadata, 429 rate-limit/concurrency, 413 size, 400 scheme/port/malformed, 504 timeout, 502
-  upstream). Also folds in the tracked P4 exactly-at-limit boundary test. **After P7 merges the proxy
-  stream is COMPLETE** — then content-rewriting (CR1–CR5) makes a framing-blocked site like the BOM radar
-  actually render through the proxy. The backend `/proxy` is already testable via direct HTTP now.
+- **None.** Proxy stream just COMPLETED (P1–P7 merged this session). **No runtime verification has been
+  done yet** — all 11+ backend merges are unit-tested + full-CI-green but the `/proxy` endpoint has never
+  been exercised in a running Grafana. Awaiting a stakeholder steer (see OPEN-QUESTIONS / chat) on:
+  runtime smoke-test the proxy now vs proceed to content-rewriting and do the full BOM-radar runtime
+  test after.
+- **Next ready:** **content-rewriting (CR1 #35 → CR5 #39)** — depends on proxy (done). This is what makes
+  a framing-blocked site (BOM radar) RENDER through the proxy: gzip/HTML detection in ModifyResponse (CR1),
+  goquery HTML rewrite — base href, URL rewrite, frame-buster + CSP-meta removal (CR2), `/proxy-resource`
+  subresource endpoint (CR3), redirect re-validation (CR4), hide-selector application (CR5). Shares
+  Q9 (subresource URL scheme — top-level `/proxy?url=` fixed in P1; subresource scheme still open).
+  Frameability (FR1–FR4, frontend wiring) is the OTHER remaining path; proxy-first per stakeholder.
 - **Tracked debt (P4 review nit):** add an exactly-at-limit Content-Length test (`== MaxResponseBytes`
   → 200) to lock the strict-`>` body-size boundary; code is confirmed correct, test-only. Fold into a
   later proxy_test touch.
@@ -103,6 +111,11 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#92 (P7)** merged — **proxy stream COMPLETE.** Single `reasonStatus` table + `writeDenial` wires every
+  denial→(HTTP status, `denials_total{reason}`) so they can't drift; fixed two metric-reason-drift bugs
+  (metadata mislabeled ip-blocklist; resolve-failure mislabeled metadata) — reason-only, status unchanged;
+  removed the `validationStatus` stub. Exhaustive denial-matrix test (status + exact reason per class) +
+  the P4 exactly-at-limit boundary test. 94.0% coverage. Review APPROVE (no findings).
 - **#91 (P6)** merged — Prometheus metrics on `/proxy` exposed via the SDK `/metrics` (default registry):
   `webview_proxy_requests_total{status}`, `denials_total{reason}`, `requests_in_flight` gauge,
   `request_duration_seconds` histogram. `sync.Once` registers once; all handlers share the registered

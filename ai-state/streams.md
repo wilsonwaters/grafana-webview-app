@@ -85,7 +85,16 @@ dangerous headers, and enforces every request/response control, with audit logs 
 header stripping, size/timeout limits, audit logging, Prometheus metrics.
 **Depends on:** security-foundation (frameability helpful but not blocking).
 **Size:** L.
-**Status:** Not started.
+**Status:** ✅ Done — P1–P7 merged (#86, #87, #88, #89, #90, #91, #92). `/proxy?url=<encoded>` via
+`httputil.ReverseProxy`: security pipeline in the handler (SF3 allowlist → SF2 validate → SF5
+rate-limit/concurrency) + SF4 resolve-then-dial transport (rebind-safe); target rebuilt from validated
+components (parser-differential-SSRF-safe). Strips framing (X-Frame-Options, CSP frame-ancestors),
+outgoing identity/auth headers (incl. edge/CDN), and incoming Set-Cookie/HSTS/HPKP/Clear-Site-Data;
+enforces body-size (413) + total timeout (504); structured audit log + Prometheus metrics
+(requests/denials/in-flight/duration) on the SDK `/metrics`; single reasonStatus table wires every
+denial→(status, reason). NOT yet wired: HTML body rewriting / subresource proxying (content-rewriting),
+and the frontend Proxy load-mode selector (frameability FR4). The backend `/proxy` is testable via
+direct HTTP today; a framing-blocked site only RENDERS fully after content-rewriting.
 
 ### 6. Content Rewriting & Subresources  —  `content-rewriting`
 **Outcome:** Proxied HTML pages render correctly — relative URLs resolve, subresources load
