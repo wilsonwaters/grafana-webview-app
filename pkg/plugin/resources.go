@@ -59,5 +59,7 @@ func (a *App) registerRoutes(mux *http.ServeMux) {
 		// CR3: the subresource endpoint shares a.proxy's pipeline/transport/
 		// rate-limiter/audit/metrics via the proxyResourceHandler wrapper.
 		mux.Handle(proxyResourcePath, a.proxyResource)
+		// FR1: the frameability-check endpoint runs the same security pipeline.
+		mux.Handle(checkFrameablePath, a.checkFrameable)
 	}
 }
