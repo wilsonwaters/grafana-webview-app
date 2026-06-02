@@ -71,3 +71,9 @@ demonstrable panel state.
   input; ViewportEditor reads `context.options.url` and reacts via Grafana re-renders — no
   duplicate URL input. 26 component tests added; e2e runtime-verified (pc4-editor.png).
   All quality gates green.
+- 2026-06-02: PC5 (#18) — auto-refresh (`refreshIntervalSec > 0` arms setInterval; 0 = off;
+  cleans up on unmount/re-arms on change; no shared state → multi-instance safe). Debug overlay
+  (`showDebugOverlay`) rendered in our DOM — cross-origin-safe, theme-aware via useStyles2.
+  `hideSelectors` preserved in schema, proxy-only (CR5); documented in code + OPEN-QUESTIONS Q4
+  resolved. 18 new component tests (fake timers: arm/disable/cleanup/re-arm; overlay on/off;
+  5 two-instance independence tests). All quality gates green; e2e runtime-verified (pc5.png).

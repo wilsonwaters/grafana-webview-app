@@ -35,6 +35,17 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
         ],
       },
     })
+    .addNumberInput({
+      path: 'refreshIntervalSec',
+      name: 'Auto-refresh interval (seconds)',
+      description: 'Reload the iframe at this interval. 0 disables auto-refresh.',
+      defaultValue: DEFAULT_PANEL_OPTIONS.refreshIntervalSec,
+      settings: {
+        min: 0,
+        integer: false,
+        placeholder: '0 (disabled)',
+      },
+    })
     .addBooleanSwitch({
       path: 'showDebugOverlay',
       name: 'Show debug overlay',
