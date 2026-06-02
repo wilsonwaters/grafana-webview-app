@@ -1,8 +1,18 @@
 # Plugin Signing & Secrets
 
-This plugin is distributed **signed**. Signing is performed in CI by the release
-workflow (`.github/workflows/release.yml`), which reads a Grafana Cloud **Access
-Policy token** from the GitHub repository secret `GRAFANA_ACCESS_POLICY_TOKEN`.
+This plugin is **privately signed** for self-hosted distribution (Path 1). Both the
+CI workflow (`.github/workflows/ci.yml`) and the release workflow
+(`.github/workflows/release.yml`) sign privately, reading:
+
+- the Grafana Cloud **Access Policy token** from the repository secret
+  `GRAFANA_ACCESS_POLICY_TOKEN`, and
+- the deployment **root URL** from the GitHub Actions **environment `QA-Alintech`**
+  variable `GRAFANA_INSTANCE_URL`.
+
+Both workflows sign for `GRAFANA_INSTANCE_URL` **plus** `http://localhost:3000`, so
+the signed build also loads in the CI end-to-end Grafana and during local testing.
+A public/community signature is deliberately **not** used: it is rejected (HTTP 409)
+until the plugin is accepted into the Grafana catalog (Path 2).
 
 This guide explains how to create that token and store it as a secret. It maps to
 the two deployment paths in the project brief:

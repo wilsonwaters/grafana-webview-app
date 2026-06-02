@@ -14,15 +14,20 @@ jobs:
     permissions:
       contents: write
     runs-on: ubuntu-latest
+    # QA-Alintech provides GRAFANA_INSTANCE_URL (private-signing root URL). The
+    # access policy token is a repository secret.
+    environment: QA-Alintech
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
 
       - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.0.2
-        # Plugin signing is enabled and reads the Grafana Cloud Access Policy
-        # token from the repository secret GRAFANA_ACCESS_POLICY_TOKEN.
-        # See docs/signing.md for how to create the token and add the secret.
-        # (Token generation: https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token)
+        # Private signing for self-hosted distribution (Path 1). Reads the Grafana
+        # Cloud access policy token from the GRAFANA_ACCESS_POLICY_TOKEN secret and
+        # signs for the deployment host (GRAFANA_INSTANCE_URL) plus localhost so the
+        # released build can also be smoke-tested locally.
+        # See docs/signing.md. (Token: https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token)
         with:
           policy_token: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
+          sign_root_urls: ${{ vars.GRAFANA_INSTANCE_URL }},http://localhost:3000
