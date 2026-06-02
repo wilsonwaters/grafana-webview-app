@@ -14,4 +14,18 @@ test.describe('Web View panel registration', () => {
       panelEditPage.panel.locator.getByTestId('data-testid webview-panel-placeholder')
     ).toBeVisible();
   });
+
+  test('renders a sandboxed iframe with the configured URL', async ({ panelEditPage, page }) => {
+    await panelEditPage.setVisualization('Web View');
+
+    // Set the URL option so the panel renders an iframe in direct mode.
+    await page.getByRole('textbox', { name: 'URL' }).fill('https://example.com');
+    await page.keyboard.press('Tab');
+
+    const iframe = panelEditPage.panel.locator.getByTestId('data-testid webview-panel-iframe');
+    await expect(iframe).toBeVisible();
+    await expect(iframe).toHaveAttribute('src', 'https://example.com');
+    // SECURITY: the iframe must use exactly this sandbox value — never broaden it.
+    await expect(iframe).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+  });
 });
