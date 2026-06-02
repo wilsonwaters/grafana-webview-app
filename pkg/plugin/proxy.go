@@ -70,13 +70,14 @@ func newProxyHandler(cfg PluginSettings) *proxyHandler {
 }
 
 // instanceIDFromContext derives the per-instance rate-limit key from the plugin
-// request context. We key on the Grafana org ID so the per-instance tier is
-// shared across all viewers of an org. When no plugin context is present (e.g.
-// in unit tests calling ServeHTTP directly), we fall back to defaultInstanceID.
+// request context. We key on the Grafana tenant namespace so the per-instance
+// tier is shared across all viewers of a tenant. When no plugin context /
+// namespace is present (e.g. in unit tests calling ServeHTTP directly), we fall
+// back to defaultInstanceID.
 func instanceIDFromContext(req *http.Request) string {
 	pCtx := backend.PluginConfigFromContext(req.Context())
-	if pCtx.OrgID != 0 {
-		return "org-" + strconv.FormatInt(pCtx.OrgID, 10)
+	if pCtx.Namespace != "" {
+		return "ns-" + pCtx.Namespace
 	}
 	return defaultInstanceID
 }
