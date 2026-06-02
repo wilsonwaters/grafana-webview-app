@@ -1,7 +1,9 @@
 package plugin
 
 import (
+	"context"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -13,6 +15,13 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/wilsonwaters/webview/pkg/security"
 )
+
+// errResponseTooLarge is the sentinel ModifyResponse returns when an upstream
+// response is KNOWN (via a non-negative Content-Length) to exceed
+// MaxResponseBytes, BEFORE any body byte has been streamed to the client. The
+// ReverseProxy has not yet written status/headers at that point, so the
+// ErrorHandler can cleanly emit a 413. Matched with errors.Is, never by string.
+var errResponseTooLarge = errors.New("proxy: response body exceeds maximum allowed size")
 
 // proxyPath is the resource path the proxy endpoint is registered under.
 const proxyPath = "/proxy"
@@ -324,6 +333,8 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 // subresource URL scheme is intentionally NOT designed here (Q9: P1 only ships
 // the top-level /proxy?url= fetch).
 func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL) {
+	maxBytes := p.cfg.MaxResponseBytes
+
 	rp := &httputil.ReverseProxy{
 		Transport: p.transport,
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -340,11 +351,89 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			// never r.In, so nothing about the Grafana instance or viewer leaks.
 			stripRequestHeaders(r.Out.Header)
 		},
-		ModifyResponse: stripFramingHeaders,
-		ErrorHandler:   proxyErrorHandler,
+		// P4: enforce the max-response-body size, then the P1/P3 framing/header
+		// strip. The size step runs FIRST so an over-Content-Length response
+		// short-circuits with errResponseTooLarge before any header rewriting.
+		ModifyResponse: func(resp *http.Response) error {
+			if err := enforceResponseSize(resp, maxBytes); err != nil {
+				return err
+			}
+			return stripFramingHeaders(resp)
+		},
+		ErrorHandler: proxyErrorHandler,
 	}
-	rp.ServeHTTP(w, req)
+
+	// P4 / Q10: ONE total per-request budget. RequestTimeoutSec is the whole
+	// deadline — it wraps the entire proxy round-trip AND the body copy, so a
+	// slow or stalled upstream body trips it too (not just connection setup,
+	// which the dialer's own Timeout already sub-bounds). On expiry the
+	// transport surfaces context.DeadlineExceeded, which proxyErrorHandler maps
+	// to 504.
+	ctx, cancel := context.WithTimeout(req.Context(), time.Duration(p.cfg.RequestTimeoutSec)*time.Second)
+	defer cancel()
+
+	rp.ServeHTTP(w, req.WithContext(ctx))
 }
+
+// enforceResponseSize applies the MaxResponseBytes cap to an upstream response.
+//
+// Clean path (declared length): if the upstream sent a non-negative
+// Content-Length that already exceeds the limit, return errResponseTooLarge.
+// ModifyResponse runs before the ReverseProxy writes any status/header, so the
+// ErrorHandler can still emit a clean 413 with no bytes leaked.
+//
+// Defense-in-depth (chunked / missing / lying Content-Length, i.e. -1 or a
+// value that under-reports the real body): wrap resp.Body in a reader that
+// caps reads at maxBytes. CAVEAT: once the body starts streaming the
+// ReverseProxy has ALREADY written 200 + headers, so this path CANNOT retro-
+// actively become a 413 — it can only stop reading at the limit and surface an
+// error, truncating/failing the copy. That is acceptable belt-and-braces; the
+// guaranteed clean 413 is the Content-Length path above.
+func enforceResponseSize(resp *http.Response, maxBytes int64) error {
+	if maxBytes <= 0 {
+		return nil
+	}
+	if resp.ContentLength >= 0 && resp.ContentLength > maxBytes {
+		return errResponseTooLarge
+	}
+	resp.Body = newLimitedBody(resp.Body, maxBytes)
+	return nil
+}
+
+// limitedBody wraps an upstream response body and caps the total number of
+// bytes that may be read at limit. Reading the (limit+1)th byte fails the copy
+// with errResponseTooLarge instead of silently truncating, so an oversized
+// chunked/undeclared body is rejected rather than served partial-but-200.
+type limitedBody struct {
+	rc        io.ReadCloser
+	remaining int64 // bytes still allowed before the limit is breached
+}
+
+// newLimitedBody caps rc at limit total bytes. It permits exactly limit bytes
+// and errors only when the upstream tries to send MORE than limit.
+func newLimitedBody(rc io.ReadCloser, limit int64) *limitedBody {
+	return &limitedBody{rc: rc, remaining: limit}
+}
+
+func (l *limitedBody) Read(p []byte) (int, error) {
+	if l.remaining < 0 {
+		return 0, errResponseTooLarge
+	}
+	// Read up to remaining+1 bytes: the extra byte lets us detect an over-limit
+	// body (a full read of remaining bytes that is followed by more data).
+	max := l.remaining + 1
+	if int64(len(p)) > max {
+		p = p[:max]
+	}
+	n, err := l.rc.Read(p)
+	l.remaining -= int64(n)
+	if l.remaining < 0 {
+		return int(l.remaining + int64(n)), errResponseTooLarge
+	}
+	return n, err
+}
+
+func (l *limitedBody) Close() error { return l.rc.Close() }
 
 // stripRequestHeaders sanitises the OUTGOING proxied request: it deletes every
 // credential/identity/origin header (exact matches in strippedRequestHeaders plus
@@ -377,8 +466,10 @@ func stripRequestHeaders(h http.Header) {
 
 // proxyErrorHandler maps an upstream/transport error to a clean status code. A
 // dial-time denial from SF4 (blocked resolved IP, metadata host, resolve
-// failure) surfaces here as a *security.DialError and maps to 403; everything
-// else is an upstream/gateway failure (502), and a context deadline is 504.
+// failure) surfaces here as a *security.DialError and maps to 403; an over-size
+// response (P4) maps to 413; a per-request timeout (P4: the total-budget context
+// deadline, or any net.Error timeout) maps to 504; everything else is an
+// upstream/gateway failure (502).
 func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) {
 	setCORSHeaders(w.Header())
 	switch reason := security.DialReasonOf(err); reason {
@@ -389,9 +480,17 @@ func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) {
 		http.Error(w, "target host could not be resolved", http.StatusBadGateway)
 		return
 	}
-	// Distinguish a timeout (504) from other upstream failures (502).
+	// P4: response body exceeded the configured size limit (clean Content-Length
+	// path — no body bytes streamed yet) ⇒ 413.
+	if errors.Is(err, errResponseTooLarge) {
+		http.Error(w, "upstream response exceeds maximum allowed size", http.StatusRequestEntityTooLarge)
+		return
+	}
+	// P4: the total per-request budget (Q10) expired ⇒ 504. The transport
+	// surfaces the context deadline as context.DeadlineExceeded; a stalled
+	// connection/handshake instead surfaces a net.Error with Timeout()==true.
 	var netErr net.Error
-	if errors.As(err, &netErr) && netErr.Timeout() {
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
 		http.Error(w, "upstream request timed out", http.StatusGatewayTimeout)
 		return
 	}
