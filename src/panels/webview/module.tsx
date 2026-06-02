@@ -1,6 +1,7 @@
 import { PanelPlugin } from '@grafana/data';
 import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../types';
 import { WebViewPanel } from './components/WebViewPanel';
+import { ViewportEditor } from './components/ViewportEditor';
 
 /**
  * Registration for the nested Web View panel plugin.
@@ -39,5 +40,18 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
       name: 'Show debug overlay',
       description: 'Show viewport / load-mode debug information on the panel.',
       defaultValue: DEFAULT_PANEL_OPTIONS.showDebugOverlay,
+    })
+    // PC3: interactive viewport positioning. Bound to `viewportZoom` (Grafana
+    // wires a custom editor's onChange to this single path); the editor reads
+    // the full options from `context.options` and writes X/Y/zoom. Grafana only
+    // renders custom option editors in the edit pane, so the view-mode panel
+    // stays static (Q3 resolution).
+    .addCustomEditor({
+      id: 'viewportPositioner',
+      path: 'viewportZoom',
+      name: 'Position viewport',
+      description: 'Drag to pan and scroll to zoom the preview to position the viewport.',
+      editor: ViewportEditor,
+      defaultValue: DEFAULT_PANEL_OPTIONS.viewportZoom,
     });
 });
