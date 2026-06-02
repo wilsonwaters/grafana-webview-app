@@ -2,6 +2,7 @@ import { PanelPlugin } from '@grafana/data';
 import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../types';
 import { WebViewPanel } from './components/WebViewPanel';
 import { ViewportEditor } from './components/ViewportEditor';
+import { FrameabilityEditor } from './components/FrameabilityEditor';
 
 /**
  * Registration for the nested Web View panel plugin.
@@ -64,5 +65,17 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
       description: 'Drag to pan and scroll to zoom the preview to position the viewport.',
       editor: ViewportEditor,
       defaultValue: DEFAULT_PANEL_OPTIONS.viewportZoom,
+    })
+    // FR3: "Test URL" frameability check. Bound to `detectedMode` (Grafana wires
+    // a custom editor's onChange to this single path); the editor reads the
+    // current `url` from `context.options`, calls `/check-frameable`, and on a
+    // successful response persists the recommended mode into `detectedMode`.
+    .addCustomEditor({
+      id: 'frameabilityTester',
+      path: 'detectedMode',
+      name: 'Test URL',
+      description: 'Check whether the URL can be framed directly or must be proxied.',
+      editor: FrameabilityEditor,
+      defaultValue: DEFAULT_PANEL_OPTIONS.detectedMode,
     });
 });
