@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/wilsonwaters/webview/pkg/security"
@@ -341,6 +342,225 @@ func TestProxyErrorHandlerMapping(t *testing.T) {
 				t.Fatalf("error response missing CORS: %q", got)
 			}
 		})
+	}
+}
+
+// recordingTransport is an http.RoundTripper whose DialContext records the host
+// portion of every address the proxy attempts to dial, then redirects the dial
+// to a single loopback upstream (so the genuinely-allowlisted control case can
+// complete a real round-trip). The recorded hosts let a test assert WHICH host
+// would actually have been contacted — the crux of the parser-differential
+// invariant: a denied request must reach dial for NO host at all, and an allowed
+// request must dial ONLY the validated, allowlisted host.
+type recordingTransport struct {
+	*http.Transport
+	mu       sync.Mutex
+	dialed   []string
+	upstream string // loopback host:port the dial is redirected to
+}
+
+func newRecordingTransport(upstream *httptest.Server) *recordingTransport {
+	rt := &recordingTransport{}
+	if upstream != nil {
+		u, err := url.Parse(upstream.URL)
+		if err == nil {
+			rt.upstream = u.Host
+		}
+	}
+	var d net.Dialer
+	rt.Transport = &http.Transport{
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, _, splitErr := net.SplitHostPort(addr)
+			if splitErr != nil {
+				host = addr
+			}
+			rt.mu.Lock()
+			rt.dialed = append(rt.dialed, host)
+			rt.mu.Unlock()
+			// Redirect to the loopback upstream so the allowlisted control case
+			// can complete; the assertion is on the RECORDED requested host, not
+			// the loopback we dial in its place.
+			return d.DialContext(ctx, network, rt.upstream)
+		},
+	}
+	return rt
+}
+
+// dialedHosts returns a copy of the hosts the proxy attempted to dial.
+func (rt *recordingTransport) dialedHosts() []string {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([]string, len(rt.dialed))
+	copy(out, rt.dialed)
+	return out
+}
+
+// TestProxySSRFParserDifferentialResistance LOCKS the core SSRF invariant of the
+// /proxy pipeline: the host that the allowlist matches (SF3), the host SF2
+// validates, and the host that is actually dialed (SF4) are all the SAME
+// canonical value, because the upstream target is reconstructed from VALIDATED
+// components (buildTargetURL/hostnameOf), never from the raw attacker string. A
+// future refactor that re-parses the raw string differently in any of those
+// places — reintroducing a parser-differential SSRF bypass — must fail this test.
+//
+// The allowlist is exactly example.com (exact match, subdomains OFF). A recording
+// transport captures every host the proxy attempts to dial. For every malicious
+// row the response must be a denial (400/403) AND no non-allowlisted host
+// (evil.com / internal) may ever be dialed. The legitimate control row must
+// succeed and dial exactly example.com, preserving path and query.
+func TestProxySSRFParserDifferentialResistance(t *testing.T) {
+	const allowedHost = "example.com"
+	const evilHost = "evil.com"
+
+	cases := []struct {
+		name string
+		// target is the RAW absolute URL placed (percent-encoded) into ?url=.
+		target string
+		// allowed true => success path (dial of the allowlisted host expected);
+		// false => denial (no non-allowlisted host may be dialed).
+		allowed bool
+		// wantStatus is asserted exactly for clarity/regression on the mapping.
+		wantStatus int
+		// wantDialHost, when allowed, is the only host that may be dialed.
+		wantDialHost string
+		// wantPath/wantQuery assert path+query preservation on the control row.
+		wantPath  string
+		wantQuery string
+	}{
+		{
+			// Go parses "example.com" as USERINFO and the authority as evil.com.
+			// SF3 (allowlist) runs before SF2 (userinfo) and denies the unlisted
+			// evil.com host with 403; either way evil.com is never dialed.
+			name:       "userinfo trick @evil.com",
+			target:     "http://example.com@evil.com",
+			allowed:    false,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			// Percent-encoded '@': url.Parse rejects the bad escape => malformed => 400.
+			name:       "encoded userinfo %40evil.com",
+			target:     "http://example.com%40evil.com",
+			allowed:    false,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			// Backslash before '@': url.Parse rejects invalid userinfo => malformed => 400.
+			name:       "backslash userinfo \\@evil.com",
+			target:     `http://example.com\@evil.com`,
+			allowed:    false,
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			// Fragment decoy: authority is evil.com, "#example.com" is just a fragment.
+			name:       "fragment decoy #example.com",
+			target:     "http://evil.com#example.com",
+			allowed:    false,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			// Path decoy: authority is evil.com, "/example.com" is just a path.
+			name:       "path decoy /example.com",
+			target:     "http://evil.com/example.com",
+			allowed:    false,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			// Suffix trick: example.com.evil.com is a different host (subdomains off).
+			name:       "suffix trick example.com.evil.com",
+			target:     "http://example.com.evil.com",
+			allowed:    false,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			name:       "plain non-allowlisted host",
+			target:     "http://evil.com",
+			allowed:    false,
+			wantStatus: http.StatusForbidden,
+		},
+		{
+			// Legitimate control: allowed, dials exactly example.com, preserves path+query.
+			name:         "control allowlisted host",
+			target:       "http://example.com/path?q=1#frag",
+			allowed:      true,
+			wantStatus:   http.StatusOK,
+			wantDialHost: allowedHost,
+			wantPath:     "/path",
+			wantQuery:    "q=1",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.wantPath != "" && r.URL.Path != tc.wantPath {
+					t.Errorf("upstream path = %q, want %q", r.URL.Path, tc.wantPath)
+				}
+				if tc.wantQuery != "" && r.URL.RawQuery != tc.wantQuery {
+					t.Errorf("upstream query = %q, want %q", r.URL.RawQuery, tc.wantQuery)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+
+			cfg := settingsWith(allowExample(DomainOptions{})) // exact match, subdomains off
+			p := newProxyHandler(cfg)
+			rt := newRecordingTransport(upstream)
+			p.transport = rt
+
+			rec := doProxy(p, tc.target)
+
+			if rec.Code != tc.wantStatus {
+				t.Fatalf("status = %d, want %d (body=%q)", rec.Code, tc.wantStatus, rec.Body.String())
+			}
+
+			dialed := rt.dialedHosts()
+			for _, h := range dialed {
+				if h == evilHost || h != allowedHost {
+					t.Fatalf("proxy dialed disallowed host %q (all dialed: %v)", h, dialed)
+				}
+			}
+
+			if tc.allowed {
+				if len(dialed) != 1 || dialed[0] != tc.wantDialHost {
+					t.Fatalf("allowed row: dialed %v, want exactly [%q]", dialed, tc.wantDialHost)
+				}
+			} else if len(dialed) != 0 {
+				t.Fatalf("denied row: expected NO dial, but dialed %v", dialed)
+			}
+		})
+	}
+}
+
+// TestProxySSRFMultipleURLParamsFirstWins documents and locks the multi-value
+// url= behaviour: url.Values.Get returns the FIRST value, so only the
+// genuinely-allowlisted first host (example.com) is acted on and the trailing
+// evil.com is ignored entirely — never validated, never dialed.
+func TestProxySSRFMultipleURLParamsFirstWins(t *testing.T) {
+	const allowedHost = "example.com"
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := settingsWith(allowExample(DomainOptions{}))
+	p := newProxyHandler(cfg)
+	rt := newRecordingTransport(upstream)
+	p.transport = rt
+
+	// Two url params; the first is allowlisted, the second is not. Build the
+	// request directly (doProxy escapes a single target) so both params are sent.
+	req := httptest.NewRequest(http.MethodGet,
+		"/proxy?url="+url.QueryEscape("http://example.com/")+"&url="+url.QueryEscape("http://evil.com/"), nil)
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("first-param-wins: status = %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	dialed := rt.dialedHosts()
+	if len(dialed) != 1 || dialed[0] != allowedHost {
+		t.Fatalf("first-param-wins: dialed %v, want exactly [%q] (evil.com must never be dialed)", dialed, allowedHost)
 	}
 }
 
