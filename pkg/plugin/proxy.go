@@ -313,6 +313,19 @@ func setCORSHeaders(h http.Header) {
 	h.Set("Access-Control-Allow-Headers", "*")
 }
 
+// writeDenial writes a denial response for the given reason: it looks up the
+// authoritative status for that reason (statusForReason / reasonStatus), emits
+// it via http.Error, and returns the reason so the caller can assign it to the
+// handler's `denied` token for the metrics emission. Deriving BOTH the client
+// status and the metric reason from the single reasonStatus table here is what
+// guarantees the two can never drift on a denial path. It is the sole writer for
+// the in-handler (pre-upstream) denials in ServeHTTP; the post-upstream
+// ErrorHandler denials go through proxyErrorHandler, which uses the same table.
+func writeDenial(w http.ResponseWriter, reason, message string) string {
+	http.Error(w, message, statusForReason(reason))
+	return reason
+}
+
 // ServeHTTP implements the /proxy endpoint. It runs the FULL security pipeline
 // in the handler — BEFORE any upstream connection — because httputil's
 // Director/Rewrite cannot return an error and must never be the place a denial
@@ -368,8 +381,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if req.Method != http.MethodGet {
-		denied = denialReasonMethod
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		denied = writeDenial(w, denialReasonMethod, "method not allowed")
 		return
 	}
 
@@ -377,8 +389,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// req.URL.Query() decodes it for us.
 	rawTarget := req.URL.Query().Get("url")
 	if strings.TrimSpace(rawTarget) == "" {
-		denied = denialReasonBadRequest
-		http.Error(w, "missing required 'url' query parameter", http.StatusBadRequest)
+		denied = writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
 		return
 	}
 	// We now have a caller-supplied target; log it even on the denial paths below.
@@ -392,8 +403,9 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	hostname, herr := hostnameOf(rawTarget)
 	if herr != nil {
 		auditURL = auditInvalidURL
-		denied = denialReasonScheme
-		http.Error(w, "invalid target URL: "+security.ReasonOf(herr), validationStatus(security.ReasonOf(herr)))
+		// SF2 reasons (scheme/port/userinfo/hostname/malformed) are all client
+		// errors ⇒ denialReasonScheme ⇒ 400 via the authoritative table.
+		denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(herr))
 		return
 	}
 
@@ -401,33 +413,29 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// denies everything (fail-closed default).
 	match := security.MatchHostname(hostname, p.allowlist)
 	if !match.Allowed {
-		denied = denialReasonAllowlist
-		http.Error(w, "target host is not allowlisted", http.StatusForbidden)
+		denied = writeDenial(w, denialReasonAllowlist, "target host is not allowlisted")
 		return
 	}
 
 	// SF2: full validation of scheme, userinfo, host, and port — now allowing
 	// the matched domain's extra ports. scheme/port/userinfo/hostname/malformed
-	// all map to 400 (P7 will formalise reason-specific handling and metrics).
+	// are all client errors and map to 400 via denialReasonScheme.
 	validated, err := security.ValidateURL(rawTarget, match.Options.AllowedPorts)
 	if err != nil {
-		denied = denialReasonScheme
-		http.Error(w, "invalid target URL: "+security.ReasonOf(err), validationStatus(security.ReasonOf(err)))
+		denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(err))
 		return
 	}
 
 	// SF5: rate-limit tiers (per instance, per domain), then concurrency cap.
 	instanceID := instanceIDFromContext(req)
 	if allowed, reason := p.rateLimiter.Allow(instanceID, validated.Hostname); !allowed {
-		denied = denialReasonRateLimit
-		http.Error(w, "rate limit exceeded: "+reason, http.StatusTooManyRequests)
+		denied = writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
 		return
 	}
 
 	release, ok := p.rateLimiter.Acquire()
 	if !ok {
-		denied = denialReasonConcurrency
-		http.Error(w, "too many concurrent proxy requests", http.StatusTooManyRequests)
+		denied = writeDenial(w, denialReasonConcurrency, "too many concurrent proxy requests")
 		return
 	}
 	defer release()
@@ -441,8 +449,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if perr != nil {
 		// Should not happen — rawTarget already parsed cleanly in ValidateURL —
 		// but fail closed.
-		denied = denialReasonBadRequest
-		http.Error(w, "invalid target URL", http.StatusBadRequest)
+		denied = writeDenial(w, denialReasonBadRequest, "invalid target URL")
 		return
 	}
 	// Log the validated, normalised target rather than the raw caller string.
@@ -474,13 +481,6 @@ func hostnameOf(rawTarget string) (string, error) {
 		return "", &security.ValidationError{Reason: security.ReasonHostname, Message: "URL has no host"}
 	}
 	return security.NormalizeHostname(rawHost)
-}
-
-// validationStatus maps an SF2 validation reason token to an HTTP status. All
-// current SF2 reasons (scheme, port, userinfo, hostname, malformed) are client
-// errors ⇒ 400. Kept as a function so P7 can refine per-reason behaviour.
-func validationStatus(_ string) int {
-	return http.StatusBadRequest
 }
 
 // buildTargetURL reconstructs the upstream URL the ReverseProxy will fetch from
@@ -663,42 +663,44 @@ func stripRequestHeaders(h http.Header) {
 	h.Set("Accept", proxyAccept)
 }
 
-// proxyErrorHandler maps an upstream/transport error to a clean status code. A
-// dial-time denial from SF4 (blocked resolved IP, metadata host, resolve
-// failure) surfaces here as a *security.DialError and maps to 403; an over-size
-// response (P4) maps to 413; a per-request timeout (P4: the total-budget context
-// deadline, or any net.Error timeout) maps to 504; everything else is an
-// upstream/gateway failure (502).
+// proxyErrorHandler maps an upstream/transport error to a clean status code and
+// the matching P6 denial reason. It classifies the error into a reason token and
+// then writes the status that reason maps to via the SINGLE authoritative
+// reasonStatus table (writeDenial), exactly like the in-handler denials — so a
+// post-upstream denial's status and metric reason can never drift either:
 //
-// It returns the P6 denial-reason token for the outcome it wrote, so the handler
-// can increment denials_total{reason} for ErrorHandler-driven denials. P6 only
-// OBSERVES the reason; the status mapping itself is unchanged (P7 refines it).
+//   - SF4 blocked resolved/connect IP (*DialError, ReasonBlockedIP) ⇒ ip-blocklist ⇒ 403
+//   - SF4 cloud-metadata host (ReasonMetadataHost) ⇒ metadata ⇒ 403
+//   - SF4 resolve failure / no host (ReasonResolveFailed, ReasonNoHost) ⇒ upstream ⇒ 502
+//   - over-size response (P4) ⇒ size-limit ⇒ 413
+//   - per-request-budget timeout / net.Error timeout (P4, Q10) ⇒ timeout ⇒ 504
+//   - everything else ⇒ upstream ⇒ 502
+//
+// It returns the reason so the handler can increment denials_total{reason} for
+// the ErrorHandler-driven denial.
 func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) string {
 	setCORSHeaders(w.Header())
-	switch reason := security.DialReasonOf(err); reason {
-	case security.ReasonBlockedIP, security.ReasonMetadataHost:
-		http.Error(w, "target resolves to a blocked address", http.StatusForbidden)
-		return denialReasonIPBlocklist
+	switch security.DialReasonOf(err) {
+	case security.ReasonBlockedIP:
+		return writeDenial(w, denialReasonIPBlocklist, "target resolves to a blocked address")
+	case security.ReasonMetadataHost:
+		return writeDenial(w, denialReasonMetadata, "target is a blocked cloud-metadata endpoint")
 	case security.ReasonResolveFailed, security.ReasonNoHost:
-		http.Error(w, "target host could not be resolved", http.StatusBadGateway)
-		return denialReasonMetadata
+		return writeDenial(w, denialReasonUpstream, "target host could not be resolved")
 	}
 	// P4: response body exceeded the configured size limit (clean Content-Length
 	// path — no body bytes streamed yet) ⇒ 413.
 	if errors.Is(err, errResponseTooLarge) {
-		http.Error(w, "upstream response exceeds maximum allowed size", http.StatusRequestEntityTooLarge)
-		return denialReasonSizeLimit
+		return writeDenial(w, denialReasonSizeLimit, "upstream response exceeds maximum allowed size")
 	}
 	// P4: the total per-request budget (Q10) expired ⇒ 504. The transport
 	// surfaces the context deadline as context.DeadlineExceeded; a stalled
 	// connection/handshake instead surfaces a net.Error with Timeout()==true.
 	var netErr net.Error
 	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
-		http.Error(w, "upstream request timed out", http.StatusGatewayTimeout)
-		return denialReasonTimeout
+		return writeDenial(w, denialReasonTimeout, "upstream request timed out")
 	}
-	http.Error(w, "upstream request failed", http.StatusBadGateway)
-	return denialReasonUpstream
+	return writeDenial(w, denialReasonUpstream, "upstream request failed")
 }
 
 // frameAncestorsDirective is the CSP directive that controls who may frame a

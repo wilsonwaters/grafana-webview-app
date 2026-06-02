@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"net/http"
 	"strconv"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -23,23 +24,56 @@ const (
 	labelReason = "reason"
 )
 
-// Denial-reason label values for denials_total. P6 OBSERVES the reason each
-// pipeline branch already produced; it does not change the denial→response
-// taxonomy (that is P7). The set covers every early-return / error-handler
-// denial path in ServeHTTP and proxyErrorHandler.
+// Denial-reason label values for denials_total. P7 makes the full
+// denial→(status, reason) matrix authoritative: every denial branch picks a
+// reason token here and writes the status reasonStatus (below) assigns to it,
+// so the status sent to the client and the reason recorded on denials_total
+// can never drift. The set covers every early-return denial in ServeHTTP and
+// every error-handler denial in proxyErrorHandler.
 const (
 	denialReasonAllowlist   = "allowlist"    // SF3 empty/non-matching allowlist (403)
-	denialReasonIPBlocklist = "ip-blocklist" // SF4 blocked resolved IP / metadata host (403)
+	denialReasonIPBlocklist = "ip-blocklist" // SF4 blocked resolved/connect IP (403)
+	denialReasonMetadata    = "metadata"     // SF4 cloud-metadata host (403)
 	denialReasonRateLimit   = "rate-limit"   // SF5 per-instance/per-domain rate tier (429)
 	denialReasonConcurrency = "concurrency"  // SF5 concurrency cap exhausted (429)
 	denialReasonSizeLimit   = "size-limit"   // P4 response exceeds MaxResponseBytes (413)
-	denialReasonTimeout     = "timeout"      // P4 per-request budget expired (504)
 	denialReasonScheme      = "scheme"       // SF2 scheme/port/userinfo/host/malformed (400)
-	denialReasonMethod      = "method"       // non-GET method (405)
 	denialReasonBadRequest  = "bad-request"  // missing url param / unbuildable target (400)
-	denialReasonMetadata    = "metadata"     // SF4 resolve failure / no host (502)
-	denialReasonUpstream    = "upstream"     // generic upstream/gateway failure (502)
+	denialReasonMethod      = "method"       // non-GET method (405)
+	denialReasonTimeout     = "timeout"      // P4 per-request budget expired (504)
+	denialReasonUpstream    = "upstream"     // upstream resolve/transport/gateway failure (502)
 )
+
+// reasonStatus is the authoritative denial-reason → HTTP-status mapping for the
+// /proxy endpoint (P7) and the SINGLE source of truth for the status a denial
+// produces. Every denial branch picks a reason and writes the status this table
+// assigns to it (via statusForReason / writeDenial), so a future edit cannot let
+// the status sent to the client diverge from the reason recorded on
+// denials_total. The denial classes intentionally span 400/403/405/413/429/502/504.
+var reasonStatus = map[string]int{
+	denialReasonAllowlist:   http.StatusForbidden,             // 403
+	denialReasonIPBlocklist: http.StatusForbidden,             // 403
+	denialReasonMetadata:    http.StatusForbidden,             // 403
+	denialReasonRateLimit:   http.StatusTooManyRequests,       // 429
+	denialReasonConcurrency: http.StatusTooManyRequests,       // 429
+	denialReasonSizeLimit:   http.StatusRequestEntityTooLarge, // 413
+	denialReasonScheme:      http.StatusBadRequest,            // 400
+	denialReasonBadRequest:  http.StatusBadRequest,            // 400
+	denialReasonMethod:      http.StatusMethodNotAllowed,      // 405
+	denialReasonTimeout:     http.StatusGatewayTimeout,        // 504
+	denialReasonUpstream:    http.StatusBadGateway,            // 502
+}
+
+// statusForReason returns the HTTP status the given denial reason maps to. An
+// unknown reason — which the closed reason set above is meant to make
+// impossible — is treated as an internal error rather than silently mapped to
+// 200, so any drift between the reason set and the table surfaces loudly.
+func statusForReason(reason string) int {
+	if status, ok := reasonStatus[reason]; ok {
+		return status
+	}
+	return http.StatusInternalServerError
+}
 
 // proxyMetrics holds the Prometheus collectors for the /proxy endpoint. It is
 // constructed once (per registry) by newProxyMetrics and is safe for concurrent
