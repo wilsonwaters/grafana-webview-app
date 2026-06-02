@@ -2,10 +2,39 @@ name: Latest Grafana API compatibility check
 on: [pull_request]
 
 jobs:
-  compatibilitycheck:
+  # Discover every plugin module entrypoint. This plugin ships more than one
+  # (the app module and the nested panel module), so we emit a JSON array and
+  # run the compatibility check as a matrix over each. Emitting a JSON array
+  # also avoids the multiline-$GITHUB_OUTPUT pitfall a bare `find` produces
+  # once more than one module.tsx exists.
+  discover-modules:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    outputs:
+      modules: ${{ steps.find-modules.outputs.modules }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Find module.ts / module.tsx entrypoints
+        id: find-modules
+        run: |
+          MODULES="$(find ./src -type f \( -name "module.ts" -o -name "module.tsx" \) \
+            | jq -R -s -c 'split("\n") | map(select(length > 0))')"
+          echo "Discovered modules: ${MODULES}"
+          echo "modules=${MODULES}" >> "$GITHUB_OUTPUT"
+
+  compatibilitycheck:
+    needs: discover-modules
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        module: ${{ fromJSON(needs.discover-modules.outputs.modules) }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -23,15 +52,9 @@ jobs:
       - name: Build plugin
         run: npm run build
 
-      - name: Find module.ts or module.tsx
-        id: find-module-ts
-        run: |
-          MODULETS="$(find ./src -type f \( -name "module.ts" -o -name "module.tsx" \))"
-          echo "modulets=${MODULETS}" >> $GITHUB_OUTPUT
-
       - name: Compatibility check
         uses: grafana/plugin-actions/is-compatible@is-compatible/v1.0.2
         with:
-          module: ${{ steps.find-module-ts.outputs.modulets }}
+          module: ${{ matrix.module }}
           comment-pr: 'no'
           fail-if-incompatible: 'yes'
