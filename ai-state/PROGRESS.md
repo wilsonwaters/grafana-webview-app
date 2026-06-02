@@ -11,9 +11,17 @@ plugin settings schema/loader are in place. No real viewport, proxy, or security
 
 ## Currently in flight
 
-- None. **foundation + panel-core streams COMPLETE.** Next stream to start:
-  `security-foundation` (#19–#23) — the backend security building blocks required before any
-  proxy work. (BOM radar specifically needs the proxy, which depends on this stream.)
+- None. **foundation + panel-core COMPLETE; security-foundation STARTED (SF1 #81 merged).**
+  Next: SF2 (#20) URL validator → SF3 (#21) allowlist matcher → SF4 (#22) DNS-resolve-then-dial
+  → SF5 (#23) rate limiter. Then frameability (#24–27) → proxy (#28–34) → content-rewriting
+  (#35–39). The BOM radar test becomes possible once proxy + content-rewriting land.
+
+## Screenshots convention (added 2026-06-02)
+
+PR runtime screenshots must be committed to `docs/screenshots/issue-<N>/` and embedded via raw
+GitHub URLs in the PR body (a bare `/tmp/...` path is invisible to reviewers). Codified in
+`.claude/agents/orchestrator.md`. Backfilled #74/#75/#77/#79/#80 with inline screenshot comments;
+key shots committed under `docs/screenshots/`.
 
 ## CI / signing health (resolved 2026-06-02)
 
@@ -30,6 +38,8 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#81 (SF1)** merged — hardcoded IP-blocklist library (`pkg/security/`), fail-closed, IPv4-mapped
+  IPv6 unwrap, ~50 tests, 96% coverage. (security-foundation stream started.)
 - **#80 (PC5)** merged — view-mode behaviours: auto-refresh, debug overlay, multi-instance.
   hide-selectors deferred to proxy (CR5); OPEN-QUESTIONS Q4 resolved. **panel-core stream done.**
 - **#79 (PC4)** merged — editor numeric inputs, dimension inputs, reset; URL deduped. AC6 reconciled.
