@@ -564,6 +564,124 @@ func TestProxySSRFMultipleURLParamsFirstWins(t *testing.T) {
 	}
 }
 
+// TestProxyStripsRequestHeaders covers Completion Criteria: auth and
+// Grafana-specific headers are absent from the forwarded request, and the
+// conservative User-Agent/Accept are present with the expected values. An inbound
+// request carrying every sensitive header category is sent; the stub upstream
+// RECORDS exactly the headers it received, and we assert on those.
+func TestProxyStripsRequestHeaders(t *testing.T) {
+	var received http.Header
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received = r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	cfg := settingsWith(allowExample(DomainOptions{}))
+	p := newTestHandler(t, cfg, upstream)
+
+	// Inbound request loaded with every category that must be stripped.
+	req := httptest.NewRequest(http.MethodGet, "/proxy?url="+url.QueryEscape("http://example.com/page"), nil)
+	inbound := map[string]string{
+		"Cookie":                   "grafana_session=secret",
+		"Cookie2":                  "$Version=1",
+		"Authorization":            "Bearer leaked-token",
+		"Proxy-Authorization":      "Basic abc",
+		"X-Grafana-Id":             "id-token-value",
+		"X-Grafana-Org-Id":         "1",
+		"X-Grafana-Device-Id":      "device-xyz",
+		"X-Forwarded-For":          "10.0.0.1",
+		"X-Forwarded-Host":         "grafana.internal",
+		"X-Forwarded-Proto":        "https",
+		"X-Forwarded-Port":         "3000",
+		"Forwarded":                "for=10.0.0.1;host=grafana.internal",
+		"X-Real-Ip":                "10.0.0.1",
+		"Referer":                  "https://grafana.internal/d/abc",
+		"Origin":                   "https://grafana.internal",
+		"Via":                      "1.1 grafana",
+		"X-Forwarded-Client-Cert":  "By=spiffe://x;Hash=abc",
+		"True-Client-IP":           "10.0.0.1",
+		"Cf-Connecting-Ip":         "10.0.0.1",
+		"Fastly-Client-Ip":         "10.0.0.1",
+		"X-Client-Ip":              "10.0.0.1",
+		"X-Cluster-Client-Ip":      "10.0.0.1",
+		"X-Original-Forwarded-For": "10.0.0.1",
+		"X-Original-Host":          "grafana.internal",
+		"X-Original-Url":           "/d/abc",
+	}
+	for k, v := range inbound {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	p.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got status %d, want 200 (body=%q)", rec.Code, rec.Body.String())
+	}
+	if received == nil {
+		t.Fatal("upstream did not record any request headers")
+	}
+
+	// Every stripped category must be ABSENT on the upstream-received request.
+	for _, name := range []string{
+		"Cookie", "Cookie2", "Authorization", "Proxy-Authorization",
+		"X-Grafana-Id", "X-Grafana-Org-Id", "X-Grafana-Device-Id",
+		"X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Forwarded-Port",
+		"Forwarded", "X-Real-Ip", "Referer", "Origin", "Via",
+		"X-Forwarded-Client-Cert", "True-Client-IP", "Cf-Connecting-Ip", "Fastly-Client-Ip",
+		"X-Client-Ip", "X-Cluster-Client-Ip", "X-Original-Forwarded-For", "X-Original-Host", "X-Original-Url",
+	} {
+		if v := received.Get(name); v != "" {
+			t.Errorf("header %q should be stripped, upstream got %q", name, v)
+		}
+	}
+
+	// Belt-and-braces: NO X-Grafana-* header of any kind survived the prefix sweep.
+	for key := range received {
+		if strings.HasPrefix(strings.ToLower(key), "x-grafana-") {
+			t.Errorf("X-Grafana-* header %q leaked to upstream", key)
+		}
+	}
+
+	// Conservative UA/Accept must be PRESENT with the expected values.
+	if got := received.Get("User-Agent"); got != proxyUserAgent {
+		t.Errorf("User-Agent = %q, want %q", got, proxyUserAgent)
+	}
+	if got := received.Get("Accept"); got != proxyAccept {
+		t.Errorf("Accept = %q, want %q", got, proxyAccept)
+	}
+}
+
+// TestStripRequestHeadersUnit exercises stripRequestHeaders directly (no proxy),
+// confirming the prefix sweep, exact-match deletions, and the overwrite (not
+// append) semantics of the conservative UA/Accept even when inbound values exist.
+func TestStripRequestHeadersUnit(t *testing.T) {
+	h := http.Header{}
+	h.Set("Cookie", "x=1")
+	h.Set("Authorization", "Bearer t")
+	h.Set("X-Grafana-Anything", "v")
+	h.Set("User-Agent", "Mozilla/5.0 (real browser)")
+	h.Set("Accept", "application/json")
+	h.Set("Accept-Language", "en") // not stripped: kept for a correct fetch
+
+	stripRequestHeaders(h)
+
+	for _, name := range []string{"Cookie", "Authorization", "X-Grafana-Anything"} {
+		if v := h.Get(name); v != "" {
+			t.Errorf("%q should be deleted, got %q", name, v)
+		}
+	}
+	if got := h["User-Agent"]; len(got) != 1 || got[0] != proxyUserAgent {
+		t.Errorf("User-Agent = %v, want exactly [%q]", got, proxyUserAgent)
+	}
+	if got := h["Accept"]; len(got) != 1 || got[0] != proxyAccept {
+		t.Errorf("Accept = %v, want exactly [%q]", got, proxyAccept)
+	}
+	if got := h.Get("Accept-Language"); got != "en" {
+		t.Errorf("Accept-Language should be preserved, got %q", got)
+	}
+}
+
 // settingsWith returns a PluginSettings with the given allowlist and otherwise
 // generous defaults so rate limits do not interfere with non-rate-limit tests.
 func settingsWith(domains []AllowedDomain) PluginSettings {

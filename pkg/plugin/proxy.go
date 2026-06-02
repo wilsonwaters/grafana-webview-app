@@ -17,6 +17,62 @@ import (
 // proxyPath is the resource path the proxy endpoint is registered under.
 const proxyPath = "/proxy"
 
+// proxyUserAgent is the conservative, non-browser User-Agent the proxy presents
+// to upstreams. The proxy is a stateless, unauthenticated fetcher: it identifies
+// itself honestly as the plugin rather than impersonating a real browser, and
+// carries no version/build detail that could fingerprint the Grafana instance.
+const proxyUserAgent = "grafana-webview-proxy"
+
+// proxyAccept is the conservative Accept header sent upstream. It advertises a
+// document-oriented preference (the proxy fetches framed top-level pages) without
+// echoing whatever the viewer's browser negotiated, which could leak client
+// details. A sane HTML-first default is sufficient for the top-level fetch.
+const proxyAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+
+// strippedRequestHeaders are the exact-match headers removed from every outgoing
+// proxied request before it is forwarded upstream. Header.Del canonicalises the
+// key, so these match case-insensitively. The goal is that the forwarded request
+// reveals NOTHING about the Grafana instance or the viewer — it is a stateless,
+// unauthenticated fetch. Each removal is justified inline; X-Grafana-* tokens are
+// swept separately by prefix (see stripRequestHeaders) since they are open-ended.
+var strippedRequestHeaders = []string{
+	// Credentials / session — must never reach the upstream.
+	"Cookie",              // viewer session cookies (incl. Grafana session)
+	"Cookie2",             // legacy RFC 2965 cookie variant
+	"Authorization",       // bearer/basic creds carried inbound
+	"Proxy-Authorization", // proxy-layer creds
+
+	// Identity / origin leakage — reveal the Grafana instance or the viewer.
+	"X-Forwarded-For",   // viewer/Grafana client IP chain
+	"X-Forwarded-Host",  // Grafana instance hostname
+	"X-Forwarded-Proto", // Grafana instance scheme
+	"X-Forwarded-Port",  // Grafana instance port
+	"Forwarded",         // RFC 7239 consolidated forwarding info
+	"X-Real-Ip",         // viewer/Grafana client IP
+	"Referer",           // the proxy/Grafana page that triggered the fetch
+	"Origin",            // the Grafana origin
+	"Via",               // proxy chain identifying intermediaries
+
+	// Edge/CDN-injected client-IP and mTLS identity — set by infrastructure in
+	// front of Grafana; could leak the viewer's IP or client-cert identity.
+	"X-Forwarded-Client-Cert",  // Envoy/Istio mTLS client-cert (XFCC)
+	"True-Client-IP",           // Akamai / Cloudflare Enterprise client IP
+	"Cf-Connecting-Ip",         // Cloudflare client IP
+	"Fastly-Client-Ip",         // Fastly client IP
+	"X-Client-Ip",              // generic client IP
+	"X-Cluster-Client-Ip",      // cluster ingress client IP
+	"X-Original-Forwarded-For", // pre-rewrite forwarding chain
+	"X-Original-Host",          // pre-rewrite Grafana host
+	"X-Original-Url",           // pre-rewrite request URL
+}
+
+// xGrafanaHeaderPrefix is swept (case-insensitively) off every outgoing request:
+// Grafana injects auth/identity context headers under this prefix (e.g.
+// X-Grafana-Id, X-Grafana-Org-Id, X-Grafana-Device-Id). Deleting the whole prefix
+// — rather than an enumerated list — guarantees no current or future Grafana
+// identity header leaks to an arbitrary upstream.
+const xGrafanaHeaderPrefix = "x-grafana-"
+
 // defaultInstanceID is the rate-limiter instance key used when the plugin
 // request context does not carry an org/user we can key on. P1 keys the
 // per-instance rate-limit tier on the Grafana org ID; when that is absent we
@@ -258,11 +314,45 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			r.Out.URL.Path = target.Path
 			r.Out.URL.RawQuery = target.RawQuery
 			r.Out.Host = "" // use target Host (r.Out.URL.Host) for the Host header
+
+			// P2: strip auth/identity headers from the OUTGOING request and set
+			// conservative UA/Accept. Operates on r.Out (the forwarded request),
+			// never r.In, so nothing about the Grafana instance or viewer leaks.
+			stripRequestHeaders(r.Out.Header)
 		},
 		ModifyResponse: stripFramingHeaders,
 		ErrorHandler:   proxyErrorHandler,
 	}
 	rp.ServeHTTP(w, req)
+}
+
+// stripRequestHeaders sanitises the OUTGOING proxied request: it deletes every
+// credential/identity/origin header (exact matches in strippedRequestHeaders plus
+// any X-Grafana-* header found by prefix sweep) and then sets a conservative,
+// non-browser User-Agent and a sane Accept. The proxy forwards nothing that
+// identifies the Grafana instance or the viewer — it is a stateless,
+// unauthenticated fetch. Response-side stripping (Set-Cookie/HSTS/etc.) is P3.
+func stripRequestHeaders(h http.Header) {
+	for _, name := range strippedRequestHeaders {
+		h.Del(name)
+	}
+
+	// Sweep all X-Grafana-* headers by prefix (case-insensitive). Collect first,
+	// then delete, to avoid mutating the map while ranging over its keys.
+	var grafanaKeys []string
+	for key := range h {
+		if strings.HasPrefix(strings.ToLower(key), xGrafanaHeaderPrefix) {
+			grafanaKeys = append(grafanaKeys, key)
+		}
+	}
+	for _, key := range grafanaKeys {
+		h.Del(key)
+	}
+
+	// Set conservative outgoing headers AFTER stripping so inbound values cannot
+	// survive: overwrite (Set) rather than add.
+	h.Set("User-Agent", proxyUserAgent)
+	h.Set("Accept", proxyAccept)
 }
 
 // proxyErrorHandler maps an upstream/transport error to a clean status code. A
