@@ -1,6 +1,8 @@
 package plugin
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"io"
@@ -548,13 +550,20 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			stripRequestHeaders(r.Out.Header)
 		},
 		// P4: enforce the max-response-body size, then the P1/P3 framing/header
-		// strip. The size step runs FIRST so an over-Content-Length response
-		// short-circuits with errResponseTooLarge before any header rewriting.
+		// strip, then (CR1) the HTML-detect + gzip-decode prep step. The size
+		// step runs FIRST so an over-Content-Length response short-circuits with
+		// errResponseTooLarge before any header rewriting; the framing/header
+		// strip (P1/P3) runs next on the headers; finally prepareHTMLBody decodes
+		// gzip for HTML responses so the body is plain and ready for CR2's
+		// rewrite, leaving non-HTML responses completely untouched.
 		ModifyResponse: func(resp *http.Response) error {
 			if err := enforceResponseSize(resp, maxBytes); err != nil {
 				return err
 			}
-			return stripFramingHeaders(resp)
+			if err := stripFramingHeaders(resp); err != nil {
+				return err
+			}
+			return prepareHTMLBody(resp, maxBytes)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			denied = proxyErrorHandler(w, r, err)
@@ -634,6 +643,133 @@ func (l *limitedBody) Read(p []byte) (int, error) {
 
 func (l *limitedBody) Close() error { return l.rc.Close() }
 
+// contentEncodingGzip is the Content-Encoding value CR1 decodes. Only gzip is
+// handled: it is the encoding the issue scopes (AC 14) and is by far the most
+// common on the web. deflate and br (Brotli) are intentionally NOT decoded here
+// — a response carrying one of those encodings is treated as non-decodable and
+// passed through with its body and headers untouched, exactly like a non-HTML
+// response, so the client (or, later, CR2) never receives a half-decoded body.
+const contentEncodingGzip = "gzip"
+
+// isHTMLContentType reports whether a Content-Type header value names an HTML
+// document. Matching is case-insensitive and tolerates parameters such as a
+// "; charset=utf-8" suffix and surrounding whitespace, so "text/html",
+// "TEXT/HTML; charset=UTF-8", and "text/html ;charset=utf-8" all match. Only
+// the bare "text/html" media type is treated as HTML; anything else (JSON,
+// images, application/xhtml+xml, etc.) is not, so it passes through unchanged.
+func isHTMLContentType(contentType string) bool {
+	// Cut off any parameters (charset, boundary, ...) at the first ';'.
+	mediaType := contentType
+	if i := strings.IndexByte(mediaType, ';'); i >= 0 {
+		mediaType = mediaType[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(mediaType), "text/html")
+}
+
+// prepareHTMLBody is the CR1 step: it detects HTML by Content-Type and, for
+// gzip-encoded HTML responses, decompresses the body in place so that what
+// remains is plain, ready-to-rewrite HTML. It runs AFTER the P4 size guard and
+// the P1/P3 framing/header strip, and is the seam CR2 will extend with goquery
+// rewriting (see the // CR2: marker below).
+//
+// Behaviour:
+//   - Non-HTML responses (any Content-Type that is not text/html) are passed
+//     through COMPLETELY UNCHANGED: no body read, no header touched. This keeps
+//     compressed JSON/images/etc. byte-identical to the upstream.
+//   - HTML responses NOT encoded with gzip are passed through unchanged too:
+//     there is nothing to decode, and CR1 must not otherwise mutate the body.
+//     (deflate/br are out of scope — see contentEncodingGzip — and are treated
+//     as non-decodable, i.e. left untouched.)
+//   - HTML responses with Content-Encoding: gzip are decompressed; resp.Body is
+//     replaced with the decoded bytes, the Content-Encoding header is removed,
+//     and Content-Length is set to the decoded length so the client does not try
+//     to re-decode or mis-frame the body.
+//
+// SECURITY (gzip-bomb guard): decompression is a decompression-bomb DoS vector,
+// so the DECODED size is bounded by the same MaxResponseBytes limit P4 enforces
+// on the wire size. The gzip stream is read through an io.LimitReader capped at
+// maxBytes+1; if the decoded body would exceed maxBytes we return the
+// errResponseTooLarge sentinel (→ clean 413 via proxyErrorHandler) instead of
+// reading the stream unbounded into memory. A maxBytes <= 0 means "no limit".
+func prepareHTMLBody(resp *http.Response, maxBytes int64) error {
+	if resp == nil || resp.Body == nil {
+		return nil
+	}
+
+	// Non-HTML ⇒ leave the response entirely alone.
+	if !isHTMLContentType(resp.Header.Get("Content-Type")) {
+		return nil
+	}
+
+	// HTML, but not gzip-encoded ⇒ nothing to decode; pass through unchanged.
+	// (Content-Encoding values are case-insensitive tokens.)
+	if !strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), contentEncodingGzip) {
+		return nil
+	}
+
+	decoded, err := decodeGzipBounded(resp.Body, maxBytes)
+	// resp.Body is fully consumed (or errored) above; close the original reader
+	// regardless of outcome so the upstream connection can be reused/released.
+	if cerr := resp.Body.Close(); cerr != nil && err == nil {
+		err = cerr
+	}
+	if err != nil {
+		// errResponseTooLarge propagates to proxyErrorHandler (→ 413); a malformed
+		// gzip stream surfaces as a generic error (→ 502). Either way ModifyResponse
+		// returning a non-nil error means the ReverseProxy invokes its ErrorHandler
+		// before writing any body, so the client never sees a half-decoded payload.
+		return err
+	}
+
+	// CR2: insert HTML rewriting here — operate on `decoded` (plain HTML bytes)
+	// with goquery (base-tag injection, subresource URL rewriting, frame-buster
+	// and CSP-meta removal), then re-set resp.Body/Content-Length from the
+	// rewritten bytes. CR1 only decodes; it does NOT rewrite.
+
+	resp.Body = io.NopCloser(bytes.NewReader(decoded))
+	// The body is now plain HTML: drop the encoding header so the client does not
+	// attempt to re-decode, and set Content-Length to the decoded length so the
+	// framing is correct (no stale compressed length).
+	resp.Header.Del("Content-Encoding")
+	resp.ContentLength = int64(len(decoded))
+	resp.Header.Set("Content-Length", strconv.Itoa(len(decoded)))
+	return nil
+}
+
+// decodeGzipBounded gzip-decompresses r, reading at most maxBytes decoded bytes
+// (maxBytes <= 0 disables the bound). If the decoded stream would exceed
+// maxBytes it returns errResponseTooLarge WITHOUT buffering the whole stream,
+// which is the decompression-bomb guard: the underlying gzip reader is wrapped
+// in an io.LimitReader capped at maxBytes+1 so io.ReadAll can never allocate
+// more than one byte past the limit before we detect the overflow.
+func decodeGzipBounded(r io.Reader, maxBytes int64) ([]byte, error) {
+	gr, err := gzip.NewReader(r)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		// Best-effort close of the gzip reader; the decoded bytes are already
+		// buffered and any read error is reported via ReadAll below.
+		_ = gr.Close()
+	}()
+
+	if maxBytes <= 0 {
+		return io.ReadAll(gr)
+	}
+
+	// Read one byte past the limit so a body of exactly maxBytes is allowed while
+	// anything larger is detected as an overflow.
+	limited := io.LimitReader(gr, maxBytes+1)
+	decoded, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(decoded)) > maxBytes {
+		return nil, errResponseTooLarge
+	}
+	return decoded, nil
+}
+
 // stripRequestHeaders sanitises the OUTGOING proxied request: it deletes every
 // credential/identity/origin header (exact matches in strippedRequestHeaders plus
 // any X-Grafana-* header found by prefix sweep) and then sets a conservative,
@@ -661,6 +797,19 @@ func stripRequestHeaders(h http.Header) {
 	// survive: overwrite (Set) rather than add.
 	h.Set("User-Agent", proxyUserAgent)
 	h.Set("Accept", proxyAccept)
+
+	// CR1: pin Accept-Encoding to gzip explicitly. This is deliberate and
+	// security-relevant. If the outbound request carries NO Accept-Encoding,
+	// net/http's Transport silently adds "gzip" and TRANSPARENTLY decompresses
+	// the response itself — UNBOUNDED — before ModifyResponse ever runs, which
+	// (a) bypasses our decompression-bomb guard entirely and (b) hides the
+	// Content-Encoding so prepareHTMLBody could never see it. By setting the
+	// header ourselves we disable that auto-decompression (net/http only
+	// auto-decodes when it was the one that added the header), so the COMPRESSED
+	// gzip body is handed to ModifyResponse and prepareHTMLBody performs the one
+	// and only, size-bounded, decode. We advertise only gzip (the encoding CR1
+	// handles); upstreams that ignore it and send identity are handled fine too.
+	h.Set("Accept-Encoding", contentEncodingGzip)
 }
 
 // proxyErrorHandler maps an upstream/transport error to a clean status code and

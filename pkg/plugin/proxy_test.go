@@ -728,6 +728,11 @@ func TestStripRequestHeadersUnit(t *testing.T) {
 	if got := h.Get("Accept-Language"); got != "en" {
 		t.Errorf("Accept-Language should be preserved, got %q", got)
 	}
+	// CR1: Accept-Encoding is pinned to gzip so net/http does not silently
+	// auto-decompress (unbounded) before ModifyResponse runs the bounded decode.
+	if got := h["Accept-Encoding"]; len(got) != 1 || got[0] != "gzip" {
+		t.Errorf("Accept-Encoding = %v, want exactly [\"gzip\"]", got)
+	}
 }
 
 // TestStripFramingHeadersStripsResponseHeadersUnit exercises stripFramingHeaders
