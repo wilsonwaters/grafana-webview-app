@@ -41,6 +41,7 @@ func TestReasonStatusTableExhaustiveAndConsistent(t *testing.T) {
 		denialReasonMethod:      http.StatusMethodNotAllowed,      // 405
 		denialReasonTimeout:     http.StatusGatewayTimeout,        // 504
 		denialReasonUpstream:    http.StatusBadGateway,            // 502
+		denialReasonRedirect:    http.StatusBadGateway,            // 502 (CR4 redirect depth cap)
 	}
 	for reason, wantStatus := range want {
 		if got := statusForReason(reason); got != wantStatus {
@@ -163,6 +164,15 @@ func TestDenialMatrixStatusAndMetricReason(t *testing.T) {
 				return doProxy(p, "http://example.com/slow")
 			},
 		},
+		{
+			name:       "redirect depth cap => 502 / redirect-loop",
+			wantStatus: http.StatusBadGateway,
+			wantReason: denialReasonRedirect,
+			drive: func(_ *testing.T, p *proxyHandler) *httptest.ResponseRecorder {
+				// Arrive at depth == MaxRedirects (3) so the upstream 302 trips the cap.
+				return doProxyDepth(p, "http://example.com/loop", "3")
+			},
+		},
 	}
 
 	for _, tc := range cases {
@@ -190,6 +200,11 @@ func TestDenialMatrixStatusAndMetricReason(t *testing.T) {
 					w.Header().Set("Content-Length", strconv.Itoa(len(oversized)))
 					w.WriteHeader(http.StatusOK)
 					_, _ = io.WriteString(w, oversized)
+				}))
+			case denialReasonRedirect:
+				upstream = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+					w.Header().Set("Location", "http://example.com/next")
+					w.WriteHeader(http.StatusFound)
 				}))
 			}
 			if upstream != nil {

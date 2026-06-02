@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -50,6 +51,23 @@ func buildProxyURL(basePath, target string) string {
 	}
 	q := url.Values{}
 	q.Set("url", enc)
+	return basePath + "?" + q.Encode()
+}
+
+// buildRedirectProxyURL assembles basePath?url=<enc(target)>&_wvredir=<depth> via
+// url.Values (CR4). It is buildProxyURL plus the reserved redirect-hop depth
+// control param: when the browser follows a rewritten Location, serve reads
+// _wvredir back to learn the hop depth and enforce the MaxRedirects cap. Both
+// params are url.Values-encoded so the upstream target cannot inject into the
+// query string, and a fragment on target is dropped (as in buildProxyURL).
+func buildRedirectProxyURL(basePath, target string, depth int) string {
+	enc := target
+	if i := strings.IndexByte(enc, '#'); i >= 0 {
+		enc = enc[:i]
+	}
+	q := url.Values{}
+	q.Set("url", enc)
+	q.Set(wvRedirParam, strconv.Itoa(depth))
 	return basePath + "?" + q.Encode()
 }
 

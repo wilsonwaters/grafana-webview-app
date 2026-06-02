@@ -31,17 +31,18 @@ const (
 // can never drift. The set covers every early-return denial in ServeHTTP and
 // every error-handler denial in proxyErrorHandler.
 const (
-	denialReasonAllowlist   = "allowlist"    // SF3 empty/non-matching allowlist (403)
-	denialReasonIPBlocklist = "ip-blocklist" // SF4 blocked resolved/connect IP (403)
-	denialReasonMetadata    = "metadata"     // SF4 cloud-metadata host (403)
-	denialReasonRateLimit   = "rate-limit"   // SF5 per-instance/per-domain rate tier (429)
-	denialReasonConcurrency = "concurrency"  // SF5 concurrency cap exhausted (429)
-	denialReasonSizeLimit   = "size-limit"   // P4 response exceeds MaxResponseBytes (413)
-	denialReasonScheme      = "scheme"       // SF2 scheme/port/userinfo/host/malformed (400)
-	denialReasonBadRequest  = "bad-request"  // missing url param / unbuildable target (400)
-	denialReasonMethod      = "method"       // non-GET method (405)
-	denialReasonTimeout     = "timeout"      // P4 per-request budget expired (504)
-	denialReasonUpstream    = "upstream"     // upstream resolve/transport/gateway failure (502)
+	denialReasonAllowlist   = "allowlist"     // SF3 empty/non-matching allowlist (403)
+	denialReasonIPBlocklist = "ip-blocklist"  // SF4 blocked resolved/connect IP (403)
+	denialReasonMetadata    = "metadata"      // SF4 cloud-metadata host (403)
+	denialReasonRateLimit   = "rate-limit"    // SF5 per-instance/per-domain rate tier (429)
+	denialReasonConcurrency = "concurrency"   // SF5 concurrency cap exhausted (429)
+	denialReasonSizeLimit   = "size-limit"    // P4 response exceeds MaxResponseBytes (413)
+	denialReasonScheme      = "scheme"        // SF2 scheme/port/userinfo/host/malformed (400)
+	denialReasonBadRequest  = "bad-request"   // missing url param / unbuildable target (400)
+	denialReasonMethod      = "method"        // non-GET method (405)
+	denialReasonTimeout     = "timeout"       // P4 per-request budget expired (504)
+	denialReasonUpstream    = "upstream"      // upstream resolve/transport/gateway failure (502)
+	denialReasonRedirect    = "redirect-loop" // CR4 redirect depth cap exceeded (502)
 )
 
 // reasonStatus is the authoritative denial-reason → HTTP-status mapping for the
@@ -62,6 +63,7 @@ var reasonStatus = map[string]int{
 	denialReasonMethod:      http.StatusMethodNotAllowed,      // 405
 	denialReasonTimeout:     http.StatusGatewayTimeout,        // 504
 	denialReasonUpstream:    http.StatusBadGateway,            // 502
+	denialReasonRedirect:    http.StatusBadGateway,            // 502
 }
 
 // statusForReason returns the HTTP status the given denial reason maps to. An
