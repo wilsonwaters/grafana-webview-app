@@ -2,14 +2,18 @@ package plugin
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wilsonwaters/webview/pkg/security"
 )
@@ -757,6 +761,229 @@ func TestStripFramingHeadersStripsResponseHeadersUnit(t *testing.T) {
 	}
 	if got := resp.Header.Get("Content-Type"); got != "text/html" {
 		t.Errorf("Content-Type should be preserved, got %q", got)
+	}
+}
+
+// TestProxyResponseTooLargeContentLength covers Completion Criterion (P4):
+// an upstream response whose declared Content-Length exceeds MaxResponseBytes
+// is rejected with a CLEAN 413 before any body byte is streamed. The limit is
+// set tiny (16 bytes) so the test allocates nothing large. enforceResponseSize
+// returns errResponseTooLarge from ModifyResponse, which runs before the
+// ReverseProxy writes status/headers, so the ErrorHandler emits 413.
+func TestProxyResponseTooLargeContentLength(t *testing.T) {
+	const oversized = "this body is definitely longer than sixteen bytes"
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Set an explicit, honest Content-Length larger than the 16-byte limit.
+		w.Header().Set("Content-Length", strconv.Itoa(len(oversized)))
+		w.WriteHeader(http.StatusOK)
+		if _, err := io.WriteString(w, oversized); err != nil {
+			t.Errorf("upstream write: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := settingsWith(allowExample(DomainOptions{}))
+	cfg.MaxResponseBytes = 16
+	p := newTestHandler(t, cfg, upstream)
+
+	rec := doProxy(p, "http://example.com/big")
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("oversized Content-Length: got status %d, want 413 (body=%q)", rec.Code, rec.Body.String())
+	}
+	// The clean path must NOT have leaked the oversized upstream body.
+	if strings.Contains(rec.Body.String(), oversized) {
+		t.Fatalf("413 path leaked upstream body: %q", rec.Body.String())
+	}
+}
+
+// TestProxyResponseTooLargeChunked covers the P4 defense-in-depth path: an
+// upstream that does NOT declare Content-Length (chunked / -1) but streams more
+// than MaxResponseBytes. DOCUMENTED BEHAVIOUR: because the ReverseProxy has
+// already written 200 + headers before the body is read, this path CANNOT
+// become a clean 413 — the limited reader caps the copy at the limit and errors,
+// so the delivered body is truncated to at most MaxResponseBytes (and the copy
+// fails). We assert the body is capped, never the full oversized payload.
+func TestProxyResponseTooLargeChunked(t *testing.T) {
+	const limit = 16
+	// Build a body strictly larger than the limit. No Content-Length is set
+	// (the handler writes without one and flushes => chunked), so resp.ContentLength
+	// is -1 and only the limitedBody can catch the over-size.
+	oversized := strings.Repeat("A", limit*4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Transfer-Encoding", "chunked")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+		// Write in small chunks so the response is genuinely streamed.
+		for i := 0; i < len(oversized); i += 4 {
+			if _, err := io.WriteString(w, oversized[i:i+4]); err != nil {
+				return // client may have hung up after the limit; not a test failure
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+	}))
+	defer upstream.Close()
+
+	cfg := settingsWith(allowExample(DomainOptions{}))
+	cfg.MaxResponseBytes = limit
+	p := newTestHandler(t, cfg, upstream)
+
+	rec := doProxy(p, "http://example.com/stream")
+	// Status was already 200 before streaming began (documented caveat); the key
+	// guarantee is that the delivered body is CAPPED at the limit, never the full
+	// oversized payload.
+	if int64(rec.Body.Len()) > limit {
+		t.Fatalf("chunked oversize: delivered %d bytes, want <= %d (body must be capped)", rec.Body.Len(), limit)
+	}
+	if rec.Body.String() == oversized {
+		t.Fatalf("chunked oversize: full body leaked, limited reader did not cap")
+	}
+}
+
+// blockingRoundTripper is an http.RoundTripper that never returns a response: it
+// blocks until the request context is cancelled, then returns ctx.Err(). This
+// drives the total-request-budget (Q10) deadline deterministically without any
+// real multi-second sleep — when the context.WithTimeout in serveProxy fires,
+// the round-trip returns context.DeadlineExceeded.
+type blockingRoundTripper struct{}
+
+func (blockingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	<-req.Context().Done()
+	return nil, req.Context().Err()
+}
+
+// TestProxyRequestTimeout covers Completion Criterion (P4): a request that
+// exceeds the total per-request budget (RequestTimeoutSec, Q10 single budget)
+// returns 504. We use a 1-second configured timeout and a transport that blocks
+// on the context, so the deadline fires deterministically and the transport
+// surfaces context.DeadlineExceeded, which proxyErrorHandler maps to 504.
+func TestProxyRequestTimeout(t *testing.T) {
+	cfg := settingsWith(allowExample(DomainOptions{}))
+	cfg.RequestTimeoutSec = 1 // smallest the int-seconds field allows post-defaulting
+	p := newProxyHandler(cfg)
+	p.transport = blockingRoundTripper{}
+
+	start := time.Now()
+	rec := doProxy(p, "http://example.com/slow")
+	elapsed := time.Since(start)
+
+	if rec.Code != http.StatusGatewayTimeout {
+		t.Fatalf("timeout: got status %d, want 504 (body=%q)", rec.Code, rec.Body.String())
+	}
+	// Sanity: it must have actually waited for the budget, not failed instantly,
+	// and must not have hung far beyond it.
+	if elapsed < 900*time.Millisecond {
+		t.Fatalf("timeout fired too early after %v, expected ~1s budget", elapsed)
+	}
+}
+
+// TestProxyErrorHandlerResourceLimitMapping covers the P4 additions to
+// proxyErrorHandler in isolation: errResponseTooLarge => 413 and
+// context.DeadlineExceeded => 504, with CORS present on both.
+func TestProxyErrorHandlerResourceLimitMapping(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{"too large => 413", errResponseTooLarge, http.StatusRequestEntityTooLarge},
+		{"wrapped too large => 413", fmt.Errorf("copy failed: %w", errResponseTooLarge), http.StatusRequestEntityTooLarge},
+		{"deadline => 504", context.DeadlineExceeded, http.StatusGatewayTimeout},
+		{"wrapped deadline => 504", fmt.Errorf("round trip: %w", context.DeadlineExceeded), http.StatusGatewayTimeout},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodGet, "/proxy", nil)
+			proxyErrorHandler(rec, req, tc.err)
+			if rec.Code != tc.want {
+				t.Fatalf("got status %d, want %d", rec.Code, tc.want)
+			}
+			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Fatalf("error response missing CORS: %q", got)
+			}
+		})
+	}
+}
+
+// TestEnforceResponseSizeUnit exercises enforceResponseSize directly: a declared
+// Content-Length over the limit returns errResponseTooLarge immediately; a body
+// within or without a declared length is wrapped in a limitedBody that caps reads.
+func TestEnforceResponseSizeUnit(t *testing.T) {
+	t.Run("oversized content-length errors before streaming", func(t *testing.T) {
+		resp := &http.Response{
+			ContentLength: 100,
+			Body:          io.NopCloser(strings.NewReader(strings.Repeat("x", 100))),
+		}
+		if err := enforceResponseSize(resp, 16); !errors.Is(err, errResponseTooLarge) {
+			t.Fatalf("want errResponseTooLarge, got %v", err)
+		}
+	})
+
+	t.Run("undeclared oversize body is capped and errors", func(t *testing.T) {
+		resp := &http.Response{
+			ContentLength: -1, // chunked / unknown
+			Body:          io.NopCloser(strings.NewReader(strings.Repeat("y", 64))),
+		}
+		if err := enforceResponseSize(resp, 16); err != nil {
+			t.Fatalf("wrap step should not error up front, got %v", err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		if !errors.Is(err, errResponseTooLarge) {
+			t.Fatalf("reading oversize body: want errResponseTooLarge, got %v", err)
+		}
+		if int64(len(got)) > 16 {
+			t.Fatalf("limitedBody delivered %d bytes, want <= 16", len(got))
+		}
+	})
+
+	t.Run("within-limit body reads cleanly", func(t *testing.T) {
+		const body = "small"
+		resp := &http.Response{
+			ContentLength: int64(len(body)),
+			Body:          io.NopCloser(strings.NewReader(body)),
+		}
+		if err := enforceResponseSize(resp, 16); err != nil {
+			t.Fatalf("within-limit should not error, got %v", err)
+		}
+		got, err := io.ReadAll(resp.Body)
+		if err != nil {
+			t.Fatalf("reading within-limit body: %v", err)
+		}
+		if string(got) != body {
+			t.Fatalf("body = %q, want %q", got, body)
+		}
+	})
+}
+
+// TestProxyReadsConfiguredLimit covers Completion Criterion (P4): a configured
+// MaxResponseBytes overrides the default — a body that is UNDER the generous
+// default but OVER a small configured limit is rejected with 413. (Default
+// application itself is F3-tested; this confirms the proxy reads the configured
+// value rather than a hardcoded default.)
+func TestProxyReadsConfiguredLimit(t *testing.T) {
+	const body = "0123456789ABCDEF0123456789" // 26 bytes: under 5 MiB default, over 16
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+		w.WriteHeader(http.StatusOK)
+		if _, err := io.WriteString(w, body); err != nil {
+			t.Errorf("upstream write: %v", err)
+		}
+	}))
+	defer upstream.Close()
+
+	// With the configured small limit: 413.
+	cfgSmall := settingsWith(allowExample(DomainOptions{}))
+	cfgSmall.MaxResponseBytes = 16
+	if rec := doProxy(newTestHandler(t, cfgSmall, upstream), "http://example.com/x"); rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("configured small limit: got status %d, want 413", rec.Code)
+	}
+
+	// With the default (generous) limit: the same body passes through as 200.
+	cfgDefault := settingsWith(allowExample(DomainOptions{}))
+	if rec := doProxy(newTestHandler(t, cfgDefault, upstream), "http://example.com/x"); rec.Code != http.StatusOK {
+		t.Fatalf("default limit: got status %d, want 200 (body=%q)", rec.Code, rec.Body.String())
 	}
 }
 
