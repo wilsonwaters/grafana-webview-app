@@ -14,26 +14,55 @@ function buildProps(options: Partial<PanelOptions> = {}): PanelProps<PanelOption
 }
 
 describe('panels/webview/WebViewPanel', () => {
-  test('renders the not-implemented placeholder when no URL is configured', () => {
+  test('renders the empty state when no URL is configured', () => {
     render(<WebViewPanel {...buildProps({ url: '' })} />);
 
     expect(screen.getByTestId(webViewPanelTestIds.container)).toBeInTheDocument();
     expect(screen.getByTestId(webViewPanelTestIds.placeholder)).toBeInTheDocument();
-    expect(screen.queryByTestId(webViewPanelTestIds.url)).not.toBeInTheDocument();
+    // No iframe with an empty src should be rendered in the empty state.
+    expect(screen.queryByTestId(webViewPanelTestIds.iframe)).not.toBeInTheDocument();
   });
 
-  test('echoes the configured URL', () => {
+  test('renders an iframe with the configured URL as src in direct mode', () => {
     render(<WebViewPanel {...buildProps({ url: 'https://example.com' })} />);
 
-    expect(screen.getByTestId(webViewPanelTestIds.url)).toHaveTextContent('https://example.com');
+    const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+    expect(iframe).toHaveAttribute('src', 'https://example.com');
     expect(screen.queryByTestId(webViewPanelTestIds.placeholder)).not.toBeInTheDocument();
   });
 
+  test('iframe uses the exact sandbox attribute and is non-interactive', () => {
+    render(<WebViewPanel {...buildProps({ url: 'https://example.com' })} />);
+
+    const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+    expect(iframe).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+    expect(iframe).toHaveStyle({ pointerEvents: 'none' });
+  });
+
+  test('iframe is sized to the virtual dimensions and clipped by the container', () => {
+    render(<WebViewPanel {...buildProps({ url: 'https://example.com' })} />);
+
+    const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+    expect(iframe).toHaveStyle({ width: '1920px', height: '1080px', transformOrigin: 'top left' });
+    expect(screen.getByTestId(webViewPanelTestIds.container)).toHaveStyle({ overflow: 'hidden' });
+  });
+
+  test('applies the saved viewport via CSS transform', () => {
+    render(
+      <WebViewPanel
+        {...buildProps({ url: 'https://example.com', viewportX: 100, viewportY: 200, viewportZoom: 1.5 })}
+      />
+    );
+
+    const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+    expect(iframe).toHaveStyle({ transform: 'scale(1.5) translate(-100px, -200px)' });
+  });
+
   test('renders without crashing for partial / legacy options', () => {
-    // Simulate a saved dashboard with only some fields present.
     const props = { options: { url: 'https://x.test' }, width: 100, height: 100 } as unknown as PanelProps<PanelOptions>;
     render(<WebViewPanel {...props} />);
 
     expect(screen.getByTestId(webViewPanelTestIds.container)).toBeInTheDocument();
+    expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://x.test');
   });
 });
