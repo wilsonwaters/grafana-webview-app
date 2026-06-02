@@ -8,6 +8,10 @@ test.describe('Web View panel registration', () => {
     await expect(panelEditPage.getVisualizationName()).toHaveText('Web View');
 
     // The placeholder component must render without error when no URL is configured.
-    await expect(panelEditPage.panel.locator.getByText(/Web View panel/)).toBeVisible();
+    // Target the placeholder test id specifically — matching on visible text is
+    // ambiguous because the panel title also contains "Web View panel".
+    await expect(
+      panelEditPage.panel.locator.getByTestId('data-testid webview-panel-placeholder')
+    ).toBeVisible();
   });
 });
