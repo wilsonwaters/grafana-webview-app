@@ -54,6 +54,8 @@ radar) renders with working CSS/images/JS in the panel.
 - **CR3 (#95) merged** — `/proxy-resource` endpoint via a shared `serve(w,r,endpoint)` (identical pipeline/
   header policy/audit/metrics; `/proxy` unchanged); resource branch: no rewrite, Content-Type preserved,
   gzip passthrough, size-limited. **HTML+subresource render path (CR1–CR3) COMPLETE.**
-- **CR4 (#38) — in flight** — redirect handling: rewrite 3xx Location → proxy URL (browser re-enters proxy
-  per hop → full pipeline re-validates), `_wvredir` depth cap (MaxRedirects=3), ModifyResponse allowlist
-  pre-block of denied hops, both endpoints. Then CR5 (hide-selectors) finishes the stream.
+- **CR4 (#96) merged** — redirect handling: 3xx Location → proxy URL (browser re-enters per hop), `_wvredir`
+  depth cap (MaxRedirects=3 → 502), allowlist pre-block of denied hops, both endpoints; no raw Location escapes.
+- **CR5 (#39) — in flight** — hide-selector application: goquery `Find(sel)` + inline `display:none!important`
+  (markup-injection-proof; selectors validated via `cascadia.Compile` + caps), top-level HTML only, from a
+  `hide` query param. **Last content-rewriting task — after it, the stream is COMPLETE.**

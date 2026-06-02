@@ -48,25 +48,22 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **CR4 (#38) redirect handling** — content-rewriting (M), in flight. Security-critical (redirect SSRF).
-  Rewrites 3xx `Location` → proxy URL so the browser re-enters the proxy per hop (full pipeline re-validates
-  the hop: allowlist/scheme/rate + SF4 IP gate at dial); depth capped via a `_wvredir` counter (default
-  `MaxRedirects`=3 → over-depth errors); ModifyResponse allowlist pre-block denies a redirect to a
-  non-allowlisted host at the redirect step; both endpoints. **The HTML+subresource render path (CR1–CR3)
-  is COMPLETE** — an allowlisted framing-blocked page renders (HTML via `/proxy`, subresources via
-  `/proxy-resource`). After CR4: only CR5 (hide-selectors) remains in content-rewriting.
-- **Proxy stream COMPLETE and runtime-verified** (P1–P7; see Runtime verification section). The frontend
-  Proxy load-mode selector (frameability FR4) is the OTHER remaining piece for a true *in-panel* BOM test.
-- **Tracked debt:** the P4 exactly-at-limit boundary test was folded into P7 — that nit is CLOSED.
-- **Decision made (this session): proxy-first.** Per the stakeholder, drive the backend proxy
-  (P1→P7) → content-rewriting so the proxy is testable against the BOM radar via direct HTTP ASAP;
-  frameability's frontend mode-wiring (FR1→FR4) follows after. (P1's issue listed FR4 as a dep, but
-  P1's concrete criteria are backend-only; the FR4 dep was only for the in-panel demo.)
-- **Tracked follow-up (P1 review):** `DomainOptions.AllowPrivateIP` is mapped into
-  `security.AllowlistEntry` but currently INERT — SF4's dialer enforces the SF1 blocklist
-  unconditionally, so a domain with `allowPrivateIP: true` is still blocked at dial (fails CLOSED =
-  safe). Per Q5 the opt-in plumbing belongs to a later endpoint task; wire a private-IP-relaxing
-  dialer variant then. Don't advertise the option as working until then.
+- **CR5 (#39) hide-selector application** — content-rewriting (M), in flight. The LAST content-rewriting
+  task. Applies author `hideSelectors` (from a `hide` query param on the `/proxy` URL) to proxied HTML
+  via goquery `Find(sel)` + inline `style="display:none!important"` (escaped SetAttr) — markup-injection-
+  proof by construction (selector text never enters markup); selectors validated via `cascadia.Compile`
+  + length/count caps. Top-level HTML only. Frontend wiring (panel passing hideSelectors) lands with
+  FR4/proxy-mode later. **After CR5, content-rewriting is COMPLETE** — the proxy fully renders a
+  framing-blocked page (HTML rewrite + subresources + redirects + hide-selectors).
+- **Proxy stream COMPLETE + runtime-verified** (P1–P7). HTML+subresource render path (CR1–CR3) + redirects
+  (CR4) done. Remaining streams after content-rewriting: frameability (frontend wiring), direct-only-fallback,
+  testing-cicd, docs-release, catalog-prep.
+- **Tracked debt:** P4 boundary test folded into P7 (closed). CR4 nit (non-http(s) Location passed through
+  verbatim — not SSRF, documented in-code) accepted as-is.
+- **Decision (this session): proxy-first** (stakeholder). Backend proxy → content-rewriting first; frameability
+  frontend wiring after.
+- **Tracked follow-up (P1 review):** `DomainOptions.AllowPrivateIP` is mapped but INERT (fails closed); the
+  private-IP-relaxing dialer is a later endpoint task (Q5).
 
 ## Parallel execution (updated this session)
 
@@ -121,6 +118,11 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#96 (CR4)** merged — redirect handling: 3xx `Location` rewritten → proxy URL (browser re-enters proxy
+  per hop → full pipeline re-validates: allowlist/scheme/rate + SF4 IP gate); `_wvredir` depth cap
+  (MaxRedirects=3 → 502 redirect-loop; loops terminate); ModifyResponse allowlist pre-block of denied hops
+  (403); `_wvredir` never forwarded upstream; no raw http(s) Location escapes to the browser. Both endpoints.
+  92.9% coverage. Adversarial SSRF review APPROVE (no bypass).
 - **#95 (CR3)** merged — `/proxy-resource` endpoint. Extracted a shared `(*proxyHandler).serve(w,r,endpoint)`
   so `/proxy` and `/proxy-resource` run the IDENTICAL pipeline/header-policy/audit/metrics (`/proxy`
   byte-for-byte unchanged, no test touched). Resource branch: framing/header strip, NO HTML rewrite,
