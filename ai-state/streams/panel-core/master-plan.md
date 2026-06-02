@@ -13,7 +13,7 @@ demonstrable panel state.
 | # | Task | Size | Depends on |
 |---|------|------|-----------|
 | PC1 | View-mode render slice: panel reads saved options and renders the target URL in an iframe at the saved X/Y/zoom via CSS `transform: scale() translate()`, clipped by an `overflow: hidden` container, `sandbox="allow-scripts allow-same-origin"`, `pointer-events: none`. Direct mode only (iframe `src` = URL). Detect config-vs-view mode from panel editor context. (AC 8, 9, 10, 16, 30) | M | foundation F2, F4 |
-| PC2 | Viewport transform math + unit tests: pure helpers converting (X, Y, zoom, virtual dims, container size) to a CSS transform, including wheel-zoom that is cursor-position-aware and clamps zoom 0.1–5.0. (AC 33 partial) | M | PC1 |
+| PC2 | Viewport **interaction** math + unit tests. NOTE: the basic `buildViewportTransform` (X/Y/zoom → `scale() translate()`) was already delivered by PC1 in `src/panels/webview/viewport.ts`. PC2 now adds the remaining pure helpers that the PC3 editor needs: cursor-position-aware wheel-zoom (adjust X/Y so zoom anchors at the cursor), pan-delta (screen-pixel drag → virtual X/Y accounting for zoom), and zoom clamping 0.1–5.0 — all unit-tested, building on the existing helper. (AC 33 partial) | M | PC1 |
 | PC3 | Config-mode editor slice — interactive preview: drag-to-pan and wheel-to-zoom inside the editor preview pane, live X/Y/zoom coordinate readout, container captures mouse events. (AC 5) | M | PC2 |
 | PC4 | Config-mode editor slice — capture & manual inputs: "Capture current view" button writes current pan/zoom to options; numeric `@grafana/ui` inputs for X, Y, zoom kept in sync with the preview; URL field; virtual iframe dimension inputs (default 1920×1080). (AC 6, 7) | M | PC3 |
 | PC5 | View-mode behaviours: optional auto-refresh on the configured interval (default 0 = off) reloading the iframe; CSS hide-selectors applied where origin allows; optional debug overlay (off by default in view mode); verify multiple panel instances render independently. (AC 11, 12) | M | PC1 |
@@ -45,3 +45,7 @@ demonstrable panel state.
 ## Changelog
 
 - Initialised at project kickoff (planning). No tasks dispatched yet.
+- 2026-06-02: PC1 (#75) merged. PC1 necessarily implemented `buildViewportTransform`
+  (the basic CSS transform helper) that PC2 had been scoped to create. Refined PC2 to focus
+  on the still-needed *interaction* maths (cursor-anchored wheel-zoom, pan-delta, clamp) built
+  on PC1's helper, avoiding redundant work. Issue #15 updated to match.
