@@ -1,0 +1,28 @@
+# This GitHub Action automates the process of building Grafana plugins.
+# (For more information, see https://github.com/grafana/plugin-actions/blob/main/build-plugin/README.md)
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Run workflow on version tags, e.g. v1.0.0.
+
+permissions: read-all
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.0.2
+        # Plugin signing is enabled and reads the Grafana Cloud Access Policy
+        # token from the repository secret GRAFANA_ACCESS_POLICY_TOKEN.
+        # See docs/signing.md for how to create the token and add the secret.
+        # (Token generation: https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token)
+        with:
+          policy_token: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
