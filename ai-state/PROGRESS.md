@@ -45,11 +45,14 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **P4 (#31) resource limits** — proxy stream (M), in flight. Max response body size → 413 (Content-Length
-  path is clean; streaming caps/truncates — documented), total per-request timeout → 504 via a
-  `context.WithTimeout` budget. Q10 RESOLVED: one total budget (`RequestTimeoutSec`), dialer connection
-  timeout is a sub-bound — no new setting. Proxy chain after: P5 audit log → P6 metrics → P7 denial
-  wiring, then content-rewriting (CR1–CR5) makes the BOM radar render through the proxy.
+- **P5 (#32) audit logging** — proxy stream (M), in flight. One structured info log per `/proxy` request
+  (target URL, source Grafana user, status, bytes, duration) via a single `defer` in `ServeHTTP` + a
+  status/size-recording ResponseWriter; injectable `log.Logger` for tests; emitted on success AND
+  denial. Proxy chain after: P6 metrics → P7 denial wiring, then content-rewriting (CR1–CR5) makes the
+  BOM radar render through the proxy.
+- **Tracked debt (P4 review nit):** add an exactly-at-limit Content-Length test (`== MaxResponseBytes`
+  → 200) to lock the strict-`>` body-size boundary; code is confirmed correct, test-only. Fold into a
+  later proxy_test touch.
 - **Decision made (this session): proxy-first.** Per the stakeholder, drive the backend proxy
   (P1→P7) → content-rewriting so the proxy is testable against the BOM radar via direct HTTP ASAP;
   frameability's frontend mode-wiring (FR1→FR4) follows after. (P1's issue listed FR4 as a dep, but
@@ -99,6 +102,11 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#89 (P4)** merged — resource limits: max body size → 413 (clean Content-Length path; `limitedBody`
+  caps chunked/undeclared as defense-in-depth), total per-request timeout → 504 (`context.WithTimeout`,
+  deferred cancel can't truncate a legit body), error mapping via `errors.Is` (413/504; 403/502 intact).
+  Q10 = one total budget. 91.9% coverage, race-clean. Review APPROVE-WITH-NITS (boundary test tracked).
+  A transient CI `compare` ECONNRESET (bundle-size action's npm install) was re-run green.
 - **#88 (P3)** merged — incoming response-header stripping in `stripFramingHeaders`: `Set-Cookie`,
   `Strict-Transport-Security`, `Public-Key-Pins`(+report-only), `Clear-Site-Data` — upstream can't set
   cookies on / pin policy against / clear data for the Grafana origin. 91.8% coverage. Self-reviewed
