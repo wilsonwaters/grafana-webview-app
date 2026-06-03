@@ -26,7 +26,7 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
     .addRadio({
       path: 'loadMode',
       name: 'Load mode',
-      description: 'How the URL is loaded. Auto uses the mode detected at config time.',
+      description: 'How the URL is loaded. Auto uses the mode from the Test URL result (defaults to Direct).',
       defaultValue: DEFAULT_PANEL_OPTIONS.loadMode,
       settings: {
         options: [
