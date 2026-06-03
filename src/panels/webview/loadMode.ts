@@ -1,3 +1,5 @@
+import { config } from '@grafana/runtime';
+
 import type { PanelOptions } from '../../types';
 
 /**
@@ -44,7 +46,14 @@ export function resolveLoadMode(opts: PanelOptions): 'direct' | 'proxy' {
  * dropped and each remaining selector is trimmed. Encoding is handled by
  * `URLSearchParams` so URLs and selectors with special characters are safe.
  *
- * Pure function — safe to unit test in isolation.
+ * The result is prefixed with Grafana's configured sub-url
+ * (`config.appSubUrl`) so the iframe resolves correctly when Grafana is served
+ * under a sub-path (e.g. `root_url = https://host/grafana/`). When no sub-url is
+ * configured `config.appSubUrl` is `''`, so the root-served case is unchanged.
+ * (`getBackendSrv()` auto-prepends the sub-url for the FR3 Test-URL call; the
+ * raw iframe src needs it applied explicitly.)
+ *
+ * Safe to unit test in isolation given a mocked `config`.
  */
 export function buildProxySrc(opts: PanelOptions): string {
   const params = new URLSearchParams();
@@ -57,5 +66,5 @@ export function buildProxySrc(opts: PanelOptions): string {
     }
   }
 
-  return `${PROXY_RESOURCE_BASE}?${params.toString()}`;
+  return `${config.appSubUrl}${PROXY_RESOURCE_BASE}?${params.toString()}`;
 }

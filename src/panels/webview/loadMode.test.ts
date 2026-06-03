@@ -1,5 +1,15 @@
+import { config } from '@grafana/runtime';
+
 import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../types';
 import { buildProxySrc, PROXY_RESOURCE_BASE, resolveLoadMode } from './loadMode';
+
+// Mock @grafana/runtime so `config.appSubUrl` is controllable per test. It
+// defaults to '' (the root-served case), matching real Grafana when no sub-url
+// is configured. Each test that needs a sub-path sets it and the afterEach
+// restores it so other suites are unaffected.
+jest.mock('@grafana/runtime', () => ({
+  config: { appSubUrl: '' },
+}));
 
 function opts(overrides: Partial<PanelOptions> = {}): PanelOptions {
   return { ...DEFAULT_PANEL_OPTIONS, ...overrides };
@@ -37,6 +47,12 @@ describe('panels/webview/loadMode', () => {
   // src based on resolved mode" (proxy branch), incl. CR5 hide params.
   // ---------------------------------------------------------------------------
   describe('buildProxySrc', () => {
+    // Restore the default ('' = root-served) after each test so a sub-path set
+    // here cannot leak into other tests or suites sharing the mocked config.
+    afterEach(() => {
+      config.appSubUrl = '';
+    });
+
     test('builds the proxy resource URL with the target url encoded', () => {
       const src = buildProxySrc(opts({ url: 'https://example.com/path?a=1&b=2' }));
       expect(src).toBe(
@@ -50,6 +66,26 @@ describe('panels/webview/loadMode', () => {
       const src = buildProxySrc(opts({ url: 'https://example.com' }));
       expect(src.startsWith(`${PROXY_RESOURCE_BASE}?`)).toBe(true);
       expect(PROXY_RESOURCE_BASE).toBe('/api/plugins/wilsonwaters-webview-app/resources/proxy');
+    });
+
+    test('default appSubUrl ("" = root-served) → root-relative resource path (unchanged)', () => {
+      // Guard: the mocked default must be '' so the root case is byte-identical.
+      expect(config.appSubUrl).toBe('');
+      const src = buildProxySrc(opts({ url: 'https://example.com' }));
+      expect(src).toBe(
+        `${PROXY_RESOURCE_BASE}?url=${encodeURIComponent('https://example.com')}`
+      );
+    });
+
+    test('appSubUrl set → resource path is prefixed with the sub-url (sub-path Grafana)', () => {
+      config.appSubUrl = '/grafana';
+      const src = buildProxySrc(opts({ url: 'https://example.com' }));
+      expect(
+        src.startsWith('/grafana/api/plugins/wilsonwaters-webview-app/resources/proxy?')
+      ).toBe(true);
+      expect(src).toBe(
+        `/grafana${PROXY_RESOURCE_BASE}?url=${encodeURIComponent('https://example.com')}`
+      );
     });
 
     test('empty hideSelectors → no hide params', () => {
