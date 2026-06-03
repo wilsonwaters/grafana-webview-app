@@ -98,6 +98,29 @@ GitHub URLs in the PR body (a bare `/tmp/...` path is invisible to reviewers). C
 `.claude/agents/orchestrator.md`. Backfilled #74/#75/#77/#79/#80 with inline screenshot comments;
 key shots committed under `docs/screenshots/`.
 
+## Runtime render test + KEY finding (2026-06-03)
+
+**PROXY-RENDER-OK** — live in dev Grafana, the proxy FETCHED + REWROTE + RENDERED a real reachable page
+(`http://neverssl.com`, plain-HTTP to bypass the sandbox HTTPS MITM): HTTP 200, `<base href>` injected,
+audit log (`status=200 bytes=3994`) + metrics (`webview_proxy_requests_total{status="200"}`) confirmed,
+and a browser screenshot (`docs/screenshots/runtime/proxy-render-neverssl.png`) shows the fully-styled page.
+This is the live end-to-end backend evidence the earlier HTTPS smoke test (502) couldn't get. CR1–CR5 work.
+
+**⚠️ KEY FINDING — Grafana stamps `X-Frame-Options: deny` + `Content-Security-Policy: sandbox` on ALL
+`/api/plugins/*/resources/*` routes** (observed on `/resources/health` too; framework-injected, NOT our
+code — our `stripFramingHeaders` correctly Del's the UPSTREAM XFO). Consequence for FR4's approach
+(WebViewPanel points the iframe `src` directly at `/resources/proxy?url=…`): in a real Grafana the panel
+iframe will likely be **blocked from framing** (XFO:deny, even same-origin) and proxied **JS won't run**
+(CSP:sandbox) — the screenshot's "JavaScript appears to be disabled" banner is exactly this. So in-panel
+PROXY mode is not yet functional even though the backend pipeline is fully working. Direct mode is
+unaffected (frames the external URL cross-origin, not a resource route).
+**Recommended fix:** render proxy mode via fetch-then-`srcdoc` — `getBackendSrv().get()` the rewritten
+HTML (fetch is NOT subject to XFO), set iframe `srcdoc`; subresources (`/proxy-resource`) load as normal
+subresource requests (XFO/CSP-sandbox don't apply to img/script/link). **Security nuance to design/review:**
+the iframe `sandbox` flags for srcdoc — `allow-same-origin` on srcdoc inherits the GRAFANA origin (XSS/
+escalation risk for attacker-influenced proxied content), so it must NOT be set the way direct-mode does.
+Also config-dependent: Grafana `allow_embedding` affects XFO. Tracked as a new task + OPEN-QUESTION Q17.
+
 ## CI / signing health (resolved 2026-06-02)
 
 Full CI is **green**, including the e2e matrix across Grafana 12.3.6 / 12.4.3 / 13.0.1 / nightly.

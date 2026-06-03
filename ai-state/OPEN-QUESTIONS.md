@@ -22,6 +22,8 @@ an active blocker on dispatching `foundation`. Resolve before reaching the block
 | Q15 | Whether the example dashboard's proxied URL should ship pre-allowlisted in provisioning for the demo, given the empty-by-default allowlist. | DR7 | docs-release |
 | Q16 | Current catalog submission URL/review process (confirm at submission time), and whether Grafana Labs will accept a frame-header-stripping proxy on Cloud at all — be prepared to continue with Path 1 if rejected. | CP4 | catalog-prep |
 
+| Q17 | In-panel PROXY render is blocked by Grafana's resource-route security headers (`X-Frame-Options: deny` + `CSP: sandbox` on `/api/plugins/*/resources/*`): pointing the iframe `src` at `/resources/proxy` (FR4) won't frame and proxied JS won't run. Fix approach = fetch-then-`srcdoc` (getBackendSrv → iframe srcdoc; subresources unaffected). Open: the srcdoc iframe `sandbox` flags for attacker-influenced proxied content (`allow-same-origin` inherits Grafana origin → escalation risk), and whether to also document `allow_embedding`. Needs design + security review. | FR4 follow-up / new task | frameability |
+
 ## Notes
 
 - Detailed threat-model / attack-technique content is intentionally NOT recorded here; it is a
