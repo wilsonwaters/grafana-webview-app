@@ -4,6 +4,7 @@ import { PanelProps } from '@grafana/data';
 import { WebViewPanel } from './WebViewPanel';
 import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../../types';
 import { webViewPanelTestIds } from './testIds';
+import { PROXY_RESOURCE_BASE } from '../loadMode';
 
 function buildProps(options: Partial<PanelOptions> = {}, dims: { width?: number; height?: number } = {}): PanelProps<PanelOptions> {
   return {
@@ -68,6 +69,84 @@ describe('panels/webview/WebViewPanel', () => {
 
     expect(screen.getByTestId(webViewPanelTestIds.container)).toBeInTheDocument();
     expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://x.test');
+  });
+
+  // ---------------------------------------------------------------------------
+  // FR4: load-mode → iframe src wiring
+  // Completion Criterion: "View-mode renders with the correct src based on the
+  // resolved mode" (direct → raw URL; proxy → proxy resource URL; auto per
+  // detectedMode).
+  // ---------------------------------------------------------------------------
+
+  describe('load-mode src wiring (FR4)', () => {
+    test('proxy mode → iframe src is the backend proxy resource URL', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />);
+
+      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+      const src = iframe.getAttribute('src')!;
+      expect(src.startsWith(`${PROXY_RESOURCE_BASE}?`)).toBe(true);
+      expect(src).toContain(`url=${encodeURIComponent('https://example.com')}`);
+    });
+
+    test('proxy mode → hideSelectors are carried as repeated hide= params (CR5)', () => {
+      render(
+        <WebViewPanel
+          {...buildProps({ url: 'https://example.com', loadMode: 'proxy', hideSelectors: '.ad\n#banner' })}
+        />
+      );
+
+      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+      const src = iframe.getAttribute('src')!;
+      const params = new URLSearchParams(src.split('?')[1]);
+      expect(params.getAll('hide')).toEqual(['.ad', '#banner']);
+    });
+
+    test('direct mode → iframe src is the raw URL (no proxy base)', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+
+      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(iframe).toHaveAttribute('src', 'https://example.com');
+      expect(iframe.getAttribute('src')).not.toContain(PROXY_RESOURCE_BASE);
+    });
+
+    test('auto mode + detectedMode=proxy → proxy src', () => {
+      render(
+        <WebViewPanel
+          {...buildProps({ url: 'https://example.com', loadMode: 'auto', detectedMode: 'proxy' })}
+        />
+      );
+
+      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(iframe.getAttribute('src')!.startsWith(`${PROXY_RESOURCE_BASE}?`)).toBe(true);
+    });
+
+    test('auto mode + detectedMode=direct → raw URL src', () => {
+      render(
+        <WebViewPanel
+          {...buildProps({ url: 'https://example.com', loadMode: 'auto', detectedMode: 'direct' })}
+        />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://example.com');
+    });
+
+    test('auto mode + detectedMode=null → raw URL src (defaults to direct)', () => {
+      render(
+        <WebViewPanel
+          {...buildProps({ url: 'https://example.com', loadMode: 'auto', detectedMode: null })}
+        />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://example.com');
+    });
+
+    test('overlay shows resolved mode (proxy) in proxy mode', () => {
+      render(
+        <WebViewPanel {...buildProps({ url: 'https://example.com', showDebugOverlay: true, loadMode: 'proxy' })} />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.debugOverlay)).toHaveTextContent('mode: proxy');
+    });
   });
 
   // ---------------------------------------------------------------------------

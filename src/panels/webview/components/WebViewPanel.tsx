@@ -4,6 +4,7 @@ import { GrafanaTheme2, PanelProps } from '@grafana/data';
 import { useStyles2 } from '@grafana/ui';
 import { normalizeOptions, type PanelOptions } from '../../../types';
 import { buildViewportTransform } from '../viewport';
+import { buildProxySrc, resolveLoadMode } from '../loadMode';
 import { webViewPanelTestIds } from './testIds';
 
 type Props = PanelProps<PanelOptions>;
@@ -37,10 +38,13 @@ type Props = PanelProps<PanelOptions>;
  * component instance is independently keyed by its own React state (refreshKey),
  * so multiple panels on the same dashboard cannot interfere.
  *
- * Direct mode only at this stage: `iframe.src` is set directly to the target
- * URL with no backend involvement. `loadMode: 'proxy'` is not yet wired (the
- * proxy stream supplies the proxy src); for now it renders the same direct
- * iframe — see note below.
+ * Load-mode resolution (FR4): the effective mode is resolved via
+ * `resolveLoadMode` (manual `direct`/`proxy` win; `auto` uses the stored
+ * `detectedMode`, defaulting to direct). In `direct` mode the iframe `src` is
+ * the raw target URL (cross-origin); in `proxy` mode it is the backend proxy
+ * resource URL built by `buildProxySrc` (same-origin to Grafana), which carries
+ * the `hideSelectors` as repeated `hide=` query params for server-side CSS
+ * rewriting (CR5). View mode never re-detects.
  */
 export function WebViewPanel({ options, width, height }: Props) {
   const styles = useStyles2(getStyles);
@@ -77,14 +81,10 @@ export function WebViewPanel({ options, width, height }: Props) {
     };
   }, [opts.refreshIntervalSec, setRefreshKey]);
 
-  // Resolved load mode for the debug overlay. Currently always 'direct' until
-  // the proxy stream wires up proxy src construction.
-  const resolvedMode: string =
-    opts.loadMode === 'proxy'
-      ? 'proxy (not yet wired)'
-      : opts.loadMode === 'auto' && opts.detectedMode != null
-        ? opts.detectedMode
-        : 'direct';
+  // Resolved load mode ('direct' | 'proxy'): manual modes win, 'auto' uses the
+  // stored detectedMode (defaulting to direct). Drives both the iframe src and
+  // the debug overlay.
+  const resolvedMode = resolveLoadMode(opts);
 
   // Empty / blank URL: render a clear empty state rather than an iframe with an
   // empty src.
@@ -98,9 +98,10 @@ export function WebViewPanel({ options, width, height }: Props) {
     );
   }
 
-  // NOTE: loadMode 'proxy'/'auto' are not yet wired to the backend (proxy
-  // stream). Until then we always load the URL directly into the iframe.
-  const src = opts.url;
+  // Direct mode loads the raw URL (cross-origin); proxy mode routes through the
+  // backend proxy resource (same-origin to Grafana), carrying hideSelectors as
+  // repeated `hide=` params for server-side CSS rewriting (CR5).
+  const src = resolvedMode === 'proxy' ? buildProxySrc(opts) : opts.url;
 
   const transform = buildViewportTransform(opts);
 
