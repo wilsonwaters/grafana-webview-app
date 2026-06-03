@@ -10,16 +10,16 @@ the backend PROXY stream (P1–P7), CONTENT-REWRITING (CR1–CR5), and FRAMEABIL
 `/proxy?url=` endpoint runs the full pipeline (allowlist→validate→rate-limit→resolve-then-dial), strips
 framing + identity + dangerous response headers, enforces body-size/timeout, emits audit logs + Prometheus
 metrics, AND now fully RENDERS a framing-blocked page: goquery HTML rewrite, `/proxy-resource` subresources,
-safe redirect re-validation, and hide-selectors. (Backend runtime-verified live; in-panel use awaits the
-frameability frontend wiring.)
+safe redirect re-validation, and hide-selectors. Frameability (FR1–FR4) wires the panel end-to-end:
+Test-URL detection → Auto/Direct/Proxy selector → view-mode renders via `/proxy?url=…` in proxy mode.
 The plugin is also still a **shippable direct-mode Web View
 panel** today: sandboxed iframe at a configured viewport, interactive editor (drag-pan/wheel-zoom +
 numeric inputs/reset), auto-refresh, debug overlay, multi-instance — e2e-verified across Grafana
 12.3.6/12.4.3/13.0.1/nightly and privately signed. The backend now has a complete set of audited,
 unit-tested security building blocks in `pkg/security/` (IP blocklist, URL validator, allowlist
-matcher, DNS-resolve-then-dial, rate limiter) — a **dependency-free leaf package** — but **no
-endpoint consumes them yet**. Next is frameability → proxy → content-rewriting, which is the path
-to a framing-blocked site like the BOM radar.
+matcher, DNS-resolve-then-dial, rate limiter) — a **dependency-free leaf package** consumed by the
+proxy + frameability endpoints. **The framing-blocked-site path (e.g. BOM radar) is feature-complete
+end-to-end**; remaining streams are direct-only-fallback, testing-cicd, and docs-release/catalog-prep.
 
 ## Handoff notes for the next orchestrator (2026-06-02)
 
