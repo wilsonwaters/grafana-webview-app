@@ -19,7 +19,7 @@
 | FR1 | #24 | Backend /check-frameable endpoint through full security pipeline | frameability | M | done |
 | FR2 | #25 | Backend /health liveness endpoint | frameability | S | done |
 | FR3 | #26 | Frontend "Test URL" button with result display and persistence | frameability | M | done |
-| FR4 | #27 | Load-mode selector — Auto / Direct / Proxy with view-mode wiring | frameability | M | in-progress |
+| FR4 | #27 | Load-mode selector — Auto / Direct / Proxy with view-mode wiring | frameability | M | done |
 | P1 | #28 | Core proxy slice — /proxy endpoint with security pipeline and framing-header removal | proxy | M | done |
 | P2 | #29 | Outgoing request header stripping — remove auth and Grafana headers | proxy | M | done |
 | P3 | #30 | Incoming response header stripping — Set-Cookie, HSTS, HPKP, Clear-Site-Data | proxy | S | done |

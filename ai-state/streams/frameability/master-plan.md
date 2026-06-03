@@ -47,3 +47,6 @@ visible, saved result.
   reuses proxyHandler) and `/health` (bare liveness). Backend frameability done. **FR3 (#26) — in flight**:
   frontend Test-URL button (React/TS) calling `/check-frameable` via `getBackendSrv()`, showing Direct/
   Proxied/Error, persisting `detectedMode`. Then FR4 (load-mode selector + view-mode wiring).
+- **FR3 (#100) + FR4 (#101) merged. STREAM COMPLETE (FR1–FR4).** Test-URL button (detectedMode persistence)
+  + load-mode resolution + view-mode proxy-src wiring (sub-path-safe via config.appSubUrl; passes hide=
+  params to CR5). The panel can now render a framing-blocked site through the proxy in-panel.

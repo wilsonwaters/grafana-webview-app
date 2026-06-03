@@ -6,7 +6,7 @@ Narrative log of project status, maintained primarily by the orchestrator agent.
 
 Setup complete and the **execution loop is running** (task branch → PR → review → CI-green →
 squash-merge into `main`). **foundation (F1–F4), panel-core (PC1–PC5), security-foundation (SF1–SF5),
-the backend PROXY stream (P1–P7), and CONTENT-REWRITING (CR1–CR5) are all DONE.** A security-hardened
+the backend PROXY stream (P1–P7), CONTENT-REWRITING (CR1–CR5), and FRAMEABILITY (FR1–FR4) are all DONE.** A security-hardened
 `/proxy?url=` endpoint runs the full pipeline (allowlist→validate→rate-limit→resolve-then-dial), strips
 framing + identity + dangerous response headers, enforces body-size/timeout, emits audit logs + Prometheus
 metrics, AND now fully RENDERS a framing-blocked page: goquery HTML rewrite, `/proxy-resource` subresources,
@@ -51,21 +51,14 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **None.** CONTENT-REWRITING COMPLETE (CR1–CR5 merged this session). The backend proxy is feature-complete:
-  it can fully render a framing-blocked site end-to-end (HTML rewrite + subresources + safe redirects +
-  hide-selectors), all through the security pipeline, runtime-verified live (pipeline/denials/audit/metrics).
-- **Milestone — awaiting stakeholder steer on next stream.** Candidates: **frameability** (FR1 /check-frameable,
-  FR2 /health, FR3 Test-URL button, FR4 Proxy load-mode selector) — the frontend wiring that lets a panel
-  actually select Proxy mode and point its iframe at `/proxy?url=…` (the last piece for a true *in-panel*
-  BOM-radar render); **direct-only-fallback** (needs frameability); **testing-cicd** (security suite AC 17–31,
-  e2e); **docs-release**. 
-- **BOM-radar runtime test caveat:** the backend renders, but a live in-sandbox fetch of the real BOM radar
-  is blocked by the sandbox's HTTPS TLS-interception (container gets 502). A true BOM render test needs the
-  stakeholder's network (or a CA / a reachable target) + frameability FR4 for in-panel.
-- **Tracked debt:** P4 boundary test folded into P7 (closed); CR4 non-http(s)-Location passthrough (not SSRF,
-  documented); CSS `url()` inside stylesheets not rewritten (CR-deferred); `AllowPrivateIP` mapped but INERT
-  (fails closed; private-IP-relaxing dialer is a later endpoint task, Q5).
-- **Decision (this session): proxy-first** (stakeholder) — delivered: backend proxy + content-rewriting first.
+- **Live in-panel render test** (stakeholder approved "try a reachable target"). FRAMEABILITY COMPLETE →
+  the full path is wired (panel proxy mode → iframe src `/proxy?url=…`). Running a runtime test in the dev
+  Grafana against a REACHABLE allowlisted target (plain-HTTP `neverssl.com`, since the sandbox MITMs HTTPS
+  → the real BOM radar 502s here): curl `/proxy?url=…` for a real 200 + rewritten HTML (subresources →
+  /proxy-resource, base href, framing stripped) — the runtime evidence the earlier proxy smoke test
+  couldn't get (HTTPS 502) — plus a Playwright screenshot of the rendered page / in-panel proxy mode.
+- **Streams remaining:** direct-only-fallback (DF1–DF3, needs frameability ✓ — now unblocked),
+  testing-cicd (TC1–TC6 security suite + e2e), docs-release (DR1–DR8), catalog-prep (CP1–CP4).
 
 ## Parallel execution (updated this session)
 
@@ -120,6 +113,11 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#101 (FR4)** merged — **frameability COMPLETE.** Load-mode resolution (`resolveLoadMode`) + view-mode
+  proxy-src wiring (`buildProxySrc` → `${config.appSubUrl}/api/plugins/…/proxy?url=<enc>` + `hide=` per
+  selector for CR5; sub-path-safe; param-injection-safe). The panel renders via the proxy in proxy mode.
+- **#100 (FR3)** merged — Test-URL button (calls /check-frameable, Direct/Proxied/Error, persists detectedMode).
+- **#99 (FR1)** + **#98 (FR2)** merged — `/check-frameable` (SSRF-safe, Q7) + `/health` (liveness).
 - **#97 (CR5)** merged — **content-rewriting stream COMPLETE.** Hide-selectors applied to proxied HTML via
   goquery `Find`+inline `display:none!important` (markup-injection-proof: selector text never enters markup;
   cascadia-validated + length/count caps; `hide` query param, not forwarded upstream). 93.3% coverage. Review

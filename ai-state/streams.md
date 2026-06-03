@@ -76,7 +76,11 @@ panel options, with the same security gates as the proxy.
 display + persistence, backend-availability awareness via `/health`.
 **Depends on:** security-foundation, panel-core.
 **Size:** M.
-**Status:** Not started.
+**Status:** ✅ Done — FR1–FR4 merged (#99, #98, #100, #101). `/check-frameable` (full pipeline + SF4
+transport, SSRF-safe, Q7 contract) + `/health` (bare liveness); frontend Test-URL button (calls
+/check-frameable, shows Direct/Proxied/Error, persists detectedMode); load-mode resolution + view-mode
+wiring (proxy mode → iframe src `${appSubUrl}/api/plugins/wilsonwaters-webview-app/resources/proxy?url=…`
++ `hide=` params for CR5). **The full path is usable in-panel:** detect → choose mode → render via proxy.
 
 ### 5. Backend Proxy & Hardening  —  `proxy`
 **Outcome:** A security-hardened `/proxy` endpoint that fetches a page, strips framing and
