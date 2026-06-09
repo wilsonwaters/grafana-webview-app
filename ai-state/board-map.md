@@ -33,8 +33,8 @@
 | CR3 | #37 | /proxy-resource subresource endpoint through full security pipeline | content-rewriting | M | done |
 | CR4 | #38 | Redirect handling — cap depth, re-validate each hop, rewrite Location headers | content-rewriting | M | done |
 | CR5 | #39 | Hide-selector application to proxied HTML with CSS selector safety validation | content-rewriting | M | done |
-| DF1 | #40 | Backend-availability detection hook with caching | direct-only-fallback | M | blocked |
-| DF2 | #41 | Editor degradation — disable proxy mode and Test URL when backend unavailable | direct-only-fallback | M | blocked |
+| DF1 | #40 | Backend-availability detection hook with caching | direct-only-fallback | M | done |
+| DF2 | #41 | Editor degradation — disable proxy mode and Test URL when backend unavailable | direct-only-fallback | M | in-progress |
 | DF3 | #42 | View-mode guard — fallback state when proxy config has no available backend | direct-only-fallback | M | blocked |
 | TC1 | #43 | Security test suite — SSRF, blocklist, allowlist, scheme validation (AC 17–22) | testing-cicd | L | done |
 | TC2 | #44 | Security test suite — limits, header stripping, redirects, logging, metrics (AC 23–29) | testing-cicd | L | done |

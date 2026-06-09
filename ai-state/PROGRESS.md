@@ -176,6 +176,15 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#107 (DF1)** merged — `useBackendAvailable` hook (direct-only-fallback STARTED): probes `/health` once,
+  module-scoped shared promise cache (one probe across all instances, no poll), fail-safe per Q12
+  (`backendAvailable` true ONLY on 200+`{status:"ok"}`; any error/non-2xx/timeout/unexpected ⇒ false;
+  `loading`→`true|false`, never permanent unknown). `PLUGIN_ID` exported from loadMode.ts. 9 unit tests
+  (states + single-shared-probe, mutation-verified by review). Review APPROVE (no blocking). Full CI green
+  incl. e2e 12.3.7/12.4.4/13.0.2/nightly + the new non-skippable security-suite gate. Single source of
+  truth for DF2/DF3. **Editor note for DF2:** the load-mode selector is a standard `.addRadio({path:'loadMode'})`
+  in `module.tsx` (can't read async backend state) → DF2 must convert it to a custom editor that consumes
+  `useBackendAvailable`. The Test URL button is the `FrameabilityEditor` custom editor (easy to wire).
 - **#103 (TC2)** merged — AC 23–29 security suite (`pkg/plugin/proxy_security_limits_test.go`, 11 hermetic
   tests through the real `ServeHTTP`): redirect-into-denied blocked (23), oversize→413 (24), per-INSTANCE
   rate limit→429 (25, deliberately spread across two domains so only the shared instance bucket can deny),
