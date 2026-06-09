@@ -388,4 +388,131 @@ describe('panels/webview/ViewportEditor', () => {
     expect(screen.queryByTestId(viewportEditorTestIds.hint)).not.toBeInTheDocument();
     expect(screen.getByTestId(viewportEditorTestIds.iframe)).toBeInTheDocument();
   });
+
+  // ---------------------------------------------------------------------------
+  // TC3 gap-fill: non-finite numeric input is rejected (no-op), leaving the
+  // committed value untouched. Covers the `!isFinite(raw)` early-returns in the
+  // X / Y / zoom change handlers (e.g. when the field is cleared to empty).
+  // ---------------------------------------------------------------------------
+
+  test('clearing the X input (empty → NaN) is a no-op and does not corrupt the value', () => {
+    const { props, options, onChange } = buildProps({ viewportX: 120, viewportY: 0, viewportZoom: 1 });
+    render(<ViewportEditor {...props} />);
+
+    onChange.mockClear();
+    const inputX = screen.getByTestId(viewportEditorTestIds.inputX);
+    // An empty string parses to NaN — the handler must bail out, not write NaN.
+    fireEvent.change(inputX, { target: { value: '' } });
+
+    // Readout still shows the previous valid value; nothing was persisted.
+    expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('X: 120');
+    expect(options.viewportX).toBe(120);
+    expect(onChange).not.toHaveBeenCalled();
+    // The preview transform is unchanged.
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({
+      transform: 'scale(1) translate(-120px, 0px)',
+    });
+  });
+
+  test('non-finite Y input is a no-op', () => {
+    const { props, options, onChange } = buildProps({ viewportX: 0, viewportY: 77, viewportZoom: 1 });
+    render(<ViewportEditor {...props} />);
+
+    onChange.mockClear();
+    fireEvent.change(screen.getByTestId(viewportEditorTestIds.inputY), { target: { value: 'abc' } });
+
+    expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('Y: 77');
+    expect(options.viewportY).toBe(77);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test('non-finite zoom input is a no-op (does not clamp NaN to a bound)', () => {
+    const { props, options, onChange } = buildProps({ viewportZoom: 2 });
+    render(<ViewportEditor {...props} />);
+
+    onChange.mockClear();
+    fireEvent.change(screen.getByTestId(viewportEditorTestIds.inputZoom), { target: { value: '' } });
+
+    // Must remain at the prior valid zoom (not clamped to MIN via NaN).
+    expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('Zoom: 2.00×');
+    expect(options.viewportZoom).toBe(2);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
+  // TC3 gap-fill: EXTERNAL option changes (e.g. dashboard reload / undo) re-sync
+  // local state. Covers the viewport and dimension re-sync effects which only
+  // run when incoming options differ from what this editor last committed.
+  // ---------------------------------------------------------------------------
+
+  test('re-syncs viewport state when context.options change externally', () => {
+    const { props, options } = buildProps({ viewportX: 10, viewportY: 20, viewportZoom: 1 });
+    const { rerender } = render(<ViewportEditor {...props} />);
+
+    // Simulate an external change (not originating from this editor), e.g. a
+    // dashboard reload or undo — mutate options then re-render.
+    options.viewportX = 333;
+    options.viewportY = 444;
+    options.viewportZoom = 2.5;
+    rerender(<ViewportEditor {...props} />);
+
+    const readout = screen.getByTestId(viewportEditorTestIds.readout);
+    expect(readout).toHaveTextContent('X: 333');
+    expect(readout).toHaveTextContent('Y: 444');
+    expect(readout).toHaveTextContent('Zoom: 2.50×');
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({
+      transform: 'scale(2.5) translate(-333px, -444px)',
+    });
+    expect(screen.getByTestId(viewportEditorTestIds.inputX)).toHaveValue(333);
+  });
+
+  test('re-syncs iframe dimensions when context.options change externally', () => {
+    const { props, options } = buildProps({ iframeWidth: 1920, iframeHeight: 1080 });
+    const { rerender } = render(<ViewportEditor {...props} />);
+
+    options.iframeWidth = 1024;
+    options.iframeHeight = 768;
+    rerender(<ViewportEditor {...props} />);
+
+    expect(screen.getByTestId(viewportEditorTestIds.inputWidth)).toHaveValue(1024);
+    expect(screen.getByTestId(viewportEditorTestIds.inputHeight)).toHaveValue(768);
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({
+      width: '1024px',
+      height: '768px',
+    });
+  });
+
+  test('a window mousemove with no active drag is ignored (no pan)', () => {
+    const { props, options } = buildProps({ viewportX: 5, viewportY: 6, viewportZoom: 1 });
+    render(<ViewportEditor {...props} />);
+
+    // No mousedown first: the window move handler must bail (drag ref is null)
+    // and leave the viewport untouched.
+    fireEvent.mouseMove(window, { clientX: 500, clientY: 500 });
+
+    const readout = screen.getByTestId(viewportEditorTestIds.readout);
+    expect(readout).toHaveTextContent('X: 5');
+    expect(readout).toHaveTextContent('Y: 6');
+    expect(options.viewportX).toBe(5);
+    expect(options.viewportY).toBe(6);
+  });
+
+  test('a re-render with UNCHANGED options does not clobber live interaction state', () => {
+    const { props, options } = buildProps({ viewportX: 0, viewportY: 0, viewportZoom: 1 });
+    const { rerender } = render(<ViewportEditor {...props} />);
+
+    // Drive a local interaction (drag) that this editor commits.
+    const preview = screen.getByTestId(viewportEditorTestIds.preview);
+    fireEvent.mouseDown(preview, { clientX: 200, clientY: 150 });
+    fireEvent.mouseMove(window, { clientX: 230, clientY: 170 });
+    fireEvent.mouseUp(window);
+    expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('X: -30');
+
+    // Grafana re-renders with options reflecting our own committed write — the
+    // re-sync effect must recognise this as our write and NOT reset live state.
+    rerender(<ViewportEditor {...props} />);
+
+    expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('X: -30');
+    expect(options.viewportX).toBe(-30);
+  });
 });
