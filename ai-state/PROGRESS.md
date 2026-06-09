@@ -72,9 +72,19 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
   is partly gated on direct-only-fallback**; **TC4 (#46 E2E) is entangled with FR5/Q17** (in-panel proxy
   render still blocked by Grafana resource-route XFO/CSP — do NOT assert in-panel proxy render in e2e
   until FR5 lands); **TC6 (#48) is gated on Q13b (e2e-matrix scope) + TC4/TC5.** After TC5 the natural
-  pivot is **direct-only-fallback (DF1–DF3)** which unblocks TC3. FR5/Q17 + Q13b are stakeholder check-in
-  items at the next stream boundary. **WARNING to self:** never `git reset --hard` with uncommitted
-  ai-state edits in the tree (lost a bookkeeping edit once this session) — commit first.
+  pivot is **direct-only-fallback (DF1–DF3)** which unblocks TC3. **WARNING to self:** never
+  `git reset --hard` with uncommitted ai-state edits in the tree (bit me twice this session) — commit first.
+- **STAKEHOLDER DECISIONS (2026-06-09 check-in):**
+  1. **Next stream = direct-only-fallback (DF1–DF3).** Dispatching DF1 (#40, backend-availability hook).
+     Q12 resolved (fixed-per-session, module-scoped shared `/health` probe; fail-safe true-only-on-200+ok).
+  2. **FR5/#102 = DEFERRED INDEFINITELY for v1.** In-panel proxy render is a documented v1 KNOWN LIMITATION
+     (backend `/proxy` is complete+verified; only in-panel rendering deferred). NOT a release blocker. TC4
+     skips in-panel-proxy e2e. Must be documented in DR3/DR6/README. #102 stays open (post-v1).
+  3. **#105/Q18 AllowPrivateIP = WIRE IT THROUGH.** Thread per-domain opt-in into the dial path, relaxing
+     SF1 ONLY for opted-in allowlisted domains, scoped to private/RFC1918 (loopback/link-local/metadata stay
+     hard-blocked — confirm in design), distinct audit logging, dedicated tests, admin+threat-model docs.
+     Security-critical → needs design + adversarial security review. #105 now `status:ready`; sequenced
+     AFTER direct-only-fallback.
 - Live render test DONE (PROXY-RENDER-OK; see "Runtime render test + KEY finding" below). The
   backend proxy + content-rewriting + frameability are all merged and runtime-verified.
 - **Stakeholder decisions (2026-06-03):**

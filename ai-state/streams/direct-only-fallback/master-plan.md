@@ -33,13 +33,17 @@ each leave the panel functional.
 
 ## Open questions
 
-- Whether backend availability can change within a session (plugin enabled/disabled live) and
-  whether to re-probe, or treat it as fixed per editor session. Blocks DF1.
-  (See OPEN-QUESTIONS.)
-- On Grafana Cloud specifically, what `/health` returns when the backend is simply not
-  provisioned vs erroring — affects how DF1 interprets failures. Blocks DF1.
-  (See OPEN-QUESTIONS.)
+- ~~Re-probe vs fixed-per-session; Cloud not-provisioned vs erroring.~~ **RESOLVED (Q12, 2026-06-09):**
+  fixed-per-session (probe `/health` once, module-scoped shared cache, no poll; optional manual refetch);
+  fail-safe (`true` only on 200 + `{status:"ok"}`, any error/non-200/timeout/unexpected ⇒ `false`;
+  `loading`→`true|false`, never permanent `unknown`). Full text in OPEN-QUESTIONS Q12.
+
+## Stakeholder decisions
+
+- 2026-06-09: direct-only-fallback is the active stream after the testing-cicd security suite. FR5/#102
+  (in-panel proxy render) is DEFERRED indefinitely for v1 — DF degradation is about backend ABSENCE, which
+  is independent of FR5, so DF proceeds normally.
 
 ## Changelog
 
-- Initialised at project kickoff (planning). No tasks dispatched yet.
+- 2026-06-09 — stream STARTED; Q12 resolved; dispatching DF1 (#40, backend-availability hook).
