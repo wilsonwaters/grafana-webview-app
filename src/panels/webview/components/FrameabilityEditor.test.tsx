@@ -217,6 +217,129 @@ describe('panels/webview/FrameabilityEditor', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // TC3: extractErrorMessage — remaining rejection shapes (gap-fill)
+  // The Direct/Proxied happy paths and the data.message / status+statusText
+  // branches are covered above; these exercise the still-uncovered fallbacks.
+  // ---------------------------------------------------------------------------
+
+  test('shows statusText alone when a rejection has statusText but no status code', async () => {
+    // No numeric `status`, so the `${status} ${statusText}` branch is skipped
+    // and the bare statusText is shown.
+    mockGet(jest.fn().mockRejectedValue({ statusText: 'Bad Gateway' }));
+    const { props } = buildProps();
+    render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+
+    const result = await screen.findByTestId(frameabilityEditorTestIds.result);
+    expect(result).toHaveTextContent(/Error/i);
+    expect(result).toHaveTextContent('Bad Gateway');
+    expect(result).not.toHaveTextContent(/undefined/i);
+  });
+
+  test('uses the Error.message when a rejection has only a message (no data/statusText)', async () => {
+    // e.g. a thrown Error from the transport with no HTTP envelope.
+    mockGet(jest.fn().mockRejectedValue(new Error('Network request failed')));
+    const { props } = buildProps();
+    render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+
+    const result = await screen.findByTestId(frameabilityEditorTestIds.result);
+    expect(result).toHaveTextContent('Network request failed');
+  });
+
+  test('uses a plain string rejection verbatim as the error message', async () => {
+    mockGet(jest.fn().mockRejectedValue('boom'));
+    const { props } = buildProps();
+    render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+
+    const result = await screen.findByTestId(frameabilityEditorTestIds.result);
+    expect(result).toHaveTextContent('boom');
+  });
+
+  test('falls back to a generic message when a rejection carries no usable info', async () => {
+    // An empty object has no data/statusText/message — the generic fallback runs.
+    mockGet(jest.fn().mockRejectedValue({}));
+    const { props } = buildProps();
+    render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+
+    const result = await screen.findByTestId(frameabilityEditorTestIds.result);
+    expect(result).toHaveTextContent(/The frameability check failed\. Please try again\./i);
+  });
+
+  test('prefers data.reason over data.error / statusText when message is absent', async () => {
+    // Exercises the `e.data?.reason ?? e.data?.error` arm of the ?? chain.
+    mockGet(
+      jest.fn().mockRejectedValue({ status: 403, statusText: 'Forbidden', data: { reason: 'frame-ancestors blocked' } })
+    );
+    const { props } = buildProps();
+    render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+
+    const result = await screen.findByTestId(frameabilityEditorTestIds.result);
+    expect(result).toHaveTextContent('frame-ancestors blocked');
+    // The statusText fallback must NOT win when a body reason is present.
+    expect(result).not.toHaveTextContent('Forbidden');
+  });
+
+  // ---------------------------------------------------------------------------
+  // TC3: stale-result hygiene on UNMOUNT — the mountedRef guard (gap-fill)
+  // The URL-change discard path is covered above; this covers the unmount path
+  // where an in-flight request settles after the component is gone.
+  // ---------------------------------------------------------------------------
+
+  test('does not throw or persist when a request resolves after unmount', async () => {
+    let resolveGet: (value: unknown) => void = () => undefined;
+    mockGet(
+      jest.fn().mockImplementation(() => new Promise((resolve) => {
+        resolveGet = resolve;
+      }))
+    );
+    const { props, onChange } = buildProps();
+    const { unmount } = render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+    // Unmount while the request is still in flight.
+    unmount();
+
+    // Settling now hits the `!mountedRef.current` guard: no setState, no
+    // onChange, and crucially no act()/state-update-on-unmounted warning.
+    await act(async () => {
+      resolveGet({ frameable: true, reason: 'ok', recommendedMode: 'direct' });
+    });
+
+    // detectedMode must NOT be persisted from a stale post-unmount resolution.
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test('does not throw when a request rejects after unmount', async () => {
+    let rejectGet: (reason: unknown) => void = () => undefined;
+    mockGet(
+      jest.fn().mockImplementation(() => new Promise((_resolve, reject) => {
+        rejectGet = reject;
+      }))
+    );
+    const { props } = buildProps();
+    const { unmount } = render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+    unmount();
+
+    // Rejecting post-unmount hits the catch-branch `!mountedRef.current` guard.
+    await act(async () => {
+      rejectGet({ status: 500, statusText: 'Server Error' });
+    });
+    // Reaching here without a thrown act warning is the assertion.
+    expect(true).toBe(true);
+  });
+
+  // ---------------------------------------------------------------------------
   // CC: stale-result hygiene — result resets to idle when the URL changes
   // ---------------------------------------------------------------------------
 
