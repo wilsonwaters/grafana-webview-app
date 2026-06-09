@@ -106,6 +106,18 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
 - **Streams remaining:** frameability FR5/#102 (Q17 fix), direct-only-fallback (DF1–DF3), testing-cicd
   (TC1–TC6), docs-release (DR1–DR8), catalog-prep (CP1–CP4).
 
+## System verification (stream boundary, 2026-06-09) — SYSVERIFY-OK
+
+After direct-only-fallback completed (6 feature merges this session), a system-verification pass on
+integrated `main` was **ALL PASS, no regressions**: (1) frontend `npm ci`/typecheck/lint clean, `test:ci`
+160/160; (2) backend `go test ./... -race` all ok + `mage build:backend`/`build:linux` produce
+`gpx_webview_linux_amd64`; (3) `scripts/security-suite.sh` exit 0 (all AC 17–29 PASS); (4) dev Grafana 12.4.0
+loads app + child `wilsonwaters-webview-panel`, backend process up, no plugin errors; (5) live endpoints:
+`/resources/health`→200 `{"status":"ok"}`, `/metrics`→`webview_*` families, `/resources/proxy?url=http://example.com/`
+(empty allowlist)→**403**, `file://`→**400**, `/resources/check-frameable?url=file://`→**400**. Security
+pipeline intact end-to-end on the loaded plugin. Dev env LEFT RUNNING (container `wilsonwaters-webview-app`,
+:3000 anon). Quirks: docker was down (restarted); mage was not at `/root/go/bin/mage` (re-installed via `go install`).
+
 ## Parallel execution (updated this session)
 
 The earlier "serial, single shared working tree" constraint is **obsolete**. Sub-agents are now
