@@ -57,7 +57,14 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
 
 ## Currently in flight
 
-- **None.** Live render test DONE (PROXY-RENDER-OK; see "Runtime render test + KEY finding" below). The
+- **testing-cicd STARTED (2026-06-09).** Dispatching **TC1 (#43, AC 17–22: SSRF/blocklist/allowlist/
+  scheme)** + **TC2 (#44, AC 23–29: limits/header-strip/redirects/audit/metrics)** in parallel — the
+  non-skippable backend security suite. All deps merged (SF1–SF4, P1–P7, CR1–CR5). Resolved Q13a
+  (DNS-rebinding-in-CI = injected stub `security.Resolver`, hermetic, NO production change; seam already
+  exists). Both are backend-only (no `src/` changes) so e2e is unaffected — safe to merge once CI's
+  "Build, lint and unit tests" + compatibility are green (still update each branch to current `main`
+  first so golangci-lint v2 lints the combined package).
+- Live render test DONE (PROXY-RENDER-OK; see "Runtime render test + KEY finding" below). The
   backend proxy + content-rewriting + frameability are all merged and runtime-verified.
 - **Stakeholder decisions (2026-06-03):**
   1. **Q17 (in-panel proxy render blocked by Grafana resource-route XFO/CSP) = tracked CRITICAL follow-up,

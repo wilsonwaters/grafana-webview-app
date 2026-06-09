@@ -35,10 +35,14 @@ release / E2E-matrix workflows with signing wired in. Most of this stream is fou
 ## Open questions
 
 - Whether the Grafana-version E2E matrix should span the full `>=12.3.0` range or a pinned
-  subset for CI cost. Blocks TC6. (See OPEN-QUESTIONS.)
-- How to simulate DNS rebinding deterministically in CI for AC 21. Blocks TC1.
-  (See OPEN-QUESTIONS.)
+  subset for CI cost. Blocks TC6. (See OPEN-QUESTIONS Q13b.)
+- ~~How to simulate DNS rebinding deterministically in CI for AC 21. Blocks TC1.~~
+  **RESOLVED** — injected stub `security.Resolver` (hermetic, no network), exercised through the
+  real `/proxy` handler at three layers. Full decision in OPEN-QUESTIONS Q13a.
 
 ## Changelog
 
 - Initialised at project kickoff (planning). No tasks dispatched yet.
+- 2026-06-09 — testing-cicd stream STARTED. Resolved Q13a (DNS-rebinding-in-CI = injected stub
+  resolver, no production change). Dispatching TC1 (#43, AC 17–22) + TC2 (#44, AC 23–29) in
+  parallel — the non-skippable backend security suite. All deps (SF1–SF4, P1–P7, CR1–CR5) merged.
