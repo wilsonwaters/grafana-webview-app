@@ -39,7 +39,7 @@
 | TC1 | #43 | Security test suite — SSRF, blocklist, allowlist, scheme validation (AC 17–22) | testing-cicd | L | done |
 | TC2 | #44 | Security test suite — limits, header stripping, redirects, logging, metrics (AC 23–29) | testing-cicd | L | done |
 | TC3 | #45 | Frontend unit and component test coverage | testing-cicd | M | done |
-| TC4 | #46 | E2E suite with @grafana/plugin-e2e and Playwright | testing-cicd | L | blocked |
+| TC4 | #46 | E2E suite with @grafana/plugin-e2e and Playwright | testing-cicd | L | done |
 | TC5 | #47 | CI verification and non-skippable security gate | testing-cicd | M | done |
 | TC6 | #48 | Release workflow, signing, plugin-validator gate, and E2E Grafana-version matrix | testing-cicd | M | blocked |
 | DR1 | #49 | Flesh out repo docs — README, CHANGELOG, CONTRIBUTING, CODE_OF_CONDUCT | docs-release | M | ready |
@@ -55,3 +55,4 @@
 | CP3 | #59 | Submission cover letter — docs/publishing.md | catalog-prep | M | blocked |
 | CP4 | #60 | Deferred catalog submission and feedback iteration (PAUSED) | catalog-prep | M | blocked |
 | — | #105 | Per-domain `AllowPrivateIP` opt-in wired through (scoped RFC1918 relaxation) | security-foundation | M | done |
+| — | #113 | [investigate] Provisioned jsonData.allowedDomains may not reach the backend (TC4 success-path skips) | testing-cicd | S | blocked (investigate; relevant to DR4/DR7) |

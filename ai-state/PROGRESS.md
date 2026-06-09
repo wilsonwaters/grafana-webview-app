@@ -60,10 +60,12 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
 - **CURRENT STATE (2026-06-09):** This session merged TC1, TC2, TC5 (security suite + non-skippable CI gate),
   DF1–DF3 (**direct-only-fallback COMPLETE**), TC3 (frontend coverage), and **#105 (AllowPrivateIP wire-through —
   MERGED, dual-reviewed incl. adversarial security)**. System-verification = SYSVERIFY-OK (see below).
-  **NOW STARTING TC4 (#46 e2e)** — scope EXCLUDES in-panel proxy render (FR5 deferred): config flow, view-mode
-  direct render, sandbox-attribute assertion (AC 30), CSS-selector injection guard (AC 31), light+dark theme
-  (AC 35), and security-boundary cases; run plugin-e2e with `--retries=2` (setVisualization is flaky). **After TC4:**
-  TC6 (#48 — needs the Q13b e2e-matrix-scope stakeholder decision + TC4/TC5), then docs-release (DR1/DR2 ready).
+  TC4 (#46 e2e) MERGED. **testing-cicd: TC1/TC2/TC3/TC4/TC5 all DONE; only TC6 (#48) remains** — release
+  workflow + signing + plugin-validator gate + the E2E Grafana-version matrix. **TC6 is GATED on Q13b**
+  (whether the e2e matrix spans the full `>=12.3.0` range or a pinned subset) — a stakeholder cost/coverage
+  decision → checking in. After TC6: **docs-release** (DR1/DR2 ready now; DR4 should fold in #113 + the #105
+  re-opened-surface + the FR5 known-limitation). Tracked follow-ups: #102 (FR5, deferred), #113 (provisioning
+  delivery), check-frameable permit-audit parity, ULA relaxation.
 - **testing-cicd (2026-06-09).** TC1 (#43) + TC2 (#44) MERGED — the non-skippable backend
   security suite (AC 17–29) is COMPLETE. Resolved Q13a (DNS-rebinding-in-CI = injected stub
   `security.Resolver`, hermetic, NO production change). Both were backend-only/test-only ⇒ e2e unaffected;
@@ -195,6 +197,15 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#112 (TC4)** merged — e2e suite (audit-then-gap-fill on PC4/PC5 specs): config flow + Test-URL
+  allowlist-denied error (security boundary, AC34), load-mode selection (asserted via end-to-end iframe src),
+  AC30 sandbox attribute (exact `allow-scripts allow-same-origin` + pointer-events:none + no-referrer), AC31
+  editor input-safety (authoritative guard is backend CR5), AC35 light+dark theme. **In-panel proxy render
+  OUT OF SCOPE (FR5 deferred)** — view tests use example.com DIRECT. Dev/e2e-only provisioning allowlist entry
+  (shipped fail-closed default unchanged). 8/8 pass --retries=2, no flakes. Review APPROVE-WITH-NITS (no
+  blocking; genuine + FR5-respecting). Full CI green incl. e2e ×4. **Follow-up #113 filed:** provisioned
+  `jsonData.allowedDomains` may not reach the backend (TC4 success-path self-skips; honest skip) — investigate
+  for DR4/DR7. **⇒ testing-cicd is now TC1/TC2/TC3/TC4/TC5 DONE; only TC6 remains (gated on Q13b).**
 - **#111 (#105 AllowPrivateIP)** merged — per-domain opt-in wired through (was parsed-but-inert). Relaxes
   SF1 for **RFC1918 IPv4 ONLY**, only for an allowlisted+opted-in domain, per request via `security.Policy`
   threaded through context into `ResolveAndValidatePolicy`/`NewControlPolicy` (zero-Policy delegates →
