@@ -20,6 +20,7 @@
 | FR2 | #25 | Backend /health liveness endpoint | frameability | S | done |
 | FR3 | #26 | Frontend "Test URL" button with result display and persistence | frameability | M | done |
 | FR4 | #27 | Load-mode selector — Auto / Direct / Proxy with view-mode wiring | frameability | M | done |
+| FR5 | #102 | In-panel Proxy render blocked by Grafana resource-route XFO/CSP — fetch-then-srcdoc | frameability | M | blocked (CRITICAL follow-up; see ai-state/Q17-proxy-render-headers.md) |
 | P1 | #28 | Core proxy slice — /proxy endpoint with security pipeline and framing-header removal | proxy | M | done |
 | P2 | #29 | Outgoing request header stripping — remove auth and Grafana headers | proxy | M | done |
 | P3 | #30 | Incoming response header stripping — Set-Cookie, HSTS, HPKP, Clear-Site-Data | proxy | S | done |

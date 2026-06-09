@@ -21,12 +21,18 @@ matcher, DNS-resolve-then-dial, rate limiter) — a **dependency-free leaf packa
 proxy + frameability endpoints. **The framing-blocked-site path (e.g. BOM radar) is feature-complete
 end-to-end**; remaining streams are direct-only-fallback, testing-cicd, and docs-release/catalog-prep.
 
-## Handoff notes for the next orchestrator (2026-06-02)
+## Handoff notes for the next orchestrator (updated 2026-06-03)
 
-Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `streams.md`,
-`board-map.md`, `OPEN-QUESTIONS.md`, and the relevant `streams/<name>/master-plan.md`. Then
-`mcp__github__list_issues` (label `status:ready`) and continue at **SF3 (#21)**. A few quirks
-that are NOT obvious from the code:
+**Resume point:** foundation, panel-core, security-foundation, proxy (P1–P7), content-rewriting (CR1–CR5),
+and frameability (FR1–FR4) are ALL merged. The backend proxy is feature-complete + runtime-verified (renders
+real pages live). **Recommended next stream: `testing-cicd`** (TC1/TC2 = the non-skippable security suite
+mapping AC 17–31 — highest value, Q17-independent), then `direct-only-fallback` (DF1–DF3, now unblocked by
+frameability), then `docs-release`. **CRITICAL open item: FR5/#102 (Q17)** — in-panel PROXY render is blocked
+by Grafana's resource-route `X-Frame-Options: deny` + `CSP: sandbox`; fix = fetch-then-srcdoc; FULL brief in
+`ai-state/Q17-proxy-render-headers.md` (the stakeholder may resolve this separately with another agent).
+Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `streams.md`, `board-map.md`,
+`OPEN-QUESTIONS.md`, the relevant `streams/<name>/master-plan.md`, and `Q17-proxy-render-headers.md`. Then
+`mcp__github__list_issues` (label `status:ready`). Quirks that are NOT obvious from the code:
 
 - **Always check real GitHub CI on each PR** (`pull_request_read get_check_runs`), not just local
   gates — that is how the signing/compat breakages (#78) were caught. CI signs privately via the
@@ -51,14 +57,20 @@ that are NOT obvious from the code:
 
 ## Currently in flight
 
-- **Live in-panel render test** (stakeholder approved "try a reachable target"). FRAMEABILITY COMPLETE →
-  the full path is wired (panel proxy mode → iframe src `/proxy?url=…`). Running a runtime test in the dev
-  Grafana against a REACHABLE allowlisted target (plain-HTTP `neverssl.com`, since the sandbox MITMs HTTPS
-  → the real BOM radar 502s here): curl `/proxy?url=…` for a real 200 + rewritten HTML (subresources →
-  /proxy-resource, base href, framing stripped) — the runtime evidence the earlier proxy smoke test
-  couldn't get (HTTPS 502) — plus a Playwright screenshot of the rendered page / in-panel proxy mode.
-- **Streams remaining:** direct-only-fallback (DF1–DF3, needs frameability ✓ — now unblocked),
-  testing-cicd (TC1–TC6 security suite + e2e), docs-release (DR1–DR8), catalog-prep (CP1–CP4).
+- **None.** Live render test DONE (PROXY-RENDER-OK; see "Runtime render test + KEY finding" below). The
+  backend proxy + content-rewriting + frameability are all merged and runtime-verified.
+- **Stakeholder decisions (2026-06-03):**
+  1. **Q17 (in-panel proxy render blocked by Grafana resource-route XFO/CSP) = tracked CRITICAL follow-up,
+     NOT fixed now.** GitHub issue **#102 [FR5]**; standalone brief `ai-state/Q17-proxy-render-headers.md`
+     (written so the stakeholder can resolve it with a separate agent). Fix = fetch-then-srcdoc (+ a security
+     decision on the srcdoc `sandbox` flags — must NOT use `allow-same-origin`).
+  2. **Orchestrator handoff** to a fresh agent is intended (this session's context is very large). ai-state
+     is being brought fully current for that handoff (this commit). The next orchestrator resumes per the
+     Handoff notes above.
+- **Recommended next stream: `testing-cicd`** (security suite AC 17–31 + e2e) — highest value, independent
+  of Q17. Alternatives: `direct-only-fallback` (now unblocked), `docs-release`.
+- **Streams remaining:** frameability FR5/#102 (Q17 fix), direct-only-fallback (DF1–DF3), testing-cicd
+  (TC1–TC6), docs-release (DR1–DR8), catalog-prep (CP1–CP4).
 
 ## Parallel execution (updated this session)
 
