@@ -155,6 +155,22 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#103 (TC2)** merged — AC 23–29 security suite (`pkg/plugin/proxy_security_limits_test.go`, 11 hermetic
+  tests through the real `ServeHTTP`): redirect-into-denied blocked (23), oversize→413 (24), per-INSTANCE
+  rate limit→429 (25, deliberately spread across two domains so only the shared instance bucket can deny),
+  outgoing auth/Grafana strip (26, asserted at the upstream), incoming Set-Cookie/HSTS/HPKP strip (27),
+  audit log url/status/size/duration on success+denial (28), all four metric families + increment-on-denial
+  on an isolated registry (29). Test-only; CI build/lint/test + compatibility green; independent review
+  APPROVE (no blocking, 3 minor nits). Backend-only ⇒ e2e unaffected.
+- **#104 (TC1)** — AC 17–22 security suite (`pkg/plugin/proxy_security_ssrf_test.go`, hermetic, stub
+  resolver + dial trap, NO network): fresh-install fail-closed across all 3 endpoints (17), allowlist on
+  `/proxy`+`/proxy-resource`+`/check-frameable` (18), allowlisted-host→RFC1918 denied (19), metadata
+  by-name + link-local by-IP denied regardless of allowlist (20), DNS-rebinding prevented at 3 layers
+  (21: poisoned set fail-closed, TOCTOU dials only validated first IP w/ resolver-call-count==1,
+  connect-time `NewControl` guard table), non-HTTP schemes→400 (22). Review APPROVE (no blocking; AC-21
+  reconstruction confirmed faithful to production `(*Dialer).DialContext`; `/check-frameable` IP-block
+  confirmed enforced+surfaced as a 200 proxy verdict per Q7). **In flight: merging once re-run CI on the
+  main-updated branch is green.** Surfaced the `AllowPrivateIP` dead-config finding → issue #105 / Q18.
 - **#101 (FR4)** merged — **frameability COMPLETE.** Load-mode resolution (`resolveLoadMode`) + view-mode
   proxy-src wiring (`buildProxySrc` → `${config.appSubUrl}/api/plugins/…/proxy?url=<enc>` + `hide=` per
   selector for CR5; sub-path-safe; param-injection-safe). The panel renders via the proxy in proxy mode.

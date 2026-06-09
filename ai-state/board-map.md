@@ -37,7 +37,7 @@
 | DF2 | #41 | Editor degradation — disable proxy mode and Test URL when backend unavailable | direct-only-fallback | M | blocked |
 | DF3 | #42 | View-mode guard — fallback state when proxy config has no available backend | direct-only-fallback | M | blocked |
 | TC1 | #43 | Security test suite — SSRF, blocklist, allowlist, scheme validation (AC 17–22) | testing-cicd | L | in-progress |
-| TC2 | #44 | Security test suite — limits, header stripping, redirects, logging, metrics (AC 23–29) | testing-cicd | L | in-progress |
+| TC2 | #44 | Security test suite — limits, header stripping, redirects, logging, metrics (AC 23–29) | testing-cicd | L | done |
 | TC3 | #45 | Frontend unit and component test coverage | testing-cicd | M | blocked |
 | TC4 | #46 | E2E suite with @grafana/plugin-e2e and Playwright | testing-cicd | L | blocked |
 | TC5 | #47 | CI verification and non-skippable security gate | testing-cicd | M | blocked |
@@ -54,3 +54,4 @@
 | CP2 | #58 | Self security audit against the threat model with evidence checklist | catalog-prep | M | blocked |
 | CP3 | #59 | Submission cover letter — docs/publishing.md | catalog-prep | M | blocked |
 | CP4 | #60 | Deferred catalog submission and feedback iteration (PAUSED) | catalog-prep | M | blocked |
+| — | #105 | [debt] Per-domain `AllowPrivateIP` opt-in inert (dead config) — remove or wire through | security-foundation | M | blocked (stakeholder decision; OPEN-QUESTIONS Q18) |
