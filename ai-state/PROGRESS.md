@@ -57,7 +57,13 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
 
 ## Currently in flight
 
-- **testing-cicd in progress (2026-06-09).** TC1 (#43) + TC2 (#44) MERGED — the non-skippable backend
+- **CURRENT STATE (2026-06-09):** This session merged TC1, TC2, TC5 (security suite + non-skippable CI gate),
+  and DF1–DF3 (**direct-only-fallback COMPLETE**). Running a **system-verification pass** at this stream
+  boundary (cadence). **Next up:** TC3 (#45 frontend unit/component tests — NOW unblocked by direct-only-fallback)
+  and #105 (AllowPrivateIP wire-through — decided, security-critical, needs design + adversarial review) can run
+  in parallel. Then TC4 (#46 e2e — scope EXCLUDES in-panel proxy render since FR5 is deferred) and TC6 (#48 —
+  needs Q13b e2e-matrix-scope decision + TC4/TC5). docs-release (DR1/DR2 ready) is the following stream.
+- **testing-cicd (2026-06-09).** TC1 (#43) + TC2 (#44) MERGED — the non-skippable backend
   security suite (AC 17–29) is COMPLETE. Resolved Q13a (DNS-rebinding-in-CI = injected stub
   `security.Resolver`, hermetic, NO production change). Both were backend-only/test-only ⇒ e2e unaffected;
   merged once build/lint/test + compatibility green (each branch updated to current `main` first so
@@ -176,6 +182,12 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#109 (DF3)** merged — **direct-only-fallback stream COMPLETE (DF1–DF3).** View-mode guard: `useBackendAvailable`
+  read only in the proxy branch; direct mode renders immediately (never waits on the probe); proxy + backend
+  unavailable ⇒ accessible fallback (no broken iframe — `buildProxySrc` unreachable until settled-available);
+  loading ⇒ neutral placeholder. Direct fallback intentionally NOT attempted for proxy-configured sites
+  (framability unknowable at view time). Review APPROVE (no blocking; 2 mutation checks confirm). Full CI green
+  incl. e2e ×4 + security-suite gate. (Cosmetic nit deferred: stale `refreshKey` comment in WebViewPanel.tsx.)
 - **#108 (DF2)** merged — editor degradation: load-mode selector converted from a standard `addRadio` to a
   custom `LoadModeEditor` consuming `useBackendAvailable`; when backend unavailable it omits Auto/Proxy
   (omission + a `handleChange` guard, because `@grafana/ui` `RadioButtonGroup` doesn't propagate per-option

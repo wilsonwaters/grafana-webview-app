@@ -125,7 +125,11 @@ proxy mode + Test URL, show explanatory state), view-mode guard against a proxy-
 running with no backend.
 **Depends on:** panel-core, frameability.
 **Size:** M.
-**Status:** Not started.
+**Status:** ✅ Done — DF1–DF3 merged (#107, #108, #109). `useBackendAvailable` hook (probe `/health` once,
+module-scoped shared cache, fail-safe per Q12); editor degradation (load-mode selector → custom
+`LoadModeEditor` that omits Auto/Proxy + disables Test URL + shows a note when backend unavailable;
+display-only clamp); view-mode guard (proxy + no backend ⇒ accessible fallback, no broken iframe; direct
+mode never waits on the probe). The plugin now degrades cleanly to direct-only when no backend is present.
 
 ### 8. Testing & CI/CD  —  `testing-cicd`
 **Outcome:** A non-skippable security suite, full unit/E2E coverage, and CI/release/E2E-matrix
