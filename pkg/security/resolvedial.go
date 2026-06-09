@@ -132,6 +132,29 @@ type Resolver interface {
 	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
+// policyCtxKey is the unexported context-key type used to carry a Policy through
+// a request context. Using a private named type (rather than a bare string)
+// guarantees no other package can collide with or read this key.
+type policyCtxKey struct{}
+
+// WithPolicy returns a copy of ctx carrying p. The consuming endpoint sets the
+// per-request matched-domain Policy on the context before invoking the dialer;
+// DialContext reads it back with policyFromContext. A context with no Policy
+// yields the strict zero Policy, so the default (no opt-in) path is unaffected.
+func WithPolicy(ctx context.Context, p Policy) context.Context {
+	return context.WithValue(ctx, policyCtxKey{}, p)
+}
+
+// policyFromContext extracts the Policy previously stored by WithPolicy. When no
+// Policy is present it returns the zero (strict) Policy, so an un-threaded
+// context behaves exactly like the non-policy path.
+func policyFromContext(ctx context.Context) Policy {
+	if p, ok := ctx.Value(policyCtxKey{}).(Policy); ok {
+		return p
+	}
+	return Policy{}
+}
+
 // IsMetadataHostname reports whether host matches a known cloud-metadata
 // service name. The input is normalised (trimmed, lowercased, single trailing
 // dot stripped) before comparison so that "Metadata.Google.Internal." matches.
@@ -157,6 +180,22 @@ func IsMetadataHostname(host string) bool {
 // mercy of resolver ordering and would still hand the attacker a probe of which
 // records are accepted. Rejecting outright removes the ambiguity.
 func ResolveAndValidate(ctx context.Context, resolver Resolver, host string) ([]net.IP, error) {
+	return ResolveAndValidatePolicy(ctx, resolver, host, Policy{})
+}
+
+// ResolveAndValidatePolicy is ResolveAndValidate with an explicit relaxation
+// Policy. It is byte-for-byte identical to ResolveAndValidate except that each
+// resolved IP is classified through ClassifyIPPolicy(ip, p) instead of the
+// strict ClassifyIP, so a matched-domain private-IP opt-in can relax ONLY the
+// RFC 1918 ranges (see Policy / isRelaxablePrivate). The fail-closed
+// multi-record strategy is unchanged: if ANY record is still blocked (under the
+// policy) the whole request is rejected with a *DialError and no addresses, so a
+// poisoned answer set mixing a relaxable private IP with a non-relaxable one
+// (e.g. link-local) still fails closed.
+//
+// The metadata-name block is UNCONDITIONAL and runs before resolution; it is
+// never gated by the policy.
+func ResolveAndValidatePolicy(ctx context.Context, resolver Resolver, host string, p Policy) ([]net.IP, error) {
 	h := strings.TrimSpace(host)
 	if h == "" {
 		return nil, newDialError(ReasonNoHost, "empty hostname")
@@ -175,7 +214,7 @@ func ResolveAndValidate(ctx context.Context, resolver Resolver, host string) ([]
 
 	ips := make([]net.IP, 0, len(addrs))
 	for _, a := range addrs {
-		if blocked, reason := ClassifyIP(a.IP); blocked {
+		if blocked, reason := ClassifyIPPolicy(a.IP, p); blocked {
 			return nil, &DialError{
 				Reason:    ReasonBlockedIP,
 				IPReason:  reason,
@@ -199,6 +238,16 @@ func ResolveAndValidate(ctx context.Context, resolver Resolver, host string) ([]
 // encodings never reach this point (see the package doc — they fail DNS
 // resolution upstream).
 func validateConnectAddr(address string) error {
+	return validateConnectAddrPolicy(address, Policy{})
+}
+
+// validateConnectAddrPolicy is validateConnectAddr with an explicit relaxation
+// Policy: it classifies the concrete connect IP through ClassifyIPPolicy(ip, p)
+// rather than the strict ClassifyIP, so the same RFC-1918-only opt-in applies at
+// the authoritative connect-time gate. With the zero Policy it is identical to
+// validateConnectAddr. An address that does not parse to an IP still fails
+// closed regardless of policy.
+func validateConnectAddrPolicy(address string, p Policy) error {
 	host, _, err := net.SplitHostPort(address)
 	if err != nil {
 		// No port, or otherwise unparseable: try the raw address, then fail
@@ -209,7 +258,7 @@ func validateConnectAddr(address string) error {
 	if ip == nil {
 		return newDialError(ReasonBlockedIP, "connect address %q is not a valid IP", address)
 	}
-	if blocked, reason := ClassifyIP(ip); blocked {
+	if blocked, reason := ClassifyIPPolicy(ip, p); blocked {
 		return &DialError{
 			Reason:    ReasonBlockedIP,
 			IPReason:  reason,
@@ -227,8 +276,17 @@ func validateConnectAddr(address string) error {
 // connect-time guard without using DialContext. The network and underlying
 // syscall handle are unused; only the resolved address is inspected.
 func NewControl() func(network, address string, c syscall.RawConn) error {
+	return NewControlPolicy(Policy{})
+}
+
+// NewControlPolicy is NewControl with an explicit relaxation Policy: the returned
+// Control hook re-validates the concrete connect IP through ClassifyIPPolicy(ip,
+// p), so the per-request matched-domain opt-in (RFC 1918 only) is enforced at the
+// authoritative connect-time gate as well as at resolution. With the zero Policy
+// it is identical to NewControl.
+func NewControlPolicy(p Policy) func(network, address string, c syscall.RawConn) error {
 	return func(_, address string, _ syscall.RawConn) error {
-		return validateConnectAddr(address)
+		return validateConnectAddrPolicy(address, p)
 	}
 }
 
@@ -285,7 +343,13 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 		return nil, newDialError(ReasonNoHost, "address %q is not host:port: %v", addr, err)
 	}
 
-	ips, err := ResolveAndValidate(ctx, d.resolver, host)
+	// Read the per-request relaxation Policy from the context (strict zero Policy
+	// when none was set, so the default path is unchanged). The SAME policy is
+	// used for resolution AND the connect-time guard, so both gates agree on the
+	// (RFC-1918-only) relaxation for this request.
+	pol := policyFromContext(ctx)
+
+	ips, err := ResolveAndValidatePolicy(ctx, d.resolver, host, pol)
 	if err != nil {
 		return nil, err
 	}
@@ -293,10 +357,11 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	// Take a copy of the base dialer per call and install the connect-time
 	// re-validation guard. All resolved IPs already passed SF1; the Control
 	// hook is the defence-in-depth check against a rebind between resolve and
-	// connect. It is the single authoritative gate (NewControl), shared with
-	// callers that assemble their own dialer, so the gate has one definition.
+	// connect. It is the single authoritative gate (NewControlPolicy), shared
+	// with callers that assemble their own dialer, so the gate has one
+	// definition.
 	dialer := *d.base
-	dialer.Control = NewControl()
+	dialer.Control = NewControlPolicy(pol)
 
 	// Dial the first validated IP directly. Every IP in the slice has already
 	// been validated, so the choice of the first is purely for determinism; the

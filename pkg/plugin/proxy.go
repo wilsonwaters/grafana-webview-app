@@ -246,10 +246,22 @@ func buildProxyHandler(cfg PluginSettings) *proxyHandler {
 	})
 
 	transport := &http.Transport{
-		DialContext:           secureDialer.DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		IdleConnTimeout:       90 * time.Second,
+		DialContext:       secureDialer.DialContext,
+		ForceAttemptHTTP2: true,
+		MaxIdleConns:      100,
+		IdleConnTimeout:   90 * time.Second,
+		// DisableKeepAlives is SECURITY-LOAD-BEARING. Connection reuse is the
+		// cross-policy connection-reuse hazard: a TCP connection validated under
+		// one matched domain's per-request Policy (e.g. one that opted in to a
+		// private IP via AllowPrivateIP) must NEVER be silently reused for a later
+		// request whose matched domain did NOT opt in. The SF4 resolve-then-dial +
+		// connect-time Control gate runs ONLY on a fresh dial; a pooled connection
+		// skips it entirely. Disabling keep-alives forces a brand-new dial — and
+		// therefore a fresh per-request resolve/Control gate under the CURRENT
+		// request's policy — on every single upstream connection, so a connection
+		// admitted under one domain's policy can never carry a request another
+		// domain's policy would have refused.
+		DisableKeepAlives:     true,
 		TLSHandshakeTimeout:   timeout,
 		ExpectContinueTimeout: 1 * time.Second,
 	}
@@ -335,6 +347,61 @@ func instanceIDFromContext(req *http.Request) string {
 		return "ns-" + pCtx.Namespace
 	}
 	return defaultInstanceID
+}
+
+// permittedIP records a single private IP that the matched domain's
+// AllowPrivateIP opt-in relaxed (admitted) at the SF4 gate, alongside its SF1
+// reason class. It feeds the distinct permit audit-log Warn and the
+// webview_proxy_private_ip_permitted_total metric.
+type permittedIP struct {
+	ip     net.IP
+	reason string
+}
+
+// privatePermitRecorder collects the private IPs that a request's per-domain
+// AllowPrivateIP opt-in caused to be admitted at the SF4 IP gate. Its record
+// method is wired into the per-request security.Policy.OnPrivatePermit hook,
+// which security.ClassifyIPPolicy invokes from whatever goroutine runs the
+// classification — at the connect-time Control gate that is the DIAL goroutine,
+// NOT the handler goroutine — so record must be concurrency-safe. A mutex
+// guards the slice; the handler reads the collected permits only AFTER the
+// ReverseProxy round-trip has returned (the dial goroutine has finished), in
+// the single deferred audit block.
+type privatePermitRecorder struct {
+	mu      sync.Mutex
+	permits []permittedIP
+}
+
+// record notes a permitted (ip, reason), DEDUPLICATED per (ip, reason). The
+// opt-in permit hook (security.Policy.OnPrivatePermit) fires for the SAME IP at
+// both SF4 gates — once during ResolveAndValidatePolicy and again at the
+// connect-time NewControlPolicy Control re-check — so a single permitted IP
+// would otherwise be recorded twice. Deduping here means the audit Warn and the
+// metric are emitted exactly once per distinct permitted IP. It copies the
+// net.IP so a later mutation of the caller's slice cannot corrupt the recorded
+// value, and is safe for concurrent use.
+func (r *privatePermitRecorder) record(ip net.IP, reason string) {
+	cp := make(net.IP, len(ip))
+	copy(cp, ip)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, p := range r.permits {
+		if p.reason == reason && p.ip.Equal(cp) {
+			return
+		}
+	}
+	r.permits = append(r.permits, permittedIP{ip: cp, reason: reason})
+}
+
+// snapshot returns a copy of the recorded permits for the deferred audit block.
+// It is read after the dial goroutine has completed, but takes the lock anyway
+// so it is correct regardless of timing.
+func (r *privatePermitRecorder) snapshot() []permittedIP {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]permittedIP, len(r.permits))
+	copy(out, r.permits)
+	return out
 }
 
 // setCORSHeaders applies permissive CORS headers to every /proxy response. The
@@ -435,6 +502,13 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// denials_total{reason} counter only when denied is non-empty.
 	p.metrics.inFlight.Inc()
 	var denied string
+	// allowPrivate is the matched domain's AllowPrivateIP opt-in for THIS request
+	// (false until the allowlist matches). recorder collects any private IP the
+	// opt-in admitted at the SF4 gate so the deferred block can emit the distinct
+	// permit Warn + metric. Both are read in the deferred block AFTER the upstream
+	// round-trip has returned (so the dial goroutine has finished writing).
+	var allowPrivate bool
+	recorder := &privatePermitRecorder{}
 	defer func() {
 		p.metrics.inFlight.Dec()
 		p.metrics.observeRequest(rec.status, time.Since(start).Seconds(), denied)
@@ -445,7 +519,23 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 			"status", rec.status,
 			"bytes", rec.bytes,
 			"duration", time.Since(start),
+			"allowPrivateIP", allowPrivate,
 		)
+		// A DISTINCT, high-signal audit line per private IP that the opt-in
+		// admitted: this re-opened SSRF surface must be loud in the logs. It fires
+		// ONLY when the matched domain opted in AND a private IP was actually
+		// reached, so an opted-in domain resolving to a public IP produces nothing
+		// here. The permit metric is incremented in the same place.
+		for _, permit := range recorder.snapshot() {
+			p.metrics.privateIPPermitted.WithLabelValues(permit.reason).Inc()
+			p.logger.Warn("proxy private-ip permitted by opt-in",
+				"endpoint", endpoint,
+				"url", auditURL,
+				"user", auditUser(req.Context()),
+				"permittedIP", permit.ip.String(),
+				"ipClass", permit.reason,
+			)
+		}
 	}()
 
 	setCORSHeaders(w.Header())
@@ -492,6 +582,12 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 		denied = writeDenial(w, denialReasonAllowlist, "target host is not allowlisted")
 		return
 	}
+	// Capture the matched domain's per-request private-IP opt-in. This is the ONLY
+	// place AllowPrivateIP enters the dial path: it is read from the domain THIS
+	// request matched, so it is recomputed on every request (and, for redirects,
+	// on every hop, since each hop re-enters serve and re-matches). It is recorded
+	// on the audit line above and drives the security.Policy threaded below.
+	allowPrivate = match.Options.AllowPrivateIP
 
 	// SF2: full validation of scheme, userinfo, host, and port — now allowing
 	// the matched domain's extra ports. scheme/port/userinfo/hostname/malformed
@@ -544,6 +640,14 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// the values are read but unused — subresources are not HTML documents.
 	hideSelectors := hideSelectorsOf(req)
 
+	// Build the per-request relaxation Policy from the matched domain's opt-in.
+	// When allowPrivate is false this is the strict zero-equivalent Policy
+	// (AllowPrivate:false), so the default path is unchanged. OnPrivatePermit is
+	// the recorder so any admitted private IP is audited/metered in the deferred
+	// block. serveProxy sets this Policy onto the request context (before its
+	// timeout wrap) so the SF4 dialer reads it back via security.WithPolicy.
+	pol := security.Policy{AllowPrivate: allowPrivate, OnPrivatePermit: recorder.record}
+
 	// The pipeline approved the request; any further denial is decided by the
 	// ReverseProxy's ErrorHandler (a dial-time blocked IP/metadata host, an
 	// over-size response, an upstream timeout, or a gateway failure). serveProxy
@@ -551,7 +655,7 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// was served cleanly) so the deferred metrics emission records it. The
 	// endpoint selects the ModifyResponse: /proxy HTML-rewrites the body,
 	// /proxy-resource passes the body + Content-Type through unchanged.
-	denied = p.serveProxy(w, req, target, endpoint, depth, hideSelectors)
+	denied = p.serveProxy(w, req, target, endpoint, depth, hideSelectors, pol)
 }
 
 // hideSelectorsOf reads the repeated `hide` query params (CR5) from the inbound
@@ -660,7 +764,7 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 // metrics emission can record denials_total for the right reason. The ErrorHandler
 // runs synchronously inside rp.ServeHTTP, so capturing into a local here is
 // race-free for this single-goroutine-per-request handler.
-func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL, endpoint string, depth int, hideSelectors []string) string {
+func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL, endpoint string, depth int, hideSelectors []string, pol security.Policy) string {
 	maxBytes := p.cfg.MaxResponseBytes
 
 	var denied string
@@ -724,7 +828,14 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 	// which the dialer's own Timeout already sub-bounds). On expiry the
 	// transport surfaces context.DeadlineExceeded, which proxyErrorHandler maps
 	// to 504.
-	ctx, cancel := context.WithTimeout(req.Context(), time.Duration(p.cfg.RequestTimeoutSec)*time.Second)
+	//
+	// The per-request relaxation Policy is attached to the BASE context FIRST,
+	// then the timeout context is derived from it, so the Policy survives the wrap
+	// and the SF4 dialer reads it back via security.WithPolicy at connect time.
+	// With pol.AllowPrivate==false this is the strict default; the policy only
+	// ever relaxes RFC 1918 (see security.isRelaxablePrivate).
+	baseCtx := security.WithPolicy(req.Context(), pol)
+	ctx, cancel := context.WithTimeout(baseCtx, time.Duration(p.cfg.RequestTimeoutSec)*time.Second)
 	defer cancel()
 
 	rp.ServeHTTP(w, req.WithContext(ctx))

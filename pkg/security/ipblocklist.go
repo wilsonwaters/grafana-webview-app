@@ -139,6 +139,35 @@ func normalize(ip net.IP) net.IP {
 	return ip
 }
 
+// Policy carries the per-request relaxation decision for the IP blocklist. The
+// zero value is STRICT — identical to the non-policy ClassifyIP path — so a
+// caller that does not opt in gets the unchanged default behaviour.
+//
+// AllowPrivate, when true, relaxes ONLY the RFC 1918 private IPv4 ranges
+// (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16; reason ReasonPrivate). It does
+// NOT relax loopback, link-local (including the 169.254.169.254 metadata
+// address), CGNAT, IPv6 ULA, unspecified, multicast, reserved, or the
+// fail-closed nil/unparseable sentinel — every one of those stays blocked even
+// when AllowPrivate is set. The single relax boundary is isRelaxablePrivate.
+//
+// OnPrivatePermit, when non-nil, is invoked exactly once for each IP that was
+// blocked-but-relaxed (so the consuming endpoint can audit/meter the permit).
+// It is called from whatever goroutine runs ClassifyIPPolicy (which, on the
+// connect-time Control path, is the dial goroutine), so an implementation must
+// be safe for concurrent use.
+type Policy struct {
+	AllowPrivate    bool
+	OnPrivatePermit func(ip net.IP, reason string)
+}
+
+// isRelaxablePrivate is the SINGLE auditable boundary deciding which blocklist
+// reasons a private-IP opt-in may relax. By design it relaxes ONLY ReasonPrivate
+// (RFC 1918 IPv4). Loopback, link-local, CGNAT, ULA, unspecified, multicast and
+// reserved (including the fail-closed sentinel) are deliberately NOT relaxable.
+func isRelaxablePrivate(reason string) bool {
+	return reason == ReasonPrivate
+}
+
 // ClassifyIP reports whether ip falls within any hardcoded blocked range and,
 // when blocked, a short stable reason token (one of the Reason* constants).
 //
@@ -151,14 +180,38 @@ func normalize(ip net.IP) net.IP {
 // Public, globally routable addresses (for example 8.8.8.8, 1.1.1.1, or a
 // public IPv6 such as 2606:4700:4700::1111) are not blocked and return
 // (false, "").
+//
+// ClassifyIP is the strict, no-opt-in entry point: it delegates to
+// ClassifyIPPolicy with the zero (strict) Policy, so its behaviour — including
+// the fail-closed ClassifyIP(nil) == (true, ReasonReserved) sentinel — is
+// byte-for-byte unchanged.
 func ClassifyIP(ip net.IP) (blocked bool, reason string) {
+	return ClassifyIPPolicy(ip, Policy{})
+}
+
+// ClassifyIPPolicy is ClassifyIP with an explicit relaxation policy. It runs the
+// identical classification, then — and ONLY then — applies the policy: if the IP
+// was blocked for a reason isRelaxablePrivate permits AND p.AllowPrivate is set,
+// the block is lifted (returning (false, "")) and p.OnPrivatePermit, if non-nil,
+// is invoked once with the permitted IP and its original reason. In every other
+// case the original (blocked, reason) result is returned UNCHANGED, so a strict
+// Policy{} relaxes nothing and the fail-closed nil sentinel (reason
+// ReasonReserved, not relaxable) is preserved.
+func ClassifyIPPolicy(ip net.IP, p Policy) (blocked bool, reason string) {
 	n := normalize(ip)
 	if n == nil {
-		// Unparseable input cannot be proven safe, so fail closed.
+		// Unparseable input cannot be proven safe, so fail closed. ReasonReserved
+		// is NOT relaxable, so the policy can never lift this sentinel.
 		return true, ReasonReserved
 	}
 	for _, r := range blockedRanges {
 		if r.net.Contains(n) {
+			if p.AllowPrivate && isRelaxablePrivate(r.reason) {
+				if p.OnPrivatePermit != nil {
+					p.OnPrivatePermit(n, r.reason)
+				}
+				return false, ""
+			}
 			return true, r.reason
 		}
 	}

@@ -16,12 +16,20 @@ const (
 	metricDenialsTotal       = "webview_proxy_denials_total"
 	metricRequestsInFlight   = "webview_proxy_requests_in_flight"
 	metricRequestDurationSec = "webview_proxy_request_duration_seconds"
+	// metricPrivateIPPermitted counts private IPs a matched domain's
+	// AllowPrivateIP opt-in admitted at the SF4 IP gate. This is a PERMIT, NOT a
+	// denial: it is deliberately a SEPARATE collector so the closed
+	// denials_total/reasonStatus set is left untouched. It is labelled by the SF1
+	// reason class that was relaxed (only "private"/RFC 1918 today).
+	metricPrivateIPPermitted = "webview_proxy_private_ip_permitted_total"
 
 	// labelStatus carries the final HTTP status code as a string on
 	// requests_total; labelReason carries the denial-reason token on
-	// denials_total.
-	labelStatus = "status"
-	labelReason = "reason"
+	// denials_total; labelIPClass carries the relaxed SF1 reason class on
+	// private_ip_permitted_total.
+	labelStatus  = "status"
+	labelReason  = "reason"
+	labelIPClass = "ipClass"
 )
 
 // Denial-reason label values for denials_total. P7 makes the full
@@ -85,6 +93,10 @@ type proxyMetrics struct {
 	denials  *prometheus.CounterVec
 	inFlight prometheus.Gauge
 	duration prometheus.Histogram
+	// privateIPPermitted counts the private IPs admitted by a matched domain's
+	// AllowPrivateIP opt-in, labelled by the relaxed SF1 class (ipClass). It is a
+	// PERMIT counter, distinct from denials.
+	privateIPPermitted *prometheus.CounterVec
 }
 
 // newProxyMetrics defines and registers the /proxy collectors against reg.
@@ -114,6 +126,10 @@ func newProxyMetrics(reg prometheus.Registerer) *proxyMetrics {
 			Help:    "Duration of /proxy request handling in seconds.",
 			Buckets: prometheus.DefBuckets,
 		}),
+		privateIPPermitted: factory.NewCounterVec(prometheus.CounterOpts{
+			Name: metricPrivateIPPermitted,
+			Help: "Total number of private IPs admitted by a matched domain's AllowPrivateIP opt-in, labelled by the relaxed SF1 IP class.",
+		}, []string{labelIPClass}),
 	}
 }
 
