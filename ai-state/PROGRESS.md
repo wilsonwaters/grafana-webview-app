@@ -176,6 +176,13 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#108 (DF2)** merged — editor degradation: load-mode selector converted from a standard `addRadio` to a
+  custom `LoadModeEditor` consuming `useBackendAvailable`; when backend unavailable it omits Auto/Proxy
+  (omission + a `handleChange` guard, because `@grafana/ui` `RadioButtonGroup` doesn't propagate per-option
+  `disabled` to the input) leaving only Direct, and the Test URL button is disabled with a clear note;
+  auto-re-enables when present; no note flash while loading. **Clamp is display-only** — a saved proxy/auto
+  value is NOT mutated on mount (DF3 enforces at view time). Review APPROVE (no blocking; 3 mutation checks
+  confirm regression-sensitivity). Full CI green incl. e2e ×4 + security-suite gate. FR3/FR4 tests preserved.
 - **#107 (DF1)** merged — `useBackendAvailable` hook (direct-only-fallback STARTED): probes `/health` once,
   module-scoped shared promise cache (one probe across all instances, no poll), fail-safe per Q12
   (`backendAvailable` true ONLY on 200+`{status:"ok"}`; any error/non-2xx/timeout/unexpected ⇒ false;
