@@ -5,6 +5,28 @@ import { WebViewPanel } from './WebViewPanel';
 import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../../types';
 import { webViewPanelTestIds } from './testIds';
 import { PROXY_RESOURCE_BASE } from '../loadMode';
+import { useBackendAvailable, type BackendAvailability } from '../useBackendAvailable';
+
+// DF3: mock the backend-availability hook so each test drives the
+// available / unavailable / loading states deterministically. Default is a
+// settled-available backend (set in beforeEach below) so existing PC1/FR4
+// behaviour — which predates the proxy guard — is preserved unchanged.
+jest.mock('../useBackendAvailable', () => ({
+  useBackendAvailable: jest.fn(),
+}));
+
+const mockedUseBackendAvailable = useBackendAvailable as jest.MockedFunction<typeof useBackendAvailable>;
+
+function setBackend(state: BackendAvailability) {
+  mockedUseBackendAvailable.mockReturnValue(state);
+}
+
+beforeEach(() => {
+  // Default: backend settled and available. Direct-mode tests are unaffected by
+  // this; proxy-mode tests that predate DF3 expect the proxy iframe, which now
+  // requires an available backend.
+  setBackend({ loading: false, backendAvailable: true });
+});
 
 function buildProps(options: Partial<PanelOptions> = {}, dims: { width?: number; height?: number } = {}): PanelProps<PanelOptions> {
   return {
@@ -456,6 +478,112 @@ describe('panels/webview/WebViewPanel', () => {
       expect(panelContainer1.style.height).toBe('400px');
       expect(panelContainer2.style.width).toBe('800px');
       expect(panelContainer2.style.height).toBe('500px');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // DF3: view-mode backend-availability guard (proxy only)
+  // ---------------------------------------------------------------------------
+
+  describe('proxy view-mode guard (DF3)', () => {
+    test('proxy + backend unavailable (settled) → accessible fallback, NO proxy iframe', () => {
+      setBackend({ loading: false, backendAvailable: false });
+
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />);
+
+      const fallback = screen.getByTestId(webViewPanelTestIds.proxyUnavailable);
+      expect(fallback).toBeInTheDocument();
+      // Real text, not just an icon (accessibility).
+      expect(fallback).toHaveTextContent(/backend proxy/i);
+      // The proxy iframe must NOT be rendered at all.
+      expect(screen.queryByTestId(webViewPanelTestIds.iframe)).not.toBeInTheDocument();
+    });
+
+    test('proxy + backend available → proxy iframe rendered with buildProxySrc src', () => {
+      setBackend({ loading: false, backendAvailable: true });
+
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />);
+
+      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+      const src = iframe.getAttribute('src')!;
+      expect(src.startsWith(`${PROXY_RESOURCE_BASE}?`)).toBe(true);
+      expect(src).toContain(`url=${encodeURIComponent('https://example.com')}`);
+      // No fallback / loading placeholder when available.
+      expect(screen.queryByTestId(webViewPanelTestIds.proxyUnavailable)).not.toBeInTheDocument();
+      expect(screen.queryByTestId(webViewPanelTestIds.backendLoading)).not.toBeInTheDocument();
+    });
+
+    test('proxy + probe loading → neutral placeholder, NO proxy iframe and NO fallback', () => {
+      setBackend({ loading: true, backendAvailable: false });
+
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.backendLoading)).toBeInTheDocument();
+      // Never a broken proxy iframe while the probe is in flight.
+      expect(screen.queryByTestId(webViewPanelTestIds.iframe)).not.toBeInTheDocument();
+      // Not yet the settled fallback either.
+      expect(screen.queryByTestId(webViewPanelTestIds.proxyUnavailable)).not.toBeInTheDocument();
+    });
+
+    test('direct mode renders the iframe immediately even when backend is unavailable (never waits on probe)', () => {
+      setBackend({ loading: false, backendAvailable: false });
+
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://example.com');
+      expect(screen.queryByTestId(webViewPanelTestIds.proxyUnavailable)).not.toBeInTheDocument();
+      expect(screen.queryByTestId(webViewPanelTestIds.backendLoading)).not.toBeInTheDocument();
+    });
+
+    test('direct mode renders the iframe immediately even while the probe is loading', () => {
+      setBackend({ loading: true, backendAvailable: false });
+
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://example.com');
+      expect(screen.queryByTestId(webViewPanelTestIds.backendLoading)).not.toBeInTheDocument();
+    });
+
+    test('auto + detectedMode=proxy + backend unavailable → fallback, NO iframe', () => {
+      setBackend({ loading: false, backendAvailable: false });
+
+      render(
+        <WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'auto', detectedMode: 'proxy' })} />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.proxyUnavailable)).toBeInTheDocument();
+      expect(screen.queryByTestId(webViewPanelTestIds.iframe)).not.toBeInTheDocument();
+    });
+
+    test('auto + detectedMode=direct + backend unavailable → direct iframe (unaffected by probe)', () => {
+      setBackend({ loading: false, backendAvailable: false });
+
+      render(
+        <WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'auto', detectedMode: 'direct' })} />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://example.com');
+    });
+
+    test('empty URL still shows the empty state regardless of backend state', () => {
+      setBackend({ loading: false, backendAvailable: false });
+
+      render(<WebViewPanel {...buildProps({ url: '', loadMode: 'proxy' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.placeholder)).toBeInTheDocument();
+      expect(screen.queryByTestId(webViewPanelTestIds.proxyUnavailable)).not.toBeInTheDocument();
+      expect(screen.queryByTestId(webViewPanelTestIds.iframe)).not.toBeInTheDocument();
+    });
+
+    test('debug overlay still shows on the proxy fallback state', () => {
+      setBackend({ loading: false, backendAvailable: false });
+
+      render(
+        <WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy', showDebugOverlay: true })} />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.proxyUnavailable)).toBeInTheDocument();
+      expect(screen.getByTestId(webViewPanelTestIds.debugOverlay)).toHaveTextContent('mode: proxy');
     });
   });
 });
