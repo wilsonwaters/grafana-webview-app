@@ -57,13 +57,19 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
 
 ## Currently in flight
 
-- **testing-cicd STARTED (2026-06-09).** Dispatching **TC1 (#43, AC 17–22: SSRF/blocklist/allowlist/
-  scheme)** + **TC2 (#44, AC 23–29: limits/header-strip/redirects/audit/metrics)** in parallel — the
-  non-skippable backend security suite. All deps merged (SF1–SF4, P1–P7, CR1–CR5). Resolved Q13a
-  (DNS-rebinding-in-CI = injected stub `security.Resolver`, hermetic, NO production change; seam already
-  exists). Both are backend-only (no `src/` changes) so e2e is unaffected — safe to merge once CI's
-  "Build, lint and unit tests" + compatibility are green (still update each branch to current `main`
-  first so golangci-lint v2 lints the combined package).
+- **testing-cicd in progress (2026-06-09).** TC1 (#43) + TC2 (#44) MERGED — the non-skippable backend
+  security suite (AC 17–29) is COMPLETE. Resolved Q13a (DNS-rebinding-in-CI = injected stub
+  `security.Resolver`, hermetic, NO production change). Both were backend-only/test-only ⇒ e2e unaffected;
+  merged once build/lint/test + compatibility green (each branch updated to current `main` first so
+  golangci-lint v2 lints the combined package).
+- **Next within testing-cicd:** TC5 (#47, CI non-skippable security gate, AC 36) is now UNBLOCKED (deps
+  TC1+TC2) and high-value — dispatching it. Remaining testing-cicd readiness: **TC3 (#45 frontend tests)
+  is partly gated on direct-only-fallback**; **TC4 (#46 E2E) is entangled with FR5/Q17** (in-panel proxy
+  render still blocked by Grafana resource-route XFO/CSP — do NOT assert in-panel proxy render in e2e
+  until FR5 lands); **TC6 (#48) is gated on Q13b (e2e-matrix scope) + TC4/TC5.** After TC5 the natural
+  pivot is **direct-only-fallback (DF1–DF3)** which unblocks TC3. FR5/Q17 + Q13b are stakeholder check-in
+  items at the next stream boundary. **WARNING to self:** never `git reset --hard` with uncommitted
+  ai-state edits in the tree (lost a bookkeeping edit once this session) — commit first.
 - Live render test DONE (PROXY-RENDER-OK; see "Runtime render test + KEY finding" below). The
   backend proxy + content-rewriting + frameability are all merged and runtime-verified.
 - **Stakeholder decisions (2026-06-03):**
@@ -169,8 +175,9 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
   (21: poisoned set fail-closed, TOCTOU dials only validated first IP w/ resolver-call-count==1,
   connect-time `NewControl` guard table), non-HTTP schemes→400 (22). Review APPROVE (no blocking; AC-21
   reconstruction confirmed faithful to production `(*Dialer).DialContext`; `/check-frameable` IP-block
-  confirmed enforced+surfaced as a 200 proxy verdict per Q7). **In flight: merging once re-run CI on the
-  main-updated branch is green.** Surfaced the `AllowPrivateIP` dead-config finding → issue #105 / Q18.
+  confirmed enforced+surfaced as a 200 proxy verdict per Q7). **MERGED** (re-run CI on the main-updated
+  branch green: build/lint/test + compatibility). Surfaced the `AllowPrivateIP` dead-config finding →
+  #105/Q18. **⇒ The non-skippable BACKEND SECURITY SUITE (AC 17–29) is now COMPLETE.**
 - **#101 (FR4)** merged — **frameability COMPLETE.** Load-mode resolution (`resolveLoadMode`) + view-mode
   proxy-src wiring (`buildProxySrc` → `${config.appSubUrl}/api/plugins/…/proxy?url=<enc>` + `hide=` per
   selector for CR5; sub-path-safe; param-injection-safe). The panel renders via the proxy in proxy mode.
