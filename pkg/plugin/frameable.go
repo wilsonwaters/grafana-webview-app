@@ -141,7 +141,14 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 	// IP blocklist run inside p.transport at connect time, so a blocked/metadata
 	// IP fails the dial here and is treated (like any fetch error) as
 	// proxy-recommended rather than a hard denial — the verdict is still HTTP 200.
-	resp := p.checkFrameableVerdict(req.Context(), target.String())
+	//
+	// check-frameable shares p.transport with /proxy, so the matched domain's
+	// AllowPrivateIP opt-in must apply here too (otherwise an opted-in domain that
+	// /proxy can fetch would be reported un-frameable because the check dial was
+	// refused). The policy carries NO OnPrivatePermit: the permit audit/metric
+	// belongs to the proxy serve path; a frameability probe is a read-only check.
+	pol := security.Policy{AllowPrivate: match.Options.AllowPrivateIP}
+	resp := p.checkFrameableVerdict(req.Context(), target.String(), pol)
 	writeFrameableResponse(w, resp)
 }
 
@@ -165,7 +172,7 @@ func (p *proxyHandler) frameableTimeout() time.Duration {
 //   - X-Frame-Options DENY/SAMEORIGIN, or CSP frame-ancestors blocking ⇒
 //     frameable:false, proxy, naming the blocker.
 //   - otherwise ⇒ frameable:true, direct.
-func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL string) frameableResponse {
+func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL string, pol security.Policy) frameableResponse {
 	client := &http.Client{
 		Transport: p.transport,
 		Timeout:   p.frameableTimeout(),
@@ -179,7 +186,13 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 	// A GET is safer than HEAD for the framing check: some servers omit framing
 	// headers on HEAD. We read NOTHING of the body (only headers are needed) and
 	// always close it so the connection can be released.
-	reqCtx, cancel := context.WithTimeout(ctx, p.frameableTimeout())
+	//
+	// Attach the matched domain's relaxation Policy to the base context BEFORE the
+	// timeout wrap, so it survives and the SF4 dialer reads it back via
+	// security.WithPolicy at connect time — keeping the AllowPrivateIP opt-in
+	// consistent with /proxy. With pol.AllowPrivate==false this is the strict
+	// default.
+	reqCtx, cancel := context.WithTimeout(security.WithPolicy(ctx, pol), p.frameableTimeout())
 	defer cancel()
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
