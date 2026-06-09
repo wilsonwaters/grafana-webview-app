@@ -6,7 +6,7 @@ import type { PanelOptions } from '../../types';
  * Plugin id of the host app plugin. Single source of truth for building
  * plugin resource URLs (mirrors src/plugin.json `id`).
  */
-const PLUGIN_ID = 'wilsonwaters-webview-app';
+export const PLUGIN_ID = 'wilsonwaters-webview-app';
 
 /**
  * Base path for the backend proxy resource handler.
