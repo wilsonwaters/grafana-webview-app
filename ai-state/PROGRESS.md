@@ -62,8 +62,13 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
   `security.Resolver`, hermetic, NO production change). Both were backend-only/test-only ⇒ e2e unaffected;
   merged once build/lint/test + compatibility green (each branch updated to current `main` first so
   golangci-lint v2 lints the combined package).
-- **Next within testing-cicd:** TC5 (#47, CI non-skippable security gate, AC 36) is now UNBLOCKED (deps
-  TC1+TC2) and high-value — dispatching it. Remaining testing-cicd readiness: **TC3 (#45 frontend tests)
+- **TC5 (#47) MERGED (2026-06-09)** — non-skippable CI security gate (AC 36): a dedicated unconditional
+  `security-suite` job (its own status check, ran green on its own PR) + `scripts/security-suite.sh`
+  guard that fails if any AC 17–29 test is missing/renamed/skipped/not-PASS. Review APPROVE (fail-closed
+  verified across removed/renamed/skip/no-Magefile negative tests). Note: making it a *required* check is
+  a repo branch-protection setting (admin action) — flagged, not yet done. `.gitignore` has an unanchored
+  `ci/` rule, so the script lives at `scripts/security-suite.sh` (NOT `scripts/ci/`).
+- **Remaining testing-cicd readiness (decision point):** **TC3 (#45 frontend tests)
   is partly gated on direct-only-fallback**; **TC4 (#46 E2E) is entangled with FR5/Q17** (in-panel proxy
   render still blocked by Grafana resource-route XFO/CSP — do NOT assert in-panel proxy render in e2e
   until FR5 lands); **TC6 (#48) is gated on Q13b (e2e-matrix scope) + TC4/TC5.** After TC5 the natural

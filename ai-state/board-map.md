@@ -40,7 +40,7 @@
 | TC2 | #44 | Security test suite — limits, header stripping, redirects, logging, metrics (AC 23–29) | testing-cicd | L | done |
 | TC3 | #45 | Frontend unit and component test coverage | testing-cicd | M | blocked |
 | TC4 | #46 | E2E suite with @grafana/plugin-e2e and Playwright | testing-cicd | L | blocked |
-| TC5 | #47 | CI verification and non-skippable security gate | testing-cicd | M | blocked |
+| TC5 | #47 | CI verification and non-skippable security gate | testing-cicd | M | done |
 | TC6 | #48 | Release workflow, signing, plugin-validator gate, and E2E Grafana-version matrix | testing-cicd | M | blocked |
 | DR1 | #49 | Flesh out repo docs — README, CHANGELOG, CONTRIBUTING, CODE_OF_CONDUCT | docs-release | M | ready |
 | DR2 | #50 | Developer guide — setup, workflow, testing, debugging | docs-release | M | ready |
