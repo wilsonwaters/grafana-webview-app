@@ -137,6 +137,32 @@ jobs:
           path: ${{ steps.metadata.outputs.plugin-id }}
           retention-days: 5
 
+  # AC 36: "All security tests pass in CI on every PR (security suite cannot be
+  # skipped)." This job is intentionally SEPARATE from `build` and is NOT gated
+  # by any `has-backend` conditional, so the backend security suite (AC 17-29)
+  # always runs on every push to main and every PR. The guard script asserts a
+  # `--- PASS:` line for every required AC test, so removing, renaming, or
+  # `t.Skip`-ping a security test fails this job rather than silently passing.
+  #
+  # NOTE: To prevent merging while this job is red or missing, add `Security
+  # suite (non-skippable)` to the repository's required status checks. That is a
+  # branch-protection setting (admin action), separate from this workflow.
+  security-suite:
+    name: Security suite (non-skippable)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Setup Go environment
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Run mandatory security suite (AC 17-29)
+        run: ./scripts/security-suite.sh
+
   resolve-versions:
     name: Resolve e2e images
     runs-on: ubuntu-latest
