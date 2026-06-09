@@ -2,8 +2,9 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { css } from '@emotion/css';
 import { GrafanaTheme2, StandardEditorProps } from '@grafana/data';
 import { getBackendSrv } from '@grafana/runtime';
-import { Alert, Button, useStyles2 } from '@grafana/ui';
+import { Alert, Button, Tooltip, useStyles2 } from '@grafana/ui';
 import { normalizeOptions, type PanelOptions } from '../../../types';
+import { useBackendAvailable } from '../useBackendAvailable';
 import { frameabilityEditorTestIds } from './frameabilityEditorTestIds';
 
 /**
@@ -103,6 +104,14 @@ export function FrameabilityEditor({
   const url = opts.url.trim();
   const hasUrl = url.length > 0;
 
+  // DF2: the frameability check is a backend resource (/check-frameable). When
+  // the plugin backend is unavailable the check cannot run, so the Test URL
+  // button is disabled and an explanatory note is shown. While the probe is
+  // still `loading` we do NOT degrade (avoid flashing the note); the button
+  // simply stays enabled until the probe settles, then auto-degrades/recovers.
+  const { loading: backendLoading, backendAvailable } = useBackendAvailable();
+  const backendDown = !backendLoading && !backendAvailable;
+
   // The stored state is tagged with the URL it was produced for. When the URL
   // changes the previous result/error no longer applies, so we treat any
   // mismatched state as idle during render (the React-recommended way to adjust
@@ -129,7 +138,7 @@ export function FrameabilityEditor({
   });
 
   const handleTest = useCallback(async () => {
-    if (!hasUrl) {
+    if (!hasUrl || backendDown) {
       return;
     }
     // Capture the URL this request is for; if the URL changes (or the component
@@ -152,22 +161,48 @@ export function FrameabilityEditor({
       // Do NOT write detectedMode on error — a denial/error has no useful mode.
       setStored({ url: requestUrl, state: { status: 'error', message: extractErrorMessage(err) } });
     }
-  }, [hasUrl, url]);
+  }, [hasUrl, url, backendDown]);
+
+  const buttonDisabled = !hasUrl || backendDown || state.status === 'loading';
+
+  // The disabled button is wrapped in a Tooltip explaining *why* it is disabled
+  // when the backend is down, so the reason is perceivable on hover/focus even
+  // before the note below is read. (No tooltip in the normal/enabled case.)
+  const button = (
+    <Button
+      variant="secondary"
+      size="sm"
+      icon="link"
+      data-testid={frameabilityEditorTestIds.testButton}
+      onClick={handleTest}
+      disabled={buttonDisabled}
+    >
+      Test URL
+    </Button>
+  );
 
   return (
     <div className={styles.wrapper}>
-      <Button
-        variant="secondary"
-        size="sm"
-        icon="link"
-        data-testid={frameabilityEditorTestIds.testButton}
-        onClick={handleTest}
-        disabled={!hasUrl || state.status === 'loading'}
-      >
-        Test URL
-      </Button>
+      {backendDown ? (
+        <Tooltip content="Backend unavailable — the URL test requires the plugin backend.">
+          {/* Tooltip needs a focusable/hoverable wrapper around a disabled button. */}
+          <span className={styles.tooltipTarget}>{button}</span>
+        </Tooltip>
+      ) : (
+        button
+      )}
 
-      {!hasUrl && (
+      {backendDown && (
+        <Alert
+          severity="info"
+          title="Backend unavailable — direct iframe only"
+          data-testid={frameabilityEditorTestIds.backendUnavailableNote}
+        >
+          The proxy and URL test require the plugin backend.
+        </Alert>
+      )}
+
+      {!hasUrl && !backendDown && (
         <div className={styles.hint}>Enter a URL in the &ldquo;URL&rdquo; field above to test it.</div>
       )}
 
@@ -209,5 +244,10 @@ const getStyles = (theme: GrafanaTheme2) => ({
   hint: css`
     font-size: ${theme.typography.bodySmall.fontSize};
     color: ${theme.colors.text.secondary};
+  `,
+  // A disabled <button> does not emit hover/focus events, so wrap it in an
+  // inline-block span that the Tooltip can anchor to. Sized to the button.
+  tooltipTarget: css`
+    display: inline-block;
   `,
 });

@@ -3,6 +3,7 @@ import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../types';
 import { WebViewPanel } from './components/WebViewPanel';
 import { ViewportEditor } from './components/ViewportEditor';
 import { FrameabilityEditor } from './components/FrameabilityEditor';
+import { LoadModeEditor } from './components/LoadModeEditor';
 
 /**
  * Registration for the nested Web View panel plugin.
@@ -23,18 +24,19 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
       description: 'The external web page to display in the panel.',
       defaultValue: DEFAULT_PANEL_OPTIONS.url,
     })
-    .addRadio({
+    // DF2: load-mode selector. Converted from a standard `addRadio` to a custom
+    // editor so it can consume the async `useBackendAvailable` probe and degrade
+    // gracefully (disable Auto/Proxy + clamp to Direct + show a note) when the
+    // backend is unavailable. Same name/description/default and Auto/Direct/Proxy
+    // choices as before; bound to `loadMode` (Grafana wires the custom editor's
+    // onChange to this single path).
+    .addCustomEditor({
+      id: 'loadModeSelector',
       path: 'loadMode',
       name: 'Load mode',
       description: 'How the URL is loaded. Auto uses the mode from the Test URL result (defaults to Direct).',
+      editor: LoadModeEditor,
       defaultValue: DEFAULT_PANEL_OPTIONS.loadMode,
-      settings: {
-        options: [
-          { value: 'auto', label: 'Auto' },
-          { value: 'direct', label: 'Direct' },
-          { value: 'proxy', label: 'Proxy' },
-        ],
-      },
     })
     .addNumberInput({
       path: 'refreshIntervalSec',
