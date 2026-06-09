@@ -7,5 +7,16 @@ apps:
     disabled: false
     jsonData:
       apiUrl: http://default-url.com
+      # E2E (TC4): allowlist a single canonical host so the FR3 "Test URL"
+      # SUCCESS path (HTTP 200 verdict, not a 403 allowlist-denial) is
+      # exercisable end-to-end in CI. The allowlist is otherwise fail-closed
+      # (empty => deny all), which only covers the denied/error path. The
+      # tc4-config-flow denied-path spec uses a DIFFERENT, deliberately
+      # non-allowlisted host to assert the 403 -> Error UI state, so adding this
+      # entry does not weaken that assertion.
+      allowedDomains:
+        - domain: example.com
+          options:
+            allowSubdomains: false
     secureJsonData:
       apiKey: secret-key
