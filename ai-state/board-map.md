@@ -54,4 +54,4 @@
 | CP2 | #58 | Self security audit against the threat model with evidence checklist | catalog-prep | M | blocked |
 | CP3 | #59 | Submission cover letter — docs/publishing.md | catalog-prep | M | blocked |
 | CP4 | #60 | Deferred catalog submission and feedback iteration (PAUSED) | catalog-prep | M | blocked |
-| — | #105 | [debt] Per-domain `AllowPrivateIP` opt-in inert (dead config) — remove or wire through | security-foundation | M | blocked (stakeholder decision; OPEN-QUESTIONS Q18) |
+| — | #105 | Per-domain `AllowPrivateIP` opt-in wired through (scoped RFC1918 relaxation) | security-foundation | M | done |

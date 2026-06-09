@@ -58,12 +58,12 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
 ## Currently in flight
 
 - **CURRENT STATE (2026-06-09):** This session merged TC1, TC2, TC5 (security suite + non-skippable CI gate),
-  DF1–DF3 (**direct-only-fallback COMPLETE**), and TC3 (frontend coverage). System-verification = SYSVERIFY-OK
-  (see below). **NOW STARTING #105 (AllowPrivateIP wire-through)** — security-critical; beginning with a DESIGN
-  pass (Plan agent) before any code, per the stakeholder requirement, because the per-request domain opt-in must
-  reach a dial path that currently only sees the IP. Will be followed by impl + a normal review + a dedicated
-  adversarial SECURITY review. **After #105:** TC4 (#46 e2e — scope EXCLUDES in-panel proxy render since FR5 is
-  deferred), then TC6 (#48 — needs Q13b e2e-matrix-scope decision + TC4/TC5), then docs-release (DR1/DR2 ready).
+  DF1–DF3 (**direct-only-fallback COMPLETE**), TC3 (frontend coverage), and **#105 (AllowPrivateIP wire-through —
+  MERGED, dual-reviewed incl. adversarial security)**. System-verification = SYSVERIFY-OK (see below).
+  **NOW STARTING TC4 (#46 e2e)** — scope EXCLUDES in-panel proxy render (FR5 deferred): config flow, view-mode
+  direct render, sandbox-attribute assertion (AC 30), CSS-selector injection guard (AC 31), light+dark theme
+  (AC 35), and security-boundary cases; run plugin-e2e with `--retries=2` (setVisualization is flaky). **After TC4:**
+  TC6 (#48 — needs the Q13b e2e-matrix-scope stakeholder decision + TC4/TC5), then docs-release (DR1/DR2 ready).
 - **testing-cicd (2026-06-09).** TC1 (#43) + TC2 (#44) MERGED — the non-skippable backend
   security suite (AC 17–29) is COMPLETE. Resolved Q13a (DNS-rebinding-in-CI = injected stub
   `security.Resolver`, hermetic, NO production change). Both were backend-only/test-only ⇒ e2e unaffected;
@@ -195,6 +195,21 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#111 (#105 AllowPrivateIP)** merged — per-domain opt-in wired through (was parsed-but-inert). Relaxes
+  SF1 for **RFC1918 IPv4 ONLY**, only for an allowlisted+opted-in domain, per request via `security.Policy`
+  threaded through context into `ResolveAndValidatePolicy`/`NewControlPolicy` (zero-Policy delegates →
+  default byte-for-byte unchanged, existing TC1/SF tests pass UNEDITED). Loopback/link-local/metadata(name+IP)/
+  CGNAT/ULA/unspecified/multicast/reserved + the fail-closed nil sentinel stay hard-blocked when opted in;
+  multi-record fail-closed preserved. **`DisableKeepAlives:true` is security-load-bearing** (prevents
+  cross-domain connection-reuse leaking the opt-in — proven by a test). Distinct `Warn` audit +
+  `webview_proxy_private_ip_permitted_total` on each permit; per-hop redirect policy auto-recomputed.
+  **Two independent reviews — adversarial-SECURITY + correctness — both APPROVE, no blocking** (security
+  invariants verified with adversarial tests; CI golangci-lint green). **Non-blocking follow-ups tracked:**
+  (1) `check-frameable` reaches a permitted private IP WITHOUT a permit audit-trail (parity gap; capture in
+  DR5 threat-model / consider wiring the recorder there); (2) IPv6 ULA relaxation deferred (one-line follow-up
+  if a stakeholder use case appears); (3) multi-private answer set over-reports permits in audit (louder, not a
+  leak). NB: this scopes-relaxes the brief's "hardcoded, not admin-configurable" blocklist per the Q18 decision —
+  DR5 threat-model must document the re-opened surface.
 - **#110 (TC3)** merged — frontend unit/component coverage (AC 33), audit-then-gap-fill: +16 genuine tests
   (160→176), webview-component branch coverage 82.5%→93.8%; covered `extractErrorMessage` fallbacks,
   resolve/reject-after-unmount guards, the LoadModeEditor degraded commit-guard (faithful RadioButtonGroup
