@@ -5,6 +5,7 @@ import { getBackendSrv } from '@grafana/runtime';
 import { FrameabilityEditor } from './FrameabilityEditor';
 import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../../types';
 import { frameabilityEditorTestIds } from './frameabilityEditorTestIds';
+import { useBackendAvailable, type BackendAvailability } from '../useBackendAvailable';
 
 // Mock @grafana/runtime so the editor's getBackendSrv().get(...) call is fully
 // controllable. Each test supplies its own `get` implementation (resolve or
@@ -13,7 +14,20 @@ jest.mock('@grafana/runtime', () => ({
   getBackendSrv: jest.fn(),
 }));
 
+// DF2: mock the backend-availability hook directly so the Test URL button's
+// enable/disable + note are driven independently of the /check-frameable `get`
+// mock (whose call counts the existing tests assert on). Defaults to available.
+jest.mock('../useBackendAvailable', () => ({
+  useBackendAvailable: jest.fn(),
+}));
+
 const mockedGetBackendSrv = getBackendSrv as jest.MockedFunction<typeof getBackendSrv>;
+const mockedUseBackendAvailable = useBackendAvailable as jest.MockedFunction<typeof useBackendAvailable>;
+
+/** Drives the mocked useBackendAvailable hook for a test. */
+function setBackend(state: BackendAvailability) {
+  mockedUseBackendAvailable.mockReturnValue(state);
+}
 
 type Props = StandardEditorProps<PanelOptions['detectedMode'], unknown, PanelOptions>;
 
@@ -51,6 +65,9 @@ function mockGet(get: jest.Mock) {
 
 beforeEach(() => {
   mockedGetBackendSrv.mockReset();
+  mockedUseBackendAvailable.mockReset();
+  // Default for the FR3 tests below: backend available (button enabled as before).
+  setBackend({ loading: false, backendAvailable: true });
 });
 
 describe('panels/webview/FrameabilityEditor', () => {
@@ -216,5 +233,52 @@ describe('panels/webview/FrameabilityEditor', () => {
     rerender(<FrameabilityEditor {...props} />);
 
     expect(screen.queryByTestId(frameabilityEditorTestIds.result)).not.toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------------
+  // DF2: backend unavailable — Test URL disabled + note; no-op on click
+  // ---------------------------------------------------------------------------
+
+  test('disables Test URL and shows a note when the backend is unavailable', () => {
+    setBackend({ loading: false, backendAvailable: false });
+    const get = mockGet(jest.fn());
+    const { props } = buildProps({ url: 'https://example.com' });
+    render(<FrameabilityEditor {...props} />);
+
+    const button = screen.getByTestId(frameabilityEditorTestIds.testButton);
+    expect(button).toBeDisabled();
+    expect(screen.getByTestId(frameabilityEditorTestIds.backendUnavailableNote)).toBeInTheDocument();
+    // A click must not issue a request while the backend is down.
+    fireEvent.click(button);
+    expect(get).not.toHaveBeenCalled();
+  });
+
+  // ---------------------------------------------------------------------------
+  // DF2: backend available — button enabled, no note (auto-re-enable)
+  // ---------------------------------------------------------------------------
+
+  test('enables Test URL and shows no backend note when the backend is available', () => {
+    setBackend({ loading: false, backendAvailable: true });
+    mockGet(jest.fn());
+    const { props } = buildProps({ url: 'https://example.com' });
+    render(<FrameabilityEditor {...props} />);
+
+    expect(screen.getByTestId(frameabilityEditorTestIds.testButton)).toBeEnabled();
+    expect(screen.queryByTestId(frameabilityEditorTestIds.backendUnavailableNote)).not.toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------------
+  // DF2: probe still loading — no premature note, button not backend-disabled
+  // ---------------------------------------------------------------------------
+
+  test('does not show the backend note while the probe is still loading', () => {
+    setBackend({ loading: true, backendAvailable: false });
+    mockGet(jest.fn());
+    const { props } = buildProps({ url: 'https://example.com' });
+    render(<FrameabilityEditor {...props} />);
+
+    expect(screen.queryByTestId(frameabilityEditorTestIds.backendUnavailableNote)).not.toBeInTheDocument();
+    // Not disabled *because of* the backend while loading (URL is set).
+    expect(screen.getByTestId(frameabilityEditorTestIds.testButton)).toBeEnabled();
   });
 });
