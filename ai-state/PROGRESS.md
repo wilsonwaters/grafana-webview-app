@@ -58,11 +58,12 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
 ## Currently in flight
 
 - **CURRENT STATE (2026-06-09):** This session merged TC1, TC2, TC5 (security suite + non-skippable CI gate),
-  and DF1–DF3 (**direct-only-fallback COMPLETE**). Running a **system-verification pass** at this stream
-  boundary (cadence). **Next up:** TC3 (#45 frontend unit/component tests — NOW unblocked by direct-only-fallback)
-  and #105 (AllowPrivateIP wire-through — decided, security-critical, needs design + adversarial review) can run
-  in parallel. Then TC4 (#46 e2e — scope EXCLUDES in-panel proxy render since FR5 is deferred) and TC6 (#48 —
-  needs Q13b e2e-matrix-scope decision + TC4/TC5). docs-release (DR1/DR2 ready) is the following stream.
+  DF1–DF3 (**direct-only-fallback COMPLETE**), and TC3 (frontend coverage). System-verification = SYSVERIFY-OK
+  (see below). **NOW STARTING #105 (AllowPrivateIP wire-through)** — security-critical; beginning with a DESIGN
+  pass (Plan agent) before any code, per the stakeholder requirement, because the per-request domain opt-in must
+  reach a dial path that currently only sees the IP. Will be followed by impl + a normal review + a dedicated
+  adversarial SECURITY review. **After #105:** TC4 (#46 e2e — scope EXCLUDES in-panel proxy render since FR5 is
+  deferred), then TC6 (#48 — needs Q13b e2e-matrix-scope decision + TC4/TC5), then docs-release (DR1/DR2 ready).
 - **testing-cicd (2026-06-09).** TC1 (#43) + TC2 (#44) MERGED — the non-skippable backend
   security suite (AC 17–29) is COMPLETE. Resolved Q13a (DNS-rebinding-in-CI = injected stub
   `security.Resolver`, hermetic, NO production change). Both were backend-only/test-only ⇒ e2e unaffected;
@@ -194,6 +195,13 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#110 (TC3)** merged — frontend unit/component coverage (AC 33), audit-then-gap-fill: +16 genuine tests
+  (160→176), webview-component branch coverage 82.5%→93.8%; covered `extractErrorMessage` fallbacks,
+  resolve/reject-after-unmount guards, the LoadModeEditor degraded commit-guard (faithful RadioButtonGroup
+  mock), ViewportEditor NaN/re-sync/no-clobber/no-drag. Test-only; no production change; existing tests
+  preserved. Review APPROVE-WITH-NITS (mutation-verified genuine; 1 tracked test-debt nit: a "rejects after
+  unmount" test asserts `expect(true)` — strengthen to spy on console.error; its resolve-twin already covers
+  the guard). Full CI green incl. e2e ×4 + security gate.
 - **#109 (DF3)** merged — **direct-only-fallback stream COMPLETE (DF1–DF3).** View-mode guard: `useBackendAvailable`
   read only in the proxy branch; direct mode renders immediately (never waits on the probe); proxy + backend
   unavailable ⇒ accessible fallback (no broken iframe — `buildProxySrc` unreachable until settled-available);

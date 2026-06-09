@@ -38,7 +38,7 @@
 | DF3 | #42 | View-mode guard — fallback state when proxy config has no available backend | direct-only-fallback | M | done |
 | TC1 | #43 | Security test suite — SSRF, blocklist, allowlist, scheme validation (AC 17–22) | testing-cicd | L | done |
 | TC2 | #44 | Security test suite — limits, header stripping, redirects, logging, metrics (AC 23–29) | testing-cicd | L | done |
-| TC3 | #45 | Frontend unit and component test coverage | testing-cicd | M | blocked |
+| TC3 | #45 | Frontend unit and component test coverage | testing-cicd | M | done |
 | TC4 | #46 | E2E suite with @grafana/plugin-e2e and Playwright | testing-cicd | L | blocked |
 | TC5 | #47 | CI verification and non-skippable security gate | testing-cicd | M | done |
 | TC6 | #48 | Release workflow, signing, plugin-validator gate, and E2E Grafana-version matrix | testing-cicd | M | blocked |
