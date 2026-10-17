@@ -24,6 +24,43 @@ For questions, ideas, or general discussion, use [GitHub Discussions](https://gi
 
 ---
 
+## Development Setup
+
+This is a Grafana **app plugin** with a TypeScript/React frontend and a Go
+backend. You need Node.js (>= 22, see `.nvmrc`), Go (version per `go.mod`),
+[Mage](https://magefile.org/), and Docker with Docker Compose.
+
+```bash
+# 1. Install frontend dependencies
+npm install
+
+# 2. Build the frontend (watch mode while developing)
+npm run dev
+
+# 3. Build the Go backend
+mage -v build:linux
+
+# 4. Start a local Grafana with the plugin pre-loaded at http://localhost:3000
+npm run server          # equivalent to `docker compose up --build`
+```
+
+Default local credentials are `admin` / `admin`.
+
+End-to-end tests use [`@grafana/plugin-e2e`](https://grafana.com/developers/plugin-tools/)
+(Playwright) and require a running Grafana instance (`npm run server`), then
+`npm run e2e`.
+
+The build toolchain (webpack, ESLint, Prettier, Jest) is provided by
+`@grafana/create-plugin` under `.config/`; **do not modify `.config/`** — extend
+the root-level config files instead. Likewise do not change the plugin ID or type
+in `plugin.json`, and remember that any `plugin.json` change requires a Grafana
+server restart.
+
+For a fuller walkthrough of the project layout and local workflow, see the
+[Developer guide](docs/developer-guide.md).
+
+---
+
 ## Branch Naming
 
 | Type | Pattern | Example |
@@ -92,6 +129,9 @@ npm run build
 # Go backend build
 mage -v build:linux
 ```
+
+If your change affects runtime behaviour, also run the end-to-end suite against a
+local Grafana (`npm run server`, then `npm run e2e`).
 
 CI will also run these automatically on every PR. A PR cannot be merged while any required check is failing.
 
