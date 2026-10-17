@@ -35,7 +35,8 @@ release / E2E-matrix workflows with signing wired in. Most of this stream is fou
 ## Open questions
 
 - Whether the Grafana-version E2E matrix should span the full `>=12.3.0` range or a pinned
-  subset for CI cost. Blocks TC6. (See OPEN-QUESTIONS Q13b.)
+  subset for CI cost. **RESOLVED (Q13b, 2026-10-17): KEEP auto-resolved** (official `e2e-version` action;
+  min 12.3.x + latest minors + nightly). TC6 keeps the current `resolve-versions` matrix as-is.
 - ~~How to simulate DNS rebinding deterministically in CI for AC 21. Blocks TC1.~~
   **RESOLVED** — injected stub `security.Resolver` (hermetic, no network), exercised through the
   real `/proxy` handler at three layers. Full decision in OPEN-QUESTIONS Q13a.
