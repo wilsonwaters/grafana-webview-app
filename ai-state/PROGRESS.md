@@ -57,6 +57,24 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
 
 ## Currently in flight
 
+- **⚠️ CI-HEALTH BLOCKER (2026-10-17, discovered at TC6 #122):** The session resumed after a ~4-month gap
+  (prior merges were 2026-06-09). `main` CI is now RED on EVERY PR due to ENVIRONMENTAL DRIFT, not code:
+  1. **Expired signing token** — `ci.yml` "Build, lint and unit tests" fails at the `Sign plugin (private)`
+     step: `sign-plugin@3.3.0` → **HTTP 401 InvalidCredentials "Token invalid"**. The `GRAFANA_ACCESS_POLICY_TOKEN`
+     repo secret has expired. **MAINTAINER-ONLY FIX** (regenerate the Grafana Cloud access-policy token). Blocks
+     signed build + e2e (gated on build) on all PRs, and real releases. Lint/typecheck/test/build pass BEFORE
+     signing — code is fine.
+  2. **Levitate forward-compat** — `is-compatible.yml` for `./src/panels/webview/module.tsx` exits 1: latest
+     Grafana is now 13.2.4 and Levitate reports 1 incompatibility — a TYPE-only change to `config`
+     (`@grafana/runtime`, used in `loadMode.ts:1` for `config.appSubUrl`). Runtime e2e already passes on 13.0.2,
+     so it's a type diff, not a runtime break. The app module (`./src/module.tsx`) passes. Was green in June
+     (when @latest was 12.x). → ESCALATED to stakeholder (Levitate handling + TC6-merge-now + token).
+- **TC6 (#48 / PR #122):** reviewed APPROVE-WITH-NITS, no blocking; validator gate is real/fail-closed/draft-gated/
+  un-suppressed; `src/plugin.json` nested-include fix correct; actionlint+lint+test green locally. Its ONLY red CI
+  is the two environmental issues above (not attributable to TC6). Holding merge pending stakeholder.
+- Filed **#123** (release-blocker: nested-panel logo path fails validator — DR stream). testing-cicd: TC1–TC5
+  done; TC6 pending the CI-health resolution.
+
 - **CURRENT STATE (2026-06-09):** This session merged TC1, TC2, TC5 (security suite + non-skippable CI gate),
   DF1–DF3 (**direct-only-fallback COMPLETE**), TC3 (frontend coverage), and **#105 (AllowPrivateIP wire-through —
   MERGED, dual-reviewed incl. adversarial security)**. System-verification = SYSVERIFY-OK (see below).
