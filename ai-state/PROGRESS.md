@@ -75,15 +75,15 @@ Everything needed to resume is in `ai-state/` — read `brief.md`, this file, `s
 - Filed **#123** (release-blocker: nested-panel logo path fails validator — DR stream). testing-cicd: TC1–TC5
   done; TC6 pending the CI-health resolution.
 
-- **CURRENT STATE (2026-06-09):** This session merged TC1, TC2, TC5 (security suite + non-skippable CI gate),
-  DF1–DF3 (**direct-only-fallback COMPLETE**), TC3 (frontend coverage), and **#105 (AllowPrivateIP wire-through —
-  MERGED, dual-reviewed incl. adversarial security)**. System-verification = SYSVERIFY-OK (see below).
-  TC4 (#46 e2e) MERGED. **testing-cicd: TC1/TC2/TC3/TC4/TC5 all DONE; only TC6 (#48) remains** — release
-  workflow + signing + plugin-validator gate + the E2E Grafana-version matrix. **TC6 is GATED on Q13b**
-  (whether the e2e matrix spans the full `>=12.3.0` range or a pinned subset) — a stakeholder cost/coverage
-  decision → checking in. After TC6: **docs-release** (DR1/DR2 ready now; DR4 should fold in #113 + the #105
-  re-opened-surface + the FR5 known-limitation). Tracked follow-ups: #102 (FR5, deferred), #113 (provisioning
-  delivery), check-frameable permit-audit parity, ULA relaxation.
+- **CURRENT STATE (updated 2026-10-17):** 7 of 9 streams DONE — foundation, panel-core, security-foundation,
+  frameability, proxy, content-rewriting, direct-only-fallback, **and now testing-cicd (TC1–TC6 all merged).**
+  Plus #105 (AllowPrivateIP, dual-reviewed). **Only docs-release (+ catalog-prep) remains.** This session merged
+  TC1/TC2/TC5/DF1–DF3/TC3/#105/TC4/TC6 (10 feature PRs) + #124 (Levitate-advisory, in review). SYSVERIFY-OK.
+  **NEXT: docs-release (DR stream).** DR1/DR2 ready; the docs must fold in: #123 (release-blocker nested logo),
+  the FR5 in-panel-proxy KNOWN-LIMITATION (#102), the #105 re-opened SSRF surface (threat-model DR5) +
+  check-frameable permit-audit parity, #113 (provisioning→backend allowlist delivery), and the Levitate/token
+  CI-health notes. **Release prerequisites (NOT code):** maintainer regenerates `GRAFANA_ACCESS_POLICY_TOKEN`;
+  revert #124 at the 13.x dep bump. Tracked follow-ups: #102, #113, #123, check-frameable audit parity, ULA.
 - **testing-cicd (2026-06-09).** TC1 (#43) + TC2 (#44) MERGED — the non-skippable backend
   security suite (AC 17–29) is COMPLETE. Resolved Q13a (DNS-rebinding-in-CI = injected stub
   `security.Resolver`, hermetic, NO production change). Both were backend-only/test-only ⇒ e2e unaffected;
@@ -215,6 +215,16 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#122 (TC6)** merged — **testing-cicd stream COMPLETE (TC1–TC6).** Release workflow + `@grafana/plugin-validator`
+  gate (real, fail-closed, draft-release-gated, un-suppressed) in release.yml; advisory PR-time validator in
+  ci.yml (preserving the hard metadatavalid schema check); E2E matrix kept auto-resolved per Q13b; nested-panel
+  `includes` path fixed in src/plugin.json. Review APPROVE-WITH-NITS (gate verified fail-closed). **Merged with
+  known-red CI from two pre-existing ENVIRONMENTAL issues** (expired signing token + Levitate drift) — stakeholder
+  approved merge-now; TC6's own lint/test/build/actionlint green. Surfaced: **#123** (release-blocker: nested logo
+  path) + validator advisory warnings → docs-release.
+- **#124 (OPEN)** — temporary: Levitate `fail-if-incompatible: 'no'` (advisory). Stakeholder-directed; REVERT at
+  the 13.x dep bump. Clears one of the two CI reds; the signing-token red remains (maintainer regenerates the
+  `GRAFANA_ACCESS_POLICY_TOKEN` secret).
 - **#112 (TC4)** merged — e2e suite (audit-then-gap-fill on PC4/PC5 specs): config flow + Test-URL
   allowlist-denied error (security boundary, AC34), load-mode selection (asserted via end-to-end iframe src),
   AC30 sandbox attribute (exact `allow-scripts allow-same-origin` + pointer-events:none + no-referrer), AC31

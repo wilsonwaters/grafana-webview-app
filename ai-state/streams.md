@@ -139,7 +139,12 @@ E2E for config/view/security boundaries, CI verification, signing in release, Gr
 E2E matrix, `@grafana/plugin-validator` gate.
 **Depends on:** proxy, content-rewriting (security tests); runs continuously otherwise.
 **Size:** L.
-**Status:** Not started.
+**Status:** ✅ Done — TC1–TC6 merged (#104, #103, #106/#47, #110, #112, #122). Non-skippable backend security
+suite (AC 17–29) + CI gate (`scripts/security-suite.sh`, dedicated `security-suite` job); frontend coverage
+(176 tests); Playwright E2E (config/view/sandbox/themes/security-boundary, FR5-scoped); release workflow with a
+real fail-closed `@grafana/plugin-validator` gate + signing; E2E matrix auto-resolved (Q13b). **Caveats:** real
+release blocked on #123 (nested-logo validator ERROR) + the expired `GRAFANA_ACCESS_POLICY_TOKEN` (maintainer);
+Levitate temporarily advisory (#124, revert at 13.x bump).
 
 ### 9. Documentation & Release (Path 1)  —  `docs-release`
 **Outcome:** Complete repo + `docs/` documentation, example dashboard, and a private-signed
