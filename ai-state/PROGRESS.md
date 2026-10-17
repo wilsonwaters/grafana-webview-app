@@ -215,6 +215,15 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **SIGNING TOKEN FIXED (2026-10-17):** maintainer regenerated `GRAFANA_ACCESS_POLICY_TOKEN`. Verified via a
+  `main` CI re-run (attempt 2): the `Sign plugin (private)` step + the whole build/lint/test job are GREEN;
+  security-suite green; e2e matrix now auto-resolves to the 13.x set (12.3.11/12.4.13/13.0.11/13.1.8/13.2.4/
+  nightly) and ran. **CI health restored** (Levitate advisory via #124 + token fixed). Remaining release
+  prereq: #123 (nested-logo validator ERROR).
+- **#126/#125/#127 (DR1/DR2/DR5)** merged — repo docs (README incl. FR5 known-limitation + CHANGELOG +
+  CONTRIBUTING), developer guide, and the threat-model/architecture/SECURITY.md + handler reference. Batched
+  docs-accuracy review = all APPROVE, zero blocking (security claims verified against code down to the CIDR
+  table). One DR1 nit (security-model pipeline-order phrasing) → folded into DR7 README polish.
 - **#122 (TC6)** merged — **testing-cicd stream COMPLETE (TC1–TC6).** Release workflow + `@grafana/plugin-validator`
   gate (real, fail-closed, draft-release-gated, un-suppressed) in release.yml; advisory PR-time validator in
   ci.yml (preserving the hard metadatavalid schema check); E2E matrix kept auto-resolved per Q13b; nested-panel
