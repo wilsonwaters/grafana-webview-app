@@ -215,6 +215,19 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#128 (DR4)** merged — administration guide (allowlist/tuning/audit/metrics/incident-response), config keys +
+  metric names + reason→status table verified accurate. Review initially REQUEST-CHANGES (it pointed admins at
+  the bundled Config page for the allowlist — which only edits apiUrl/apiKey and **overwrites jsonData if saved**,
+  dropping allowedDomains); fixed to document the settings-API/provisioning paths + a clobber warning. → filed
+  **#129** (no AppConfig allowlist UI + the clobber footgun; release-readiness decision).
+- **E2E on Grafana 13.2.4 + nightly FAILS (harness drift, NOT a plugin bug)** — all failures are inside the
+  pinned `@grafana/plugin-e2e` `DashboardPage.addPanel` fixture (can't drive 13.2.x's panel-edit UI). e2e PASSES
+  on 12.3.11/12.4.13/13.0.11/**13.1.8**. Filed **#131** (consolidated 13.x work: bump @grafana/plugin-e2e + deps,
+  revert Levitate advisory #124). **MERGE-GATE (until #131):** treat 13.2.4/nightly e2e + the Levitate check as
+  known-deferred; gate merges on review-clean + build/sign + security-suite + compat(advisory) + e2e green on the
+  SUPPORTED range (12.3–13.1). v1 targets `>=12.3.0`.
+- **#130 (OPEN, #123 fix)** — nested-panel logo packaged via a root webpack.config.ts extending `.config/` (not
+  edited); validator `metadatapaths` ERROR cleared (2→0). In review. Release-blocker for DR8.
 - **SIGNING TOKEN FIXED (2026-10-17):** maintainer regenerated `GRAFANA_ACCESS_POLICY_TOKEN`. Verified via a
   `main` CI re-run (attempt 2): the `Sign plugin (private)` step + the whole build/lint/test job are GREEN;
   security-suite green; e2e matrix now auto-resolves to the 13.x set (12.3.11/12.4.13/13.0.11/13.1.8/13.2.4/

@@ -46,7 +46,7 @@
 | DR1 | #49 | Flesh out repo docs — README, CHANGELOG, CONTRIBUTING, CODE_OF_CONDUCT | docs-release | M | done |
 | DR2 | #50 | Developer guide — setup, workflow, testing, debugging | docs-release | M | done |
 | DR3 | #51 | Configuration guide for dashboard authors | docs-release | M | blocked |
-| DR4 | #52 | Administration guide — allowlist, rate limits, audit logging, metrics, incident response | docs-release | L | blocked |
+| DR4 | #52 | Administration guide — allowlist, rate limits, audit logging, metrics, incident response | docs-release | L | done |
 | DR5 | #53 | Threat model, SECURITY.md content, architecture docs, and backend handler reference | docs-release | L | done |
 | DR6 | #54 | Installation and troubleshooting docs | docs-release | M | blocked |
 | DR7 | #55 | README polish and example dashboard JSON | docs-release | M | blocked |
@@ -57,3 +57,5 @@
 | CP4 | #60 | Deferred catalog submission and feedback iteration (PAUSED) | catalog-prep | M | blocked |
 | — | #105 | Per-domain `AllowPrivateIP` opt-in wired through (scoped RFC1918 relaxation) | security-foundation | M | done |
 | — | #113 | [investigate] Provisioned jsonData.allowedDomains may not reach the backend (TC4 success-path skips) | testing-cicd | S | blocked (investigate; relevant to DR4/DR7) |
+| — | #129 | [gap] No AppConfig UI to manage the domain allowlist | panel-core | M | blocked (release-readiness decision) |
+| — | #131 | [13.x compat] Bump @grafana deps for 13.2+ (e2e harness + revert Levitate advisory #124) | testing-cicd | M | blocked (deferred to next cycle) |
