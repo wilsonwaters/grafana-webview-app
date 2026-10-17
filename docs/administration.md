@@ -55,16 +55,26 @@ are operational settings, not secrets, so they intentionally live in `jsonData`
 ### Where configuration lives
 
 Settings are parsed **once**, when the plugin instance starts, from the plugin's
-`jsonData` (`LoadSettings` in `pkg/plugin/config.go`, called from `NewApp`). There
-are two ways to populate `jsonData`:
+`jsonData` (`LoadSettings` in `pkg/plugin/config.go`, called from `NewApp`).
 
-- **The plugin's configuration page** (Administration → Plugins → Web View →
-  Configuration), which persists settings through Grafana's plugin-settings API
-  (`POST /api/plugins/wilsonwaters-webview-app/settings`). Settings saved this way
-  are read by the backend on the next instance start.
+> **⚠️ The bundled Configuration page does NOT manage the allowlist.** The app's
+> **Configuration** page (Administration → Plugins → Web View → Configuration) is
+> currently the scaffold default — it edits only `apiUrl` / `apiKey`, and **saving
+> it rewrites `jsonData` to just those fields, silently dropping any
+> `allowedDomains` you have configured.** Do not use it to manage the allowlist,
+> and avoid saving it on an instance whose allowlist was configured another way. (A
+> dedicated allowlist-editor UI is tracked as a separate enhancement.)
+
+Populate `jsonData.allowedDomains` by **one** of:
+
+- **The Grafana plugin-settings API, directly** —
+  `POST /api/plugins/wilsonwaters-webview-app/settings` with a `jsonData` body that
+  contains the **complete** settings object (including the full `allowedDomains`
+  list — the API replaces `jsonData` wholesale, so always send every setting you
+  want to keep). This is the supported way to manage the allowlist today.
 - **Provisioning** via a YAML file under `provisioning/plugins/` (see
-  [§10](#10-known-operational-caveats) for an important caveat about provisioned
-  `allowedDomains`).
+  [§10](#10-known-operational-caveats) for an important caveat about whether
+  provisioned `allowedDomains` reach the backend).
 
 > **Changing settings requires the plugin instance to reload.** The backend reads
 > settings once at startup; after editing configuration (especially via
@@ -374,9 +384,11 @@ though the plugin would permit it. See the non-goals in
 - **Provisioned `allowedDomains` may not reach the backend in all setups (#113).**
   Provisioning the allowlist through `jsonData.allowedDomains` in a
   `provisioning/plugins/*.yaml` file does **not** reliably deliver the allowlist to
-  the backend in every Grafana setup. **Prefer configuring the allowlist through
-  the running plugin** (the app configuration page / the plugin settings API),
-  which the backend reads at instance start, and **always verify** afterwards: run
+  the backend in every Grafana setup. **Prefer configuring the allowlist through the
+  plugin settings API** (`POST /api/plugins/wilsonwaters-webview-app/settings`; note
+  the bundled Configuration page cannot edit the allowlist and overwrites `jsonData`
+  if saved — see [§2](#2-allowlist-management)), which the backend reads at instance
+  start, and **always verify** afterwards: run
   a **Test URL** against an allowlisted host, or call `/check-frameable?url=…`, and
   confirm you get a verdict (HTTP 200) rather than a `403` allowlist denial. A
   403 on a host you believe you allowlisted is the signature of this caveat — the
