@@ -22,7 +22,8 @@
   "includes": [
     {
       "type": "panel",
-      "name": "Web View"
+      "name": "Web View",
+      "path": "panels/webview/plugin.json"
     },
     {
       "type": "page",

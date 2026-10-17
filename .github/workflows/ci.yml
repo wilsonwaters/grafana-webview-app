@@ -130,6 +130,23 @@ jobs:
         env:
           ARCHIVE: ${{ steps.metadata.outputs.archive }}
 
+      # AC 32 (PR-time early check): run the FULL @grafana/plugin-validator against
+      # the packaged plugin so contributors see all validator findings on every PR,
+      # not only plugin.json schema validity (which the hard `Check plugin.json`
+      # step above already gates). This step is ADVISORY (continue-on-error): the
+      # hard, fail-closed validator GATE lives in release.yml and runs on the
+      # signed release package. Keeping the PR check advisory surfaces issues
+      # early without blocking PRs on deferred docs-stream content (screenshots,
+      # catalog logos, README links). Review this step's log on every PR.
+      - name: Validate plugin (full, advisory)
+        continue-on-error: true
+        run: |
+          docker run --pull=always \
+            -v $PWD/${ARCHIVE}:/archive.zip \
+            grafana/plugin-validator-cli /archive.zip
+        env:
+          ARCHIVE: ${{ steps.metadata.outputs.archive }}
+
       - name: Archive Build
         uses: actions/upload-artifact@v7
         with:
@@ -163,6 +180,16 @@ jobs:
       - name: Run mandatory security suite (AC 17-29)
         run: ./scripts/security-suite.sh
 
+  # AC 32 / decision Q13b: the E2E Grafana-version matrix is AUTO-RESOLVED by the
+  # official `grafana/plugin-actions/e2e-version` action rather than pinned by
+  # hand. From this plugin's `dependencies.grafanaDependency` (>=12.3.0) the action
+  # derives the matrix: the latest patch of every supported Grafana minor from the
+  # minimum (12.3.x) up to current, plus `grafana-enterprise:nightly` (capped at 6
+  # versions by the action's default limit). Q13b decided to KEEP
+  # this auto-resolved set as-is (do not pin a narrower list, do not expand to the
+  # full minor range), so the matrix always tracks the supported range and newly
+  # released minors without a workflow edit. `playwright-tests` below fans out over
+  # it. This job is intentionally left unchanged by TC6 beyond this documentation.
   resolve-versions:
     name: Resolve e2e images
     runs-on: ubuntu-latest

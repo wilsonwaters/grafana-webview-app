@@ -13,6 +13,9 @@ jobs:
   release:
     permissions:
       contents: write
+      # Required by `attestation: true` below (actions/attest-build-provenance).
+      id-token: write
+      attestations: write
     runs-on: ubuntu-latest
     # QA-Alintech provides GRAFANA_INSTANCE_URL (private-signing root URL). The
     # access policy token is a repository secret.
@@ -23,11 +26,35 @@ jobs:
           persist-credentials: false
 
       - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.0.2
+        id: build-plugin
         # Private signing for self-hosted distribution (Path 1). Reads the Grafana
         # Cloud access policy token from the GRAFANA_ACCESS_POLICY_TOKEN secret and
         # signs for the deployment host (GRAFANA_INSTANCE_URL) plus localhost so the
         # released build can also be smoke-tested locally.
+        # `attestation: true` publishes a signed build-provenance attestation for
+        # the packaged zip (clears the validator's provenance recommendation and
+        # lets installers verify the artifact was built from this source).
+        # build-plugin creates the GitHub release as a DRAFT and exposes the
+        # packaged (signed) archive path via its `archive` output.
         # See docs/signing.md. (Token: https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token)
         with:
           policy_token: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
           sign_root_urls: ${{ vars.GRAFANA_INSTANCE_URL }},http://localhost:3000
+          attestation: true
+
+      # AC 32: @grafana/plugin-validator release GATE. Runs the full validator
+      # against the SIGNED package produced above. The validator exits non-zero
+      # on ERROR-level findings, which fails this job and therefore the tagged
+      # release run. Because build-plugin publishes the release as a DRAFT (not a
+      # public release), a red gate here means a maintainer sees the failure and
+      # does NOT publish the draft -- publication is fail-closed on validation.
+      # The gate is intentionally un-suppressed: no `-config` exceptions and no
+      # `continue-on-error`. (Warnings do not fail the gate; add `-strict` to the
+      # command to also fail on warnings once docs-stream content is complete.)
+      - name: Validate plugin (release gate)
+        run: |
+          docker run --pull=always \
+            -v "$PWD/${ARCHIVE}:/archive.zip:ro" \
+            grafana/plugin-validator-cli /archive.zip
+        env:
+          ARCHIVE: ${{ steps.build-plugin.outputs.archive }}
