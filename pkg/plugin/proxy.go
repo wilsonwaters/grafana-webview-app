@@ -144,6 +144,15 @@ var strippedResponseHeaders = []string{
 // identity header leaks to an arbitrary upstream.
 const xGrafanaHeaderPrefix = "x-grafana-"
 
+// corsHeaderPrefix is swept (case-insensitively) off every proxied response
+// (R1 D2). /proxy and /check-frameable are same-origin only: the panel calls
+// them from the Grafana page, so they send no Access-Control-* headers at all.
+// An upstream's own CORS headers must not pass through either: with
+// Access-Control-Allow-Origin set to another site and
+// Access-Control-Allow-Credentials: true, an allowlisted upstream could let
+// that site read proxy responses with the viewer's Grafana session.
+const corsHeaderPrefix = "access-control-"
+
 // defaultInstanceID is the rate-limiter instance key used when the plugin
 // request context does not carry an org/user we can key on. P1 keys the
 // per-instance rate-limit tier on the Grafana org ID; when that is absent we
@@ -410,13 +419,19 @@ func (r *privatePermitRecorder) snapshot() []permittedIP {
 	return out
 }
 
-// setCORSHeaders applies permissive CORS headers to every /proxy response. The
-// proxy is an unauthenticated, stateless fetcher, so a wildcard origin is
-// appropriate: it carries no credentials and sets no cookies.
-func setCORSHeaders(h http.Header) {
-	h.Set("Access-Control-Allow-Origin", "*")
-	h.Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	h.Set("Access-Control-Allow-Headers", "*")
+// deleteHeadersWithPrefix deletes every header whose lower-cased name starts
+// with prefix. It collects the keys first so the map is not mutated while it is
+// ranged over.
+func deleteHeadersWithPrefix(h http.Header, prefix string) {
+	var keys []string
+	for key := range h {
+		if strings.HasPrefix(strings.ToLower(key), prefix) {
+			keys = append(keys, key)
+		}
+	}
+	for _, key := range keys {
+		delete(h, key)
+	}
 }
 
 // writeDenial writes a denial response for the given reason: it looks up the
@@ -530,13 +545,8 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	defer p.endAudit(req, a)
 	w = a.rec
 
-	setCORSHeaders(w.Header())
-
-	// CORS preflight: answer and return without running the pipeline.
-	if req.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
+	// Same-origin only (R1 D2): no CORS headers, and a preflight OPTIONS is just
+	// another non-GET method.
 
 	if req.Method != http.MethodGet {
 		a.denied = writeDenial(w, denialReasonMethod, "method not allowed")
@@ -732,8 +742,8 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 
 // serveProxy assembles a single-use httputil.ReverseProxy for the validated
 // target and serves the request through it. The Transport is the SF4
-// secure-dialer-backed transport, ModifyResponse strips framing headers and
-// re-applies CORS, and ErrorHandler maps transport/upstream failures to clean
+// secure-dialer-backed transport, ModifyResponse strips framing, CORS and other
+// dangerous response headers, and ErrorHandler maps transport/upstream failures to clean
 // status codes (403 for a blocked IP/metadata host caught at dial time, 502/504
 // otherwise). After the size guard (P4) and the framing/response-header strip
 // (P1/P3), prepareHTMLBody detects HTML, gzip-decodes when present, and
@@ -1149,17 +1159,8 @@ func stripRequestHeaders(h http.Header) {
 		h.Del(name)
 	}
 
-	// Sweep all X-Grafana-* headers by prefix (case-insensitive). Collect first,
-	// then delete, to avoid mutating the map while ranging over its keys.
-	var grafanaKeys []string
-	for key := range h {
-		if strings.HasPrefix(strings.ToLower(key), xGrafanaHeaderPrefix) {
-			grafanaKeys = append(grafanaKeys, key)
-		}
-	}
-	for _, key := range grafanaKeys {
-		h.Del(key)
-	}
+	// Sweep all X-Grafana-* headers by prefix (case-insensitive).
+	deleteHeadersWithPrefix(h, xGrafanaHeaderPrefix)
 
 	// Set conservative outgoing headers AFTER stripping so inbound values cannot
 	// survive: overwrite (Set) rather than add.
@@ -1198,7 +1199,6 @@ func stripRequestHeaders(h http.Header) {
 // It returns the reason so the handler can increment denials_total{reason} for
 // the ErrorHandler-driven denial.
 func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) string {
-	setCORSHeaders(w.Header())
 	switch security.DialReasonOf(err) {
 	case security.ReasonBlockedIP:
 		return writeDenial(w, denialReasonIPBlocklist, "target resolves to a blocked address")
@@ -1243,9 +1243,9 @@ const frameAncestorsDirective = "frame-ancestors"
 // CSP directives intact — P1) AND deletes the dangerous incoming response headers
 // in strippedResponseHeaders (Set-Cookie, HSTS, HPKP, Clear-Site-Data — P3) so the
 // upstream cannot set cookies on, or pin origin-level security policy onto, the
-// Grafana origin the response is served from. It also re-applies CORS (ReverseProxy
-// may have copied upstream CORS headers over ours). Body/base-tag/frame-buster
-// rewriting is OUT OF SCOPE here — that is content-rewriting (see TODO(CR) above).
+// Grafana origin the response is served from. It also removes every upstream
+// Access-Control-* header (R1 D2). Body/base-tag/frame-buster rewriting is OUT OF
+// SCOPE here — that is content-rewriting (see rewriteHTML).
 func stripFramingHeaders(resp *http.Response) error {
 	// P3: drop dangerous incoming response headers (state-setting + origin-level
 	// security policy). Header.Del canonicalises the key and removes every value,
@@ -1277,8 +1277,8 @@ func stripFramingHeaders(resp *http.Response) error {
 		}
 	}
 
-	// Re-assert permissive CORS on the final response.
-	setCORSHeaders(resp.Header)
+	// R1 D2: no Access-Control-* header of any kind leaves the proxy.
+	deleteHeadersWithPrefix(resp.Header, corsHeaderPrefix)
 	return nil
 }
 

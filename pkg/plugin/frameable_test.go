@@ -294,18 +294,39 @@ func TestCheckFrameableNonGETMethod(t *testing.T) {
 	}
 }
 
-// TestCheckFrameableOptionsPreflight confirms OPTIONS returns 204 with CORS and
-// does not run the pipeline (no url param required).
-func TestCheckFrameableOptionsPreflight(t *testing.T) {
-	h := checkFrameableHandler{p: newProxyHandler(settingsWith(allowExample(DomainOptions{})))}
-	req := httptest.NewRequest(http.MethodOptions, "/check-frameable", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("OPTIONS: got status %d, want 204", rec.Code)
+// TestCheckFrameableNoCORS covers R1 D2: /check-frameable is same-origin only.
+// There is no preflight handling (OPTIONS from an Editor is a 405, from a
+// Viewer the role denial) and no response carries an Access-Control-* header.
+func TestCheckFrameableNoCORS(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*") // must not reach the client
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	h := frameableHandler(t, settingsWith(allowExample(DomainOptions{})), upstream)
+
+	cases := []struct {
+		name   string
+		method string
+		role   string
+		target string
+		want   int
+	}{
+		{"OPTIONS as Editor", http.MethodOptions, orgRoleEditor, "", http.StatusMethodNotAllowed},
+		{"OPTIONS as Viewer", http.MethodOptions, "Viewer", "", http.StatusForbidden},
+		{"verdict", http.MethodGet, orgRoleEditor, "http://example.com/page", http.StatusOK},
+		{"pipeline denial", http.MethodGet, orgRoleEditor, "https://evil.example/", http.StatusForbidden},
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("OPTIONS: Access-Control-Allow-Origin = %q, want *", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/check-frameable?url="+url.QueryEscape(tc.target), nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, withOrgRole(req, tc.role))
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body=%q)", rec.Code, tc.want, rec.Body.String())
+			}
+			assertNoCORSHeaders(t, tc.name, rec.Header())
+		})
 	}
 }
 

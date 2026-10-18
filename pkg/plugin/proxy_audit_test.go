@@ -259,25 +259,26 @@ func TestAuditTimeoutLogsStatus(t *testing.T) {
 	assertAuditFields(t, e, "http://example.com/slow", auditAnonymousUser, http.StatusGatewayTimeout, -1)
 }
 
-// TestAuditOptionsPreflightLogged confirms the CORS preflight (204) is also
-// audited once — every request through ServeHTTP yields exactly one entry, with
-// the placeholder url since no target is parsed for OPTIONS.
-func TestAuditOptionsPreflightLogged(t *testing.T) {
+// TestAuditOptionsLogged confirms an OPTIONS request (no CORS preflight
+// handling since R1 D2, so a 405) is also audited once — every request through
+// ServeHTTP yields exactly one entry, with the placeholder url since no target
+// is parsed for a non-GET method.
+func TestAuditOptionsLogged(t *testing.T) {
 	p := newProxyHandler(settingsWith(allowExample(DomainOptions{})))
 	capLog := withCapturingLogger(p)
 
 	req := httptest.NewRequest(http.MethodOptions, "/proxy", nil)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("preflight: got status %d, want 204", rec.Code)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("OPTIONS: got status %d, want 405", rec.Code)
 	}
 	e := requireSingleAuditEntry(t, capLog)
-	if e.kv["status"] != http.StatusNoContent {
-		t.Errorf("preflight status: got %v, want 204", e.kv["status"])
+	if e.kv["status"] != http.StatusMethodNotAllowed {
+		t.Errorf("OPTIONS status: got %v, want 405", e.kv["status"])
 	}
 	if e.kv["url"] != auditMissingURL {
-		t.Errorf("preflight url: got %v, want %q", e.kv["url"], auditMissingURL)
+		t.Errorf("OPTIONS url: got %v, want %q", e.kv["url"], auditMissingURL)
 	}
 }
 

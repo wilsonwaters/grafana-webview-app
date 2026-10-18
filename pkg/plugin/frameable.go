@@ -86,13 +86,7 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 	defer p.endAudit(req, a)
 	w = a.rec
 
-	// CORS preflight mirrors /proxy: answer without running the pipeline.
-	setCORSHeaders(w.Header())
-	if req.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
+	// Same-origin only (R1 D2): no CORS headers and no preflight handling.
 	rawTarget := req.URL.Query().Get("url")
 	if strings.TrimSpace(rawTarget) != "" {
 		a.url = rawTarget
