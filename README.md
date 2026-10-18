@@ -5,13 +5,14 @@
 
 [![CI](https://github.com/wilsonwaters/grafana-webview-app/actions/workflows/ci.yml/badge.svg)](https://github.com/wilsonwaters/grafana-webview-app/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/wilsonwaters/grafana-webview-app)](LICENSE)
-[![Release](https://img.shields.io/github/v/release/wilsonwaters/grafana-webview-app)](https://github.com/wilsonwaters/grafana-webview-app/releases)
 [![Grafana](https://img.shields.io/badge/Grafana-%3E%3D12.3.0-orange)](https://grafana.com)
 
 A Grafana **App plugin** (`wilsonwaters-webview-app`) that embeds an external web
 page inside a Grafana dashboard panel and lets the dashboard author control the
 viewport — panning and zooming to focus on a specific region of the page (for
 example, a single city on a weather radar).
+
+![A Web View panel rendering an external page directly inside a Grafana dashboard](docs/screenshots/configuration/panel-direct-render.png)
 
 The plugin ships a nested **Web View panel** (`wilsonwaters-webview-panel`) and a
 Go backend. It supports two loading strategies:
@@ -21,9 +22,6 @@ Go backend. It supports two loading strategies:
   server-side for sites that block direct embedding via `X-Frame-Options` or a
   `Content-Security-Policy` `frame-ancestors` directive.
 
-<!-- A hero screenshot and an example dashboard will be added as part of the
-     documentation-polish milestone (DR7). -->
-
 ## The problem it solves
 
 Many useful web pages — radar maps, status pages, internal tools — cannot simply
@@ -32,6 +30,27 @@ headers that browsers enforce, or they render at a size that is unusable inside 
 small panel. This plugin addresses both problems. The backend proxy makes
 framing-blocked pages embeddable server-side, and the viewport controls let an
 author capture and save exactly the region of a page that a viewer should see.
+
+## Quick start
+
+1. **Install** the plugin into a Grafana `>= 12.3.0` instance (backend-plugin
+   support is required for proxy mode; direct mode works without it). See the
+   **[Installation guide](docs/installation.md)** for signing and install steps.
+2. **Add a panel:** create or edit a dashboard, add a panel, and pick
+   **Web View** from the visualization picker.
+3. **Configure it:** enter a URL, click **Test URL** to check frameability,
+   choose a load mode (**Auto** / **Direct** / **Proxy**), and drag/zoom the
+   preview to position the viewport. See the
+   **[Configuration reference](docs/configuration.md)**.
+4. **For proxy mode, allowlist the domain first.** The proxy allowlist is **empty
+   by default (deny-all)**, so an administrator must add the target domain before
+   proxy requests succeed. See the
+   **[Administration guide](docs/administration.md#2-allowlist-management)**.
+
+Prefer to start from a working example? Import
+[`docs/examples/webview-example-dashboard.json`](docs/examples/webview-example-dashboard.json)
+— see the [examples README](docs/examples/README.md) for the two demo panels and
+the allowlist prerequisite.
 
 ## Modes of operation
 
@@ -81,16 +100,30 @@ The plugin has a hard split between two modes, matching the two audiences:
 ## Security model
 
 The backend proxy is the security-critical component and is designed to be
-conservative by default. Every proxying endpoint runs the same pipeline, in
-order: URL scheme check → domain allowlist (empty by default, so the default is
-deny) → rate limit → concurrency cap → DNS resolution with a hardcoded,
-non-configurable private/reserved **IP blocklist** and a DNS-rebinding-safe
-dialler → stripping of outgoing `Cookie` / `Authorization` / `X-Grafana-*`
-headers → fetch with timeout and maximum-body limits → stripping of framing,
-cookie and HSTS response headers → HTML rewriting → audit logging and Prometheus
-metrics. The proxy is stateless and unauthenticated: it forwards no credentials,
-sessions, cookies, WebSockets or SSE, and never executes proxied JavaScript
-server-side.
+conservative by default. Every proxying endpoint runs the same pre-fetch
+pipeline, and **the order is load-bearing**:
+
+1. **Hostname normalization** — the target host is canonicalised so the
+   allowlist and later checks compare an identical form.
+2. **Domain allowlist match** — the normalised host is checked against the
+   allowlist, which is **empty by default, so the default is deny**. (Matching
+   the allowlist first lets a per-domain non-standard port be honoured by the
+   next step.)
+3. **URL scheme / port validation** (`ValidateURL`) — only `http`/`https`, no
+   user-info, and only the matched domain's permitted ports.
+4. **Rate-limit and concurrency caps** — per-instance and per-domain rate tiers,
+   then a global concurrency slot.
+5. **Resolve-then-dial IP validation** — at connect time the dialler resolves
+   DNS and validates the resolved IP against a hardcoded, non-configurable
+   private/reserved **IP blocklist** with a DNS-rebinding-safe `Control` hook, so
+   it cannot be skipped.
+
+The request then strips outgoing `Cookie` / `Authorization` / `X-Grafana-*`
+headers, fetches with a timeout and maximum-body limit, strips framing, cookie
+and HSTS response headers, rewrites the HTML, and emits a single audit-log line
+and Prometheus metric. The proxy is stateless and unauthenticated: it forwards no
+credentials, sessions, cookies, WebSockets or SSE, and never executes proxied
+JavaScript server-side.
 
 For the full policy and threat model see **[SECURITY.md](SECURITY.md)**, and for
 the architecture and decision log see
@@ -117,16 +150,20 @@ works without a backend.
 
 ## Documentation
 
-- [Installation guide](docs/installation.md)
-- [Configuration reference](docs/configuration.md)
-- [Administration guide](docs/administration.md)
-- [Architecture & decision log](docs/architecture.md)
-- [Developer guide](docs/developer-guide.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Security policy](SECURITY.md)
-
-> Some documents above are authored as part of the in-progress documentation
-> milestone and may not all be present yet.
+- [Installation guide](docs/installation.md) — signing, install, and deployment.
+- [Configuration reference](docs/configuration.md) — every panel option and the
+  editor workflow.
+- [Administration guide](docs/administration.md) — the proxy allowlist, limits,
+  and operating the backend.
+- [Architecture & decision log](docs/architecture.md) — the request pipeline and
+  the SF1–SF5 security controls.
+- [Developer guide](docs/developer-guide.md) — local workflow and project layout.
+- [Troubleshooting](docs/troubleshooting.md) — common failure modes and fixes.
+- [Signing guide](docs/signing.md) — how the plugin is signed.
+- [Example dashboard](docs/examples/README.md) — an importable dashboard with a
+  direct-mode and a proxy-mode panel.
+- [Security policy](SECURITY.md) — threat model and vulnerability reporting.
+- [Contributing](CONTRIBUTING.md) — how to propose changes.
 
 ## Development
 
@@ -194,6 +231,11 @@ workflow and the project layout.
   display of proxied content is pending. A follow-up (fetch-then-`srcdoc`) is
   planned for a future release. See issue
   [#102](https://github.com/wilsonwaters/grafana-webview-app/issues/102).
+- **Proxy mode is deny-all until a domain is allowlisted.** The proxy domain
+  allowlist is **empty by default**, so on a fresh install the backend proxies
+  nothing. An administrator must allowlist each target domain before proxy
+  requests (or a "Test URL" check against a framing-blocked site) succeed. See
+  the [Administration guide](docs/administration.md#2-allowlist-management).
 - **Frameability is detected only at configuration time.** If a target site later
   changes its framing headers, re-run "Test URL" and re-save the panel (or use a
   manual load-mode override) to pick up the new mode.
