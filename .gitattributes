@@ -1,0 +1,4 @@
+# Shell scripts must keep LF line endings on every platform. They run inside
+# Linux containers (.config/entrypoint.sh, copied into the dev Grafana image)
+# and in CI (scripts/security-suite.sh). A CRLF checkout on Windows breaks both.
+*.sh text eol=lf
