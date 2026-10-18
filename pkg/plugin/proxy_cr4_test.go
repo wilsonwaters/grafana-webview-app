@@ -339,8 +339,8 @@ func TestNonRedirectPassthroughUnchanged(t *testing.T) {
 	if rec.Header().Get("Location") != "" {
 		t.Fatalf("non-redirect response unexpectedly carries a Location header")
 	}
-	if !strings.Contains(rec.Body.String(), resourceBase+proxyResourcePath) {
-		t.Fatalf("non-redirect HTML was not CR2-rewritten (regression)")
+	if !strings.Contains(rec.Body.String(), `href="http://example.com/s.css"`) {
+		t.Fatalf("non-redirect HTML was not rewritten (regression): %s", rec.Body.String())
 	}
 }
 

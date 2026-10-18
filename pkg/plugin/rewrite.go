@@ -10,57 +10,24 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/andybalholm/cascadia"
 	"golang.org/x/net/html"
+	"golang.org/x/net/html/atom"
 	"golang.org/x/net/html/charset"
 )
 
-// resourceBase is the base path under which this plugin's backend resources are
-// registered by Grafana. Rewritten URLs are emitted as ORIGIN-ABSOLUTE paths
-// under this base so the browser resolves them against the Grafana origin (and
-// the injected <base href> therefore cannot corrupt them).
+// resourceBase is the base path under which Grafana serves this plugin's
+// backend resources. The redirect handler (CR4) emits Location headers under it
+// so the panel's fetch of /proxy re-enters the proxy for the next hop.
 const resourceBase = "/api/plugins/wilsonwaters-webview-app/resources"
 
-// proxyResourcePath is the resource path the subresource-proxy endpoint will be
-// registered under (CR3). CR2 only EMITS URLs pointing at it; until CR3 lands
-// these requests 404, which is acceptable per the task scope.
+// proxyResourcePath is the resource path of the subresource-proxy endpoint
+// (CR3).
 const proxyResourcePath = "/proxy-resource"
 
-// proxyResourceURL builds an origin-absolute subresource-proxy URL for an
-// already-resolved absolute upstream URL: it query-encodes target (Q9 decision)
-// into /api/.../proxy-resource?url=<enc>. The URL is built entirely through the
-// Go URL API (url.Values.Encode) — never string concatenation — so the upstream
-// URL is percent-encoded and cannot inject into the query string. A trailing
-// fragment is stripped before encoding (the fragment is not part of the resource
-// fetch; the browser does not send it upstream anyway).
-func proxyResourceURL(target string) string {
-	return buildProxyURL(resourceBase+proxyResourcePath, target)
-}
-
-// proxyNavURL builds an origin-absolute top-level-proxy URL for an
-// already-resolved absolute upstream URL. Navigation refs (a/area/iframe, GET
-// forms) route back through /proxy so the destination page is itself rewritten.
-// Same query-encoding contract as proxyResourceURL.
-func proxyNavURL(target string) string {
-	return buildProxyURL(resourceBase+proxyPath, target)
-}
-
-// buildProxyURL assembles basePath?url=<enc(target)> via url.Values so target is
-// percent-encoded. Any fragment on target is dropped before encoding.
-func buildProxyURL(basePath, target string) string {
-	enc := target
-	if i := strings.IndexByte(enc, '#'); i >= 0 {
-		enc = enc[:i]
-	}
-	q := url.Values{}
-	q.Set("url", enc)
-	return basePath + "?" + q.Encode()
-}
-
 // buildRedirectProxyURL assembles basePath?url=<enc(target)>&_wvredir=<depth> via
-// url.Values (CR4). It is buildProxyURL plus the reserved redirect-hop depth
-// control param: when the browser follows a rewritten Location, serve reads
+// url.Values (CR4). When the browser follows a rewritten Location, serve reads
 // _wvredir back to learn the hop depth and enforce the MaxRedirects cap. Both
 // params are url.Values-encoded so the upstream target cannot inject into the
-// query string, and a fragment on target is dropped (as in buildProxyURL).
+// query string, and a fragment on target is dropped.
 func buildRedirectProxyURL(basePath, target string, depth int) string {
 	enc := target
 	if i := strings.IndexByte(enc, '#'); i >= 0 {
@@ -72,66 +39,62 @@ func buildRedirectProxyURL(basePath, target string, depth int) string {
 	return basePath + "?" + q.Encode()
 }
 
-// subresourceAttr describes one (selector, attribute) pair whose URL value is a
-// SUBRESOURCE the browser loads automatically (image, script, stylesheet, …).
-// These are rewritten to /proxy-resource so the fetch re-enters the security
-// pipeline at CR3.
-type subresourceAttr struct {
+// urlAttr names an element attribute whose value is a URL. selector selects
+// the elements that carry the attribute.
+type urlAttr struct {
 	selector string
 	attr     string
 }
 
-// navAttr describes one (selector, attribute) pair whose URL value is a
-// NAVIGATION target (a link, an embedded document, a GET form action). These are
-// rewritten to /proxy so the destination is itself proxied + rewritten.
-type navAttr struct {
-	selector string
-	attr     string
+// urlAttrs are the single-URL attributes the rewriter makes absolute (FR5).
+// Subresources come first, then navigation targets. The panel renders the
+// rewritten page in a sandboxed srcdoc iframe, so the browser loads
+// subresources directly from the upstream and a followed link or nested frame
+// navigates to the upstream URL; nothing routes back through Grafana.
+var urlAttrs = []urlAttr{
+	// Subresources the browser loads.
+	{"img[src]", "src"},
+	{"script[src]", "src"},
+	{"link[href]", "href"},
+	{"source[src]", "src"},
+	{"video[src]", "src"},
+	{"video[poster]", "poster"},
+	{"audio[src]", "src"},
+	{"track[src]", "src"},
+	{"object[data]", "data"},
+	{"embed[src]", "src"},
+	{"input[src]", "src"},
+	{"[background]", "background"}, // legacy body/table/td background image
+	// Navigation targets.
+	{"a[href]", "href"},
+	{"area[href]", "href"},
+	{"iframe[src]", "src"},
+	{"frame[src]", "src"},
+	{"form[action]", "action"},
+	{"button[formaction]", "formaction"},
+	{"input[formaction]", "formaction"},
 }
 
-// subresourceAttrs is the exact subresource attribute set per the approved CR2
-// design. link[href] is handled separately (rel-gated) in rewriteLinks.
-var subresourceAttrs = []subresourceAttr{
-	{"img", "src"},
-	{"script", "src"},
-	{"source", "src"},
-	{"video", "src"},
-	{"audio", "src"},
-	{"track", "src"},
-	{"object", "data"},
-	{"embed", "src"},
+// srcsetAttrs are the candidate-list attributes rewritten by rewriteSrcset.
+var srcsetAttrs = []urlAttr{
+	{"img[srcset]", "srcset"},
+	{"source[srcset]", "srcset"},
+	{"link[imagesrcset]", "imagesrcset"},
 }
 
-// subresourceSrcsetAttrs is the set of (selector, srcset) pairs rewritten by
-// rewriteSrcset (comma-separated candidate lists).
-var subresourceSrcsetAttrs = []subresourceAttr{
-	{"img", "srcset"},
-	{"source", "srcset"},
-}
+// referrerPolicyNoReferrer is the content of the injected referrer meta. It
+// stops subresource and navigation requests from the framed page sending the
+// Grafana dashboard URL to the upstream in the Referer header (R1 section 5).
+const referrerPolicyNoReferrer = "no-referrer"
 
-// navAttrs is the exact navigation attribute set per the approved CR2 design.
-// form[action] is handled separately (method-gated) in rewriteForms — only GET /
-// absent-method forms are rewritten; POST forms are left verbatim.
-var navAttrs = []navAttr{
-	{"a", "href"},
-	{"area", "href"},
-	{"iframe", "src"},
-}
-
-// linkRewritableRels is the set of <link rel> tokens whose href is treated as a
-// rewritable SUBRESOURCE. A <link> with no rel is also rewritten (rel absent).
-// rel values not in this set (e.g. canonical, alternate, dns-prefetch,
-// preconnect) are left verbatim — they are not subresources the proxy serves.
-var linkRewritableRels = map[string]bool{
-	"stylesheet":       true,
-	"icon":             true,
-	"shortcut icon":    true,
-	"apple-touch-icon": true,
-	"mask-icon":        true,
-	"preload":          true,
-	"modulepreload":    true,
-	"manifest":         true,
-}
+// sandboxCompatShim is the sandbox compatibility script from the R1 findings
+// (section 10), injected verbatim. The panel renders the page in a
+// sandbox="allow-scripts" srcdoc iframe, which has an opaque origin, so reading
+// document.cookie, localStorage or sessionStorage throws a SecurityError in
+// Chromium and Firefox and scripts that use them stop (the BOM radar loop, for
+// example). The shim installs in-memory replacements, and only when the real
+// API throws. It gives the page no access to Grafana.
+const sandboxCompatShim = `(function(){var jar="";try{document.cookie}catch(e){try{Object.defineProperty(Document.prototype,"cookie",{configurable:true,get:function(){return jar},set:function(v){var kv=String(v).split(";")[0];var k=kv.split("=")[0];var parts=jar?jar.split("; ").filter(function(p){return p.split("=")[0]!==k}):[];parts.push(kv);jar=parts.join("; ")}})}catch(e2){}}function mem(){var s={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(s,k)?s[k]:null},setItem:function(k,v){s[k]=String(v)},removeItem:function(k){delete s[k]},clear:function(){s={}},key:function(i){return Object.keys(s)[i]||null},get length(){return Object.keys(s).length}}}["localStorage","sessionStorage"].forEach(function(n){try{window[n].length}catch(e){try{Object.defineProperty(window,n,{configurable:true,value:mem()})}catch(e2){}}})})();`
 
 // htmlRewriter is the rewrite function prepareHTMLBody invokes on HTML bodies. It
 // defaults to rewriteHTML and is a package var ONLY so a test can substitute a
@@ -144,8 +107,7 @@ var htmlRewriter = rewriteHTML
 // a single comma-joined value, because a CSS selector group can itself contain
 // commas and significant whitespace (e.g. `a, b` or `div > .x`), so comma-joining
 // would be ambiguous. serve reads every `hide` value and threads them through to
-// rewriteHTML, which applies them ONLY to the top-level proxied HTML (/proxy) —
-// NOT to /proxy-resource subresources (which are not HTML documents).
+// rewriteHTML, which applies them to the proxied HTML document.
 const hideParam = "hide"
 
 // maxHideSelectorLen bounds the byte length of any single hide selector (CR5,
@@ -164,20 +126,27 @@ const maxHideSelectors = 50
 // preserved and correctly terminated before this declaration.
 const hideStyleDecl = "display:none!important"
 
-// rewriteHTML parses html (charset-aware, per contentType + a <meta charset>),
-// applies the CR2 rewrites (base href, subresource/navigation URL rewriting,
-// srcset, CSP/refresh meta removal, frame-buster removal), applies the CR5
-// author hide-selectors, and returns the re-rendered document as UTF-8. All DOM
-// mutation goes through the goquery API and the goquery renderer, which
-// HTML-escapes attribute values — there is no string concatenation of HTML, so a
-// hostile upstream URL (or a hostile hide-selector) cannot break out of an
-// attribute. On any parse error it returns the error so the caller can degrade
-// to serving the decoded original (the security gates already ran).
+// rewriteHTML parses html (charset-aware, per contentType + a <meta charset>)
+// and prepares it for the panel's sandboxed srcdoc iframe (FR5):
 //
-// hideSelectors are the author-configured CSS selectors (CR5) whose matching
-// elements are hidden via an inline `display:none!important`. They are validated
-// and applied by applyHideSelectors; an empty/nil slice is a no-op so the output
-// is byte-identical to a rewrite with no hide-selectors.
+//   - a <base href> pointing at the absolute upstream base is the first child
+//     of <head> (an existing one is resolved and moved there), so URLs built at
+//     runtime and CSS url() resolve against the upstream;
+//   - every URL attribute in urlAttrs and every srcset candidate becomes an
+//     absolute upstream URL, resolved against that base. Absolute URLs do not
+//     depend on <base>, which Grafana's optional CSP (base-uri 'self') blocks;
+//   - CSP and refresh <meta> tags and inline frame-busters are removed, and the
+//     CR5 author hide-selectors are applied;
+//   - upstream referrer policies are removed and, directly after <base>, a
+//     <meta name="referrer" content="no-referrer"> and the sandbox
+//     compatibility shim are injected, exactly once.
+//
+// The document is returned as UTF-8. All DOM mutation goes through the goquery
+// and x/net/html APIs, whose renderer HTML-escapes attribute values — there is
+// no string concatenation of HTML, so a hostile upstream URL (or a hostile
+// hide-selector) cannot break out of an attribute. On any parse error it
+// returns the error so the caller can degrade to serving the decoded original
+// (the security gates already ran). An empty or nil hideSelectors is a no-op.
 func rewriteHTML(htmlBytes []byte, pageURL *url.URL, contentType string, hideSelectors []string) ([]byte, error) {
 	// An empty body has nothing to rewrite (and charset.NewReader would surface an
 	// EOF on it); return it unchanged rather than treating it as a parse failure.
@@ -196,16 +165,15 @@ func rewriteHTML(htmlBytes []byte, pageURL *url.URL, contentType string, hideSel
 		return nil, fmt.Errorf("parse html: %w", err)
 	}
 
-	base := injectOrFixBase(doc, pageURL)
+	base, baseNode := ensureBase(doc, pageURL)
 
-	rewriteRefs(doc, base)
+	rewriteURLAttrs(doc, base)
 	rewriteSrcset(doc, base)
-	rewriteLinks(doc, base)
-	rewriteNav(doc, base)
-	rewriteForms(doc, base)
 	removeCSPMetas(doc)
 	removeFrameBusters(doc)
 	applyHideSelectors(doc, hideSelectors)
+	removeReferrerPolicies(doc)
+	injectSandboxCompat(doc, baseNode)
 
 	out, err := goquery.OuterHtml(doc.Selection)
 	if err != nil {
@@ -214,140 +182,117 @@ func rewriteHTML(htmlBytes []byte, pageURL *url.URL, contentType string, hideSel
 	return []byte(out), nil
 }
 
-// injectOrFixBase computes the effective base for relative-URL resolution and
-// ensures the document carries a <base href> pointing at the absolute effective
-// base. If a <base href> already exists it is RESOLVED against pageURL and set to
-// the absolute result (so a relative existing base still produces an absolute
-// upstream base); otherwise a <base href="<pageURL>"> is injected as the first
-// child of <head>. It returns the effective base *url.URL used to resolve every
-// other ref in the document. The injected base is a backstop for refs CR2 does
-// not rewrite (runtime-JS URLs, CSS url(), out-of-set attributes); rewritten refs
-// are origin-absolute and unaffected by it.
-func injectOrFixBase(doc *goquery.Document, pageURL *url.URL) *url.URL {
+// ensureBase makes the document's first <base href> the first child of <head>
+// and returns the effective base URL with that element. An existing base is
+// resolved against pageURL (so a relative base still produces an absolute
+// upstream base) and moved; a base whose href does not parse or does not
+// resolve to http(s) (for example javascript:, which browsers ignore) is reset
+// to pageURL. Without one, <base href="<pageURL>"> is created. pageURL is the
+// final page URL: the proxy does not follow redirects itself, so each hop's
+// /proxy request carries its own target and the last hop's target is the page.
+func ensureBase(doc *goquery.Document, pageURL *url.URL) (*url.URL, *html.Node) {
 	base := pageURL
-	existing := doc.Find("base[href]").First()
-	if existing.Length() > 0 {
+	var node *html.Node
+	if existing := doc.Find("base[href]").First(); existing.Length() > 0 {
+		node = existing.Get(0)
 		if href, ok := existing.Attr("href"); ok {
 			if ref, err := url.Parse(strings.TrimSpace(href)); err == nil {
-				base = pageURL.ResolveReference(ref)
+				if resolved := pageURL.ResolveReference(ref); isHTTPScheme(resolved.Scheme) {
+					base = resolved
+				}
 			}
 		}
 		existing.SetAttr("href", base.String())
-		return base
-	}
-
-	// No <base>: inject one as the first child of <head>. If there is no <head>
-	// (malformed doc), fall back to prepending to <html>, then to the document.
-	node := &html.Node{
-		Type: html.ElementNode,
-		Data: "base",
-		Attr: []html.Attribute{{Key: "href", Val: base.String()}},
-	}
-	baseSel := newNodeSelection(doc, node)
-	if head := doc.Find("head").First(); head.Length() > 0 {
-		head.PrependSelection(baseSel)
-	} else if htmlEl := doc.Find("html").First(); htmlEl.Length() > 0 {
-		htmlEl.PrependSelection(baseSel)
+		node.Parent.RemoveChild(node)
 	} else {
-		doc.PrependSelection(baseSel)
+		node = &html.Node{
+			Type:     html.ElementNode,
+			Data:     "base",
+			DataAtom: atom.Base,
+			Attr:     []html.Attribute{{Key: "href", Val: base.String()}},
+		}
 	}
-	return base
-}
 
-// newNodeSelection wraps a freshly-created html.Node in a goquery Selection so it
-// can be inserted via the goquery API (PrependSelection etc.).
-func newNodeSelection(doc *goquery.Document, node *html.Node) *goquery.Selection {
-	s := doc.Find("__never_matches_anything__")
-	return s.AddNodes(node)
-}
-
-// rewriteRefs rewrites every plain subresource attribute (img[src], script[src],
-// …) to a /proxy-resource URL when the ref resolves to an http/https target.
-func rewriteRefs(doc *goquery.Document, base *url.URL) {
-	for _, sa := range subresourceAttrs {
-		doc.Find(sa.selector).Each(func(_ int, s *goquery.Selection) {
-			rewriteAttr(s, sa.attr, base, false)
-		})
+	// x/net/html always synthesises <head>; the fallbacks cover a document
+	// without one.
+	parent := doc.Get(0)
+	if head := doc.Find("head").First(); head.Length() > 0 {
+		parent = head.Get(0)
+	} else if htmlEl := doc.Find("html").First(); htmlEl.Length() > 0 {
+		parent = htmlEl.Get(0)
 	}
+	parent.InsertBefore(node, parent.FirstChild)
+	return base, node
 }
 
-// rewriteLinks rewrites <link href> only when its rel is rewritable (in
-// linkRewritableRels) or absent; other rels (canonical, alternate, …) are left
-// verbatim. Matching is case-insensitive and whitespace-normalised.
-func rewriteLinks(doc *goquery.Document, base *url.URL) {
-	doc.Find("link[href]").Each(func(_ int, s *goquery.Selection) {
-		rel, hasRel := s.Attr("rel")
-		if hasRel {
-			rel = strings.ToLower(strings.Join(strings.Fields(rel), " "))
-			if rel != "" && !linkRewritableRels[rel] {
+// injectSandboxCompat inserts <meta name="referrer" content="no-referrer"> and
+// the sandbox compatibility shim directly after base, so they precede every
+// upstream element and the shim runs before any page script. A copy of the
+// shim already in the page (an upstream that is itself a proxied page) is
+// removed first, so the shim appears exactly once. removeReferrerPolicies has
+// already removed every other referrer meta.
+func injectSandboxCompat(doc *goquery.Document, base *html.Node) {
+	doc.Find("script").FilterFunction(func(_ int, s *goquery.Selection) bool {
+		return s.Text() == sandboxCompatShim
+	}).Remove()
+
+	meta := &html.Node{
+		Type:     html.ElementNode,
+		Data:     "meta",
+		DataAtom: atom.Meta,
+		Attr: []html.Attribute{
+			{Key: "name", Val: "referrer"},
+			{Key: "content", Val: referrerPolicyNoReferrer},
+		},
+	}
+	script := &html.Node{Type: html.ElementNode, Data: "script", DataAtom: atom.Script}
+	script.AppendChild(&html.Node{Type: html.TextNode, Data: sandboxCompatShim})
+
+	base.Parent.InsertBefore(meta, base.NextSibling)
+	base.Parent.InsertBefore(script, meta.NextSibling)
+}
+
+// removeReferrerPolicies removes the upstream's own referrer policies so the
+// injected no-referrer policy is the only one: every <meta name="referrer">
+// (the last one processed would win) and every referrerpolicy attribute (it
+// overrides the document policy for that element's request).
+func removeReferrerPolicies(doc *goquery.Document) {
+	doc.Find("meta[name]").Each(func(_ int, s *goquery.Selection) {
+		if name, _ := s.Attr("name"); strings.EqualFold(strings.TrimSpace(name), "referrer") {
+			s.Remove()
+		}
+	})
+	doc.Find("[referrerpolicy]").RemoveAttr("referrerpolicy")
+}
+
+// rewriteURLAttrs makes every attribute in urlAttrs an absolute upstream URL.
+// Values that absoluteURL rejects are left verbatim.
+func rewriteURLAttrs(doc *goquery.Document, base *url.URL) {
+	for _, ua := range urlAttrs {
+		doc.Find(ua.selector).Each(func(_ int, s *goquery.Selection) {
+			raw, ok := s.Attr(ua.attr)
+			if !ok {
 				return
 			}
-		}
-		rewriteAttr(s, "href", base, false)
-	})
-}
-
-// rewriteForms rewrites <form action> only for GET forms (method absent or
-// "get", case-insensitive). POST forms are left verbatim — proxying form POSTs is
-// out of scope. A GET form's action is a NAVIGATION ref.
-func rewriteForms(doc *goquery.Document, base *url.URL) {
-	doc.Find("form[action]").Each(func(_ int, s *goquery.Selection) {
-		if method, ok := s.Attr("method"); ok && !strings.EqualFold(strings.TrimSpace(method), "get") {
-			return
-		}
-		rewriteAttr(s, "action", base, true)
-	})
-}
-
-// rewriteNav rewrites the navigation attribute set (a/area/iframe) to /proxy URLs.
-func rewriteNav(doc *goquery.Document, base *url.URL) {
-	for _, na := range navAttrs {
-		doc.Find(na.selector).Each(func(_ int, s *goquery.Selection) {
-			rewriteAttr(s, na.attr, base, true)
+			if abs, ok := absoluteURL(raw, base); ok {
+				s.SetAttr(ua.attr, abs)
+			}
 		})
 	}
 }
 
-// rewriteAttr resolves the named attribute against base and, if it is a
-// rewritable http/https ref, replaces it with a proxy URL (navigation → /proxy
-// when nav is true, otherwise subresource → /proxy-resource). For navigation refs
-// a trailing #fragment is preserved on the rewritten URL (outside the url= param)
-// so in-page anchors and SPA-style fragment links keep working after navigation.
-func rewriteAttr(s *goquery.Selection, attr string, base *url.URL, nav bool) {
-	raw, ok := s.Attr(attr)
-	if !ok {
-		return
-	}
-	abs, rewritable := resolveAndClassify(raw, base)
-	if !rewritable {
-		return
-	}
-	if nav {
-		rewritten := proxyNavURL(abs)
-		if frag := fragmentOf(raw); frag != "" {
-			rewritten += "#" + frag
-		}
-		s.SetAttr(attr, rewritten)
-		return
-	}
-	s.SetAttr(attr, proxyResourceURL(abs))
+// isHTTPScheme reports whether scheme is http or https (case-insensitive).
+func isHTTPScheme(scheme string) bool {
+	return strings.EqualFold(scheme, "http") || strings.EqualFold(scheme, "https")
 }
 
-// fragmentOf returns the fragment portion (after '#', un-decoded) of ref, or "".
-func fragmentOf(ref string) string {
-	if i := strings.IndexByte(ref, '#'); i >= 0 {
-		return ref[i+1:]
-	}
-	return ""
-}
-
-// resolveAndClassify resolves ref against base and reports the absolute URL plus
-// whether it is rewritable. A ref is rewritable ONLY when, after resolution, its
-// scheme is http or https. Empty refs, pure fragments, and non-http(s) schemes
-// (data:/blob:/mailto:/tel:/javascript:/about:/…) are NOT rewritable and are left
-// verbatim by the caller. The returned absURL has its fragment stripped (the
-// caller re-attaches it for navigation refs).
-func resolveAndClassify(ref string, base *url.URL) (absURL string, rewritable bool) {
+// absoluteURL resolves ref against base and returns the absolute URL when it is
+// http or https. Empty refs, pure fragments (in-page anchors), unparseable refs
+// and refs that resolve to another scheme (data:, blob:, mailto:, tel:,
+// javascript:, about:, ...) return false so the caller leaves them verbatim. A
+// fragment is kept (it matters for SVG sprites, media fragments and anchors on
+// another page).
+func absoluteURL(ref string, base *url.URL) (string, bool) {
 	trimmed := strings.TrimSpace(ref)
 	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 		return "", false
@@ -357,26 +302,16 @@ func resolveAndClassify(ref string, base *url.URL) (absURL string, rewritable bo
 		return "", false
 	}
 	resolved := base.ResolveReference(parsed)
-	switch strings.ToLower(resolved.Scheme) {
-	case "http", "https":
-	default:
+	if !isHTTPScheme(resolved.Scheme) {
 		return "", false
 	}
-	resolved.Fragment = ""
-	resolved.RawFragment = ""
 	return resolved.String(), true
 }
 
-// rewriteSrcset rewrites srcset attributes (img/source) candidate-by-candidate.
-// A srcset is a comma-separated list of candidates, each "url [descriptor]"
-// (descriptor is an optional width "640w" or density "2x"). Each candidate URL is
-// resolved + rewritten to /proxy-resource (subresource) when http/https; the
-// descriptor is preserved verbatim. Non-rewritable URLs (data:, etc.) keep their
-// original URL text. Commas inside the (already percent-encoded) rewritten URL
-// cannot occur because url.Values.Encode escapes them, so re-joining with ", "
-// is safe.
+// rewriteSrcset rewrites every srcset-style attribute in srcsetAttrs candidate
+// by candidate (see rewriteSrcsetValue).
 func rewriteSrcset(doc *goquery.Document, base *url.URL) {
-	for _, sa := range subresourceSrcsetAttrs {
+	for _, sa := range srcsetAttrs {
 		doc.Find(sa.selector).Each(func(_ int, s *goquery.Selection) {
 			raw, ok := s.Attr(sa.attr)
 			if !ok || strings.TrimSpace(raw) == "" {
@@ -387,27 +322,61 @@ func rewriteSrcset(doc *goquery.Document, base *url.URL) {
 	}
 }
 
-// rewriteSrcsetValue rewrites a single srcset attribute value.
+// srcsetSpace is the HTML ASCII whitespace set used by the srcset grammar.
+const srcsetSpace = " \t\n\f\r"
+
+// rewriteSrcsetValue rewrites one srcset value. It follows the HTML srcset
+// parsing rules: a candidate URL is a run of non-whitespace characters (it may
+// contain commas, as CDN URLs such as ".../w_100,h_100/a.jpg" do; trailing
+// commas end the candidate), and the descriptors that follow run to the next
+// comma outside parentheses. Each http(s) candidate URL becomes absolute; other
+// URLs (data:, ...) and every descriptor ("2x", "640w") are kept verbatim.
+// Candidates are re-joined with ", ".
 func rewriteSrcsetValue(srcset string, base *url.URL) string {
-	candidates := strings.Split(srcset, ",")
-	out := make([]string, 0, len(candidates))
-	for _, cand := range candidates {
-		trimmed := strings.TrimSpace(cand)
-		if trimmed == "" {
-			continue
+	var out []string
+	rest := srcset
+	for {
+		rest = strings.TrimLeft(rest, srcsetSpace+",")
+		if rest == "" {
+			break
 		}
-		// Split into URL + optional descriptor on the first run of whitespace.
-		fields := strings.Fields(trimmed)
-		urlPart := fields[0]
-		descriptor := strings.TrimSpace(strings.TrimPrefix(trimmed, urlPart))
-		if abs, rewritable := resolveAndClassify(urlPart, base); rewritable {
-			urlPart = proxyResourceURL(abs)
+		end := strings.IndexAny(rest, srcsetSpace)
+		if end < 0 {
+			end = len(rest)
+		}
+		candidate := rest[:end]
+		rest = rest[end:]
+
+		descriptor := ""
+		if strings.HasSuffix(candidate, ",") {
+			// A URL ending in commas has no descriptors.
+			candidate = strings.TrimRight(candidate, ",")
+		} else {
+			depth, i := 0, 0
+			for ; i < len(rest); i++ {
+				switch rest[i] {
+				case '(':
+					depth++
+				case ')':
+					if depth > 0 {
+						depth--
+					}
+				}
+				if rest[i] == ',' && depth == 0 {
+					break
+				}
+			}
+			descriptor = strings.TrimSpace(rest[:i])
+			rest = rest[i:]
+		}
+
+		if abs, ok := absoluteURL(candidate, base); ok {
+			candidate = abs
 		}
 		if descriptor != "" {
-			out = append(out, urlPart+" "+descriptor)
-		} else {
-			out = append(out, urlPart)
+			candidate += " " + descriptor
 		}
+		out = append(out, candidate)
 	}
 	return strings.Join(out, ", ")
 }

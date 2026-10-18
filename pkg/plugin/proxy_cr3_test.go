@@ -367,8 +367,8 @@ func TestProxyVsProxyResourceRewriteRegression(t *testing.T) {
 	if proxyBody == html {
 		t.Fatalf("/proxy: body was NOT rewritten (regression) — got the upstream HTML verbatim")
 	}
-	if !strings.Contains(proxyBody, resourceBase+proxyResourcePath) {
-		t.Fatalf("/proxy: rewritten HTML must reference %s; got %q", resourceBase+proxyResourcePath, proxyBody)
+	if !strings.Contains(proxyBody, `href="http://example.com/styles.css"`) {
+		t.Fatalf("/proxy: rewritten HTML must reference the absolute stylesheet URL; got %q", proxyBody)
 	}
 
 	// /proxy-resource: the SAME HTML is passed through verbatim, Content-Type

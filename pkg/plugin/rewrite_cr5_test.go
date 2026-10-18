@@ -138,15 +138,17 @@ func TestCR5MarkupInjectionAttemptInjectsNoMarkup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("rewriteHTML: %v", err)
 	}
-	s := string(out)
+	// The rewriter deliberately injects one <script> (the FR5 sandbox shim);
+	// every assertion below ignores exactly that element.
+	s := withoutInjectedShim(string(out))
 
 	// 1) No injected <script> survives a re-parse.
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(out))
 	if err != nil {
 		t.Fatalf("re-parse: %v", err)
 	}
-	if n := doc.Find("script").Length(); n != 0 {
-		t.Fatalf("injection: %d <script> node(s) appeared; output: %s", n, s)
+	if n := pageScripts(doc).Length(); n != 0 {
+		t.Fatalf("injection: %d <script> node(s) appeared; output: %s", n, out)
 	}
 
 	// 2) The raw breakout markup must not appear as live markup anywhere.
