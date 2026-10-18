@@ -18,10 +18,13 @@ var errDialRefused = errors.New("connection refused")
 // doCheckFrameable issues a GET /check-frameable?url=<target> against handler
 // and returns the recorder. target is the RAW (unencoded) absolute URL; it is
 // percent-encoded into the query string here exactly as a real caller would.
+// The request carries an Editor user (VR-3), so the tests that use this helper
+// exercise the pipeline behind the role gate. frameable_authz_test.go covers
+// the role gate itself.
 func doCheckFrameable(handler http.Handler, target string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/check-frameable?url="+url.QueryEscape(target), nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, withOrgRole(req, orgRoleEditor))
 	return rec
 }
 
@@ -232,7 +235,7 @@ func TestCheckFrameableMissingURLParam(t *testing.T) {
 	for _, q := range []string{"/check-frameable", "/check-frameable?url=", "/check-frameable?url=%20"} {
 		req := httptest.NewRequest(http.MethodGet, q, nil)
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, withOrgRole(req, orgRoleEditor))
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("query %q: got status %d, want 400", q, rec.Code)
 		}
@@ -285,7 +288,7 @@ func TestCheckFrameableNonGETMethod(t *testing.T) {
 	h := checkFrameableHandler{p: newProxyHandler(settingsWith(allowExample(DomainOptions{})))}
 	req := httptest.NewRequest(http.MethodPost, "/check-frameable?url="+url.QueryEscape("https://example.com/page"), nil)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withOrgRole(req, orgRoleEditor))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST: got status %d, want 405", rec.Code)
 	}

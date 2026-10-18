@@ -426,16 +426,87 @@ func writeDenial(w http.ResponseWriter, reason, message string) string {
 	return reason
 }
 
-// endpointTopLevel / endpointResource name the two endpoints that share the
-// security pipeline. The value is recorded on the audit log's `endpoint` field
-// so the two streams are distinguishable even though they share the metrics
-// collectors (sharing is acceptable — see newProxyMetrics). endpointTopLevel is
-// the HTML-rewriting /proxy endpoint; endpointResource is the non-rewriting,
-// Content-Type-preserving /proxy-resource subresource endpoint (CR3).
+// endpointTopLevel / endpointResource / endpointCheckFrameable name the
+// endpoints that share the security pipeline. The value is recorded on the
+// audit log's `endpoint` field so the streams are distinguishable even though
+// they share the metrics collectors (sharing is acceptable — see
+// newProxyMetrics). endpointTopLevel is the HTML-rewriting /proxy endpoint;
+// endpointResource is the non-rewriting, Content-Type-preserving /proxy-resource
+// subresource endpoint (CR3); endpointCheckFrameable is /check-frameable (FR1).
 const (
-	endpointTopLevel = "proxy"
-	endpointResource = "proxy-resource"
+	endpointTopLevel       = "proxy"
+	endpointResource       = "proxy-resource"
+	endpointCheckFrameable = "check-frameable"
 )
+
+// requestAudit is the per-request audit and metrics state of one pipeline
+// request (P5 / AC 28, P6 / AC 29). beginAudit creates it and endAudit, which
+// the handler defers, emits it. That single deferred emission is the only place
+// an audit entry is written, so a new denial path cannot forget it. Handler
+// branches set url, denied and allowPrivate on their way out. The handler
+// goroutine owns the struct; permits is the only field the dial goroutine
+// writes, and it has its own lock.
+type requestAudit struct {
+	endpoint string
+	start    time.Time
+	rec      *auditResponseWriter
+	// url is the best-known target for the log line: a placeholder until the
+	// raw `url` param is read, then the validated, normalised target.
+	url string
+	// denied is the denial-reason token (empty for a served request).
+	denied string
+	// allowPrivate is the matched domain's AllowPrivateIP opt-in (false until
+	// the allowlist matches).
+	allowPrivate bool
+	// permits collects the private IPs the opt-in admitted at the SF4 gate.
+	permits *privatePermitRecorder
+}
+
+// beginAudit marks the request in flight and wraps w so the final status and
+// body size are recorded. The caller must defer endAudit and write through
+// a.rec.
+func (p *proxyHandler) beginAudit(w http.ResponseWriter, endpoint string) *requestAudit {
+	p.metrics.inFlight.Inc()
+	return &requestAudit{
+		endpoint: endpoint,
+		start:    time.Now(),
+		rec:      newAuditResponseWriter(w),
+		url:      auditMissingURL,
+		permits:  &privatePermitRecorder{},
+	}
+}
+
+// endAudit emits the single audit entry and the per-request metrics:
+// requests_total{status} and the duration histogram always, denials_total only
+// when a.denied is set. It also emits one distinct Warn line (and the permit
+// metric) per private IP that an AllowPrivateIP opt-in admitted, because that
+// re-opened SSRF surface must be loud in the logs. It runs after the upstream
+// round-trip has returned, so the dial goroutine has finished writing permits.
+func (p *proxyHandler) endAudit(req *http.Request, a *requestAudit) {
+	duration := time.Since(a.start)
+	p.metrics.inFlight.Dec()
+	p.metrics.observeRequest(a.rec.status, duration.Seconds(), a.denied)
+	user := auditUser(req.Context())
+	p.logger.Info("proxy request",
+		"endpoint", a.endpoint,
+		"url", a.url,
+		"user", user,
+		"status", a.rec.status,
+		"bytes", a.rec.bytes,
+		"duration", duration,
+		"allowPrivateIP", a.allowPrivate,
+	)
+	for _, permit := range a.permits.snapshot() {
+		p.metrics.privateIPPermitted.WithLabelValues(permit.reason).Inc()
+		p.logger.Warn("proxy private-ip permitted by opt-in",
+			"endpoint", a.endpoint,
+			"url", a.url,
+			"user", user,
+			"permittedIP", permit.ip.String(),
+			"ipClass", permit.reason,
+		)
+	}
+}
 
 // proxyResourceHandler adapts a proxyHandler to serve the /proxy-resource
 // subresource endpoint (CR3). It carries NO state of its own: it shares the SAME
@@ -481,62 +552,11 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // Both endpoints share the audit log (P5) and metrics (P6); the `endpoint`
 // value distinguishes the two streams on the audit entry's `endpoint` field.
 func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint string) {
-	// P5 / AC 28: emit EXACTLY ONE structured audit entry per request, covering
-	// the success path AND every early-return denial below. The wrapper records
-	// the final status + body bytes; start/auditURL/auditUser feed the remaining
-	// fields. A single deferred Info call is the sole emission point — no
-	// per-branch logging — so it cannot be forgotten on a new denial path.
-	start := time.Now()
-	rec := newAuditResponseWriter(w)
-	w = rec
-	// auditURL holds the best-known target for the log line. It starts as the raw
-	// `url` query value (or a placeholder when missing/unparseable) and is
-	// upgraded to the validated, normalised target once the pipeline approves it.
-	auditURL := auditMissingURL
-
-	// P6 / AC 29: count this request as in-flight for the whole handler, and emit
-	// the per-request metrics once in the SAME single deferred block as the audit
-	// log. denied carries the denial-reason token a branch sets on its way out
-	// (empty for the success/upstream-served path); observeRequest records the
-	// requests_total{status} counter + duration histogram always, and the
-	// denials_total{reason} counter only when denied is non-empty.
-	p.metrics.inFlight.Inc()
-	var denied string
-	// allowPrivate is the matched domain's AllowPrivateIP opt-in for THIS request
-	// (false until the allowlist matches). recorder collects any private IP the
-	// opt-in admitted at the SF4 gate so the deferred block can emit the distinct
-	// permit Warn + metric. Both are read in the deferred block AFTER the upstream
-	// round-trip has returned (so the dial goroutine has finished writing).
-	var allowPrivate bool
-	recorder := &privatePermitRecorder{}
-	defer func() {
-		p.metrics.inFlight.Dec()
-		p.metrics.observeRequest(rec.status, time.Since(start).Seconds(), denied)
-		p.logger.Info("proxy request",
-			"endpoint", endpoint,
-			"url", auditURL,
-			"user", auditUser(req.Context()),
-			"status", rec.status,
-			"bytes", rec.bytes,
-			"duration", time.Since(start),
-			"allowPrivateIP", allowPrivate,
-		)
-		// A DISTINCT, high-signal audit line per private IP that the opt-in
-		// admitted: this re-opened SSRF surface must be loud in the logs. It fires
-		// ONLY when the matched domain opted in AND a private IP was actually
-		// reached, so an opted-in domain resolving to a public IP produces nothing
-		// here. The permit metric is incremented in the same place.
-		for _, permit := range recorder.snapshot() {
-			p.metrics.privateIPPermitted.WithLabelValues(permit.reason).Inc()
-			p.logger.Warn("proxy private-ip permitted by opt-in",
-				"endpoint", endpoint,
-				"url", auditURL,
-				"user", auditUser(req.Context()),
-				"permittedIP", permit.ip.String(),
-				"ipClass", permit.reason,
-			)
-		}
-	}()
+	// P5 / AC 28 + P6 / AC 29: exactly one audit entry and one metrics
+	// observation per request, emitted by the deferred endAudit on every path.
+	a := p.beginAudit(w, endpoint)
+	defer p.endAudit(req, a)
+	w = a.rec
 
 	setCORSHeaders(w.Header())
 
@@ -547,7 +567,7 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	}
 
 	if req.Method != http.MethodGet {
-		denied = writeDenial(w, denialReasonMethod, "method not allowed")
+		a.denied = writeDenial(w, denialReasonMethod, "method not allowed")
 		return
 	}
 
@@ -555,11 +575,11 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// req.URL.Query() decodes it for us.
 	rawTarget := req.URL.Query().Get("url")
 	if strings.TrimSpace(rawTarget) == "" {
-		denied = writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
+		a.denied = writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
 		return
 	}
 	// We now have a caller-supplied target; log it even on the denial paths below.
-	auditURL = rawTarget
+	a.url = rawTarget
 
 	// Derive the normalised hostname for the allowlist match BEFORE the full
 	// SF2 validation. We must match the allowlist first to learn the matched
@@ -568,10 +588,10 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// (declared per-domain) would be rejected before the allowlist is consulted.
 	hostname, herr := hostnameOf(rawTarget)
 	if herr != nil {
-		auditURL = auditInvalidURL
+		a.url = auditInvalidURL
 		// SF2 reasons (scheme/port/userinfo/hostname/malformed) are all client
 		// errors ⇒ denialReasonScheme ⇒ 400 via the authoritative table.
-		denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(herr))
+		a.denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(herr))
 		return
 	}
 
@@ -579,35 +599,35 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// denies everything (fail-closed default).
 	match := security.MatchHostname(hostname, p.allowlist)
 	if !match.Allowed {
-		denied = writeDenial(w, denialReasonAllowlist, "target host is not allowlisted")
+		a.denied = writeDenial(w, denialReasonAllowlist, "target host is not allowlisted")
 		return
 	}
 	// Capture the matched domain's per-request private-IP opt-in. This is the ONLY
 	// place AllowPrivateIP enters the dial path: it is read from the domain THIS
 	// request matched, so it is recomputed on every request (and, for redirects,
 	// on every hop, since each hop re-enters serve and re-matches). It is recorded
-	// on the audit line above and drives the security.Policy threaded below.
-	allowPrivate = match.Options.AllowPrivateIP
+	// on the audit line and drives the security.Policy threaded below.
+	a.allowPrivate = match.Options.AllowPrivateIP
 
 	// SF2: full validation of scheme, userinfo, host, and port — now allowing
 	// the matched domain's extra ports. scheme/port/userinfo/hostname/malformed
 	// are all client errors and map to 400 via denialReasonScheme.
 	validated, err := security.ValidateURL(rawTarget, match.Options.AllowedPorts)
 	if err != nil {
-		denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(err))
+		a.denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(err))
 		return
 	}
 
 	// SF5: rate-limit tiers (per instance, per domain), then concurrency cap.
 	instanceID := instanceIDFromContext(req)
 	if allowed, reason := p.rateLimiter.Allow(instanceID, validated.Hostname); !allowed {
-		denied = writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
+		a.denied = writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
 		return
 	}
 
 	release, ok := p.rateLimiter.Acquire()
 	if !ok {
-		denied = writeDenial(w, denialReasonConcurrency, "too many concurrent proxy requests")
+		a.denied = writeDenial(w, denialReasonConcurrency, "too many concurrent proxy requests")
 		return
 	}
 	defer release()
@@ -621,11 +641,11 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	if perr != nil {
 		// Should not happen — rawTarget already parsed cleanly in ValidateURL —
 		// but fail closed.
-		denied = writeDenial(w, denialReasonBadRequest, "invalid target URL")
+		a.denied = writeDenial(w, denialReasonBadRequest, "invalid target URL")
 		return
 	}
 	// Log the validated, normalised target rather than the raw caller string.
-	auditURL = target.String()
+	a.url = target.String()
 
 	// CR4: read the current redirect-hop depth from the reserved control param.
 	// A missing/blank/bogus value parses to 0 (treated as the first hop); we clamp
@@ -646,7 +666,7 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// the recorder so any admitted private IP is audited/metered in the deferred
 	// block. serveProxy sets this Policy onto the request context (before its
 	// timeout wrap) so the SF4 dialer reads it back via security.WithPolicy.
-	pol := security.Policy{AllowPrivate: allowPrivate, OnPrivatePermit: recorder.record}
+	pol := security.Policy{AllowPrivate: a.allowPrivate, OnPrivatePermit: a.permits.record}
 
 	// The pipeline approved the request; any further denial is decided by the
 	// ReverseProxy's ErrorHandler (a dial-time blocked IP/metadata host, an
@@ -655,7 +675,7 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// was served cleanly) so the deferred metrics emission records it. The
 	// endpoint selects the ModifyResponse: /proxy HTML-rewrites the body,
 	// /proxy-resource passes the body + Content-Type through unchanged.
-	denied = p.serveProxy(w, req, target, endpoint, depth, hideSelectors, pol)
+	a.denied = p.serveProxy(w, req, target, endpoint, depth, hideSelectors, pol)
 }
 
 // hideSelectorsOf reads the repeated `hide` query params (CR5) from the inbound

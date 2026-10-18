@@ -8,9 +8,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-// Prometheus metric/label name constants for the /proxy endpoint. Names follow
-// the snake_case convention with a shared webview_proxy_ namespace; counters end
-// in _total and the duration histogram in _seconds (P6 / AC 29).
+// Prometheus metric/label name constants for the /proxy and /check-frameable
+// endpoints. Both endpoints record into the same collectors; the audit log's
+// `endpoint` field tells them apart. Names follow the snake_case convention with
+// a shared webview_proxy_ namespace; counters end in _total and the duration
+// histogram in _seconds (P6 / AC 29).
 const (
 	metricRequestsTotal      = "webview_proxy_requests_total"
 	metricDenialsTotal       = "webview_proxy_denials_total"
@@ -51,11 +53,12 @@ const (
 	denialReasonTimeout     = "timeout"       // P4 per-request budget expired (504)
 	denialReasonUpstream    = "upstream"      // upstream resolve/transport/gateway failure (502)
 	denialReasonRedirect    = "redirect-loop" // CR4 redirect depth cap exceeded (502)
+	denialReasonRole        = "role"          // VR-3 org role below Editor on /check-frameable (403)
 )
 
 // reasonStatus is the authoritative denial-reason → HTTP-status mapping for the
-// /proxy endpoint (P7) and the SINGLE source of truth for the status a denial
-// produces. Every denial branch picks a reason and writes the status this table
+// /proxy and /check-frameable endpoints (P7) and the SINGLE source of truth for
+// the status a denial produces. Every denial branch picks a reason and writes the status this table
 // assigns to it (via statusForReason / writeDenial), so a future edit cannot let
 // the status sent to the client diverge from the reason recorded on
 // denials_total. The denial classes intentionally span 400/403/405/413/429/502/504.
@@ -72,6 +75,7 @@ var reasonStatus = map[string]int{
 	denialReasonTimeout:     http.StatusGatewayTimeout,        // 504
 	denialReasonUpstream:    http.StatusBadGateway,            // 502
 	denialReasonRedirect:    http.StatusBadGateway,            // 502
+	denialReasonRole:        http.StatusForbidden,             // 403
 }
 
 // statusForReason returns the HTTP status the given denial reason maps to. An
@@ -111,19 +115,19 @@ func newProxyMetrics(reg prometheus.Registerer) *proxyMetrics {
 	return &proxyMetrics{
 		requests: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: metricRequestsTotal,
-			Help: "Total number of /proxy requests handled, labelled by final HTTP status code.",
+			Help: "Total number of /proxy and /check-frameable requests handled, labelled by final HTTP status code.",
 		}, []string{labelStatus}),
 		denials: factory.NewCounterVec(prometheus.CounterOpts{
 			Name: metricDenialsTotal,
-			Help: "Total number of /proxy requests denied, labelled by denial reason.",
+			Help: "Total number of /proxy and /check-frameable requests denied, labelled by denial reason.",
 		}, []string{labelReason}),
 		inFlight: factory.NewGauge(prometheus.GaugeOpts{
 			Name: metricRequestsInFlight,
-			Help: "Number of /proxy requests currently in flight.",
+			Help: "Number of /proxy and /check-frameable requests currently in flight.",
 		}),
 		duration: factory.NewHistogram(prometheus.HistogramOpts{
 			Name:    metricRequestDurationSec,
-			Help:    "Duration of /proxy request handling in seconds.",
+			Help:    "Duration of /proxy and /check-frameable request handling in seconds.",
 			Buckets: prometheus.DefBuckets,
 		}),
 		privateIPPermitted: factory.NewCounterVec(prometheus.CounterOpts{

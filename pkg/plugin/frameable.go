@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/wilsonwaters/webview/pkg/security"
 )
 
@@ -74,21 +75,41 @@ func (h checkFrameableHandler) ServeHTTP(w http.ResponseWriter, req *http.Reques
 // HTTP 200 with the {frameable, reason, recommendedMode} JSON verdict. A fetch
 // error/timeout, or a redirect with no framing verdict, is treated as
 // proxy-recommended (the proxy is more robust): still HTTP 200, frameable:false.
+//
+// VR-3: the endpoint is for panel editors only, so the first gate is the org
+// role (Editor or Admin). It runs before any other check, so a Viewer cannot
+// use the endpoint to learn which hosts are allowlisted. Like /proxy, every
+// request emits one audit entry and one metrics observation (endpoint
+// "check-frameable"), including the role denial.
 func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) {
-	// CORS preflight / method handling mirrors /proxy: this is a GET endpoint.
+	a := p.beginAudit(w, endpointCheckFrameable)
+	defer p.endAudit(req, a)
+	w = a.rec
+
+	// CORS preflight mirrors /proxy: answer without running the pipeline.
 	setCORSHeaders(w.Header())
 	if req.Method == http.MethodOptions {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if req.Method != http.MethodGet {
-		writeDenial(w, denialReasonMethod, "method not allowed")
+
+	rawTarget := req.URL.Query().Get("url")
+	if strings.TrimSpace(rawTarget) != "" {
+		a.url = rawTarget
+	}
+
+	if !hasEditorRole(req.Context()) {
+		a.denied = writeJSONDenial(w, denialReasonRole, "The URL test requires the Editor or Admin role.")
 		return
 	}
 
-	rawTarget := req.URL.Query().Get("url")
+	if req.Method != http.MethodGet {
+		a.denied = writeDenial(w, denialReasonMethod, "method not allowed")
+		return
+	}
+
 	if strings.TrimSpace(rawTarget) == "" {
-		writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
+		a.denied = writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
 		return
 	}
 
@@ -96,34 +117,36 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 	// matched domain's extra ports before the authoritative ValidateURL.
 	hostname, herr := hostnameOf(rawTarget)
 	if herr != nil {
-		writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(herr))
+		a.url = auditInvalidURL
+		a.denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(herr))
 		return
 	}
 
 	// SF3: allowlist match (empty/nil allowlist denies everything, fail-closed).
 	match := security.MatchHostname(hostname, p.allowlist)
 	if !match.Allowed {
-		writeDenial(w, denialReasonAllowlist, "target host is not allowlisted")
+		a.denied = writeDenial(w, denialReasonAllowlist, "target host is not allowlisted")
 		return
 	}
+	a.allowPrivate = match.Options.AllowPrivateIP
 
 	// SF2: full validation of scheme/userinfo/host/port, allowing the matched
 	// domain's extra ports. All failures are client errors ⇒ 400.
 	validated, err := security.ValidateURL(rawTarget, match.Options.AllowedPorts)
 	if err != nil {
-		writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(err))
+		a.denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(err))
 		return
 	}
 
 	// SF5: rate-limit tiers (per instance, per domain), then the concurrency cap.
 	instanceID := instanceIDFromContext(req)
 	if allowed, reason := p.rateLimiter.Allow(instanceID, validated.Hostname); !allowed {
-		writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
+		a.denied = writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
 		return
 	}
 	release, ok := p.rateLimiter.Acquire()
 	if !ok {
-		writeDenial(w, denialReasonConcurrency, "too many concurrent proxy requests")
+		a.denied = writeDenial(w, denialReasonConcurrency, "too many concurrent proxy requests")
 		return
 	}
 	defer release()
@@ -133,9 +156,10 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 	// pipeline approved.
 	target, perr := buildTargetURL(rawTarget, validated)
 	if perr != nil {
-		writeDenial(w, denialReasonBadRequest, "invalid target URL")
+		a.denied = writeDenial(w, denialReasonBadRequest, "invalid target URL")
 		return
 	}
+	a.url = target.String()
 
 	// Every gate passed: perform the framing check. SF4's resolve-then-dial +
 	// IP blocklist run inside p.transport at connect time, so a blocked/metadata
@@ -316,6 +340,51 @@ func cspFrameAncestorsBlocks(csp string) (bool, string) {
 		return true, "CSP frame-ancestors: restrictive source list"
 	}
 	return false, ""
+}
+
+// Grafana basic org roles that may call /check-frameable (VR-3). Grafana sends
+// the role in the plugin context as "Viewer", "Editor", "Admin" or "None".
+const (
+	orgRoleEditor = "Editor"
+	orgRoleAdmin  = "Admin"
+)
+
+// hasEditorRole reports whether the request's Grafana user has the Editor or
+// Admin org role. A request with no plugin context user, an empty role, Viewer,
+// None or any unknown value fails closed. The check uses the basic org role
+// only: a user whose basic role is Viewer but who can edit dashboards through a
+// custom RBAC role is denied.
+func hasEditorRole(ctx context.Context) bool {
+	u := backend.PluginConfigFromContext(ctx).User
+	if u == nil {
+		return false
+	}
+	role := strings.TrimSpace(u.Role)
+	return strings.EqualFold(role, orgRoleEditor) || strings.EqualFold(role, orgRoleAdmin)
+}
+
+// jsonDenial is the body of a JSON denial. The panel editor shows `message`
+// (see extractErrorMessage in FrameabilityEditor.tsx).
+type jsonDenial struct {
+	Error   string `json:"error"`
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
+// writeJSONDenial is writeDenial with a JSON body. The status comes from the
+// same reasonStatus table, so the status and the metric reason cannot drift.
+func writeJSONDenial(w http.ResponseWriter, reason, message string) string {
+	status := statusForReason(reason)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	// The status is already sent; a failed body write cannot be reported.
+	_ = json.NewEncoder(w).Encode(jsonDenial{
+		Error:   http.StatusText(status),
+		Reason:  reason,
+		Message: message,
+	})
+	return reason
 }
 
 // writeFrameableResponse writes the verdict as HTTP 200 JSON. An encode failure

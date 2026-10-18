@@ -42,6 +42,7 @@ func TestReasonStatusTableExhaustiveAndConsistent(t *testing.T) {
 		denialReasonTimeout:     http.StatusGatewayTimeout,        // 504
 		denialReasonUpstream:    http.StatusBadGateway,            // 502
 		denialReasonRedirect:    http.StatusBadGateway,            // 502 (CR4 redirect depth cap)
+		denialReasonRole:        http.StatusForbidden,             // 403 (VR-3 /check-frameable role gate)
 	}
 	for reason, wantStatus := range want {
 		if got := statusForReason(reason); got != wantStatus {
