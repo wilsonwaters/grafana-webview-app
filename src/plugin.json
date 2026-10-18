@@ -6,8 +6,8 @@
   "backend": true,
   "executable": "gpx_webview",
   "info": {
-    "keywords": ["app"],
-    "description": "",
+    "keywords": ["app", "webview", "iframe", "embed", "proxy"],
+    "description": "Embed external web pages in Grafana dashboard panels via a sandboxed iframe, with a controllable viewport and a security-hardened, SSRF-protected backend proxy for sites that block direct framing.",
     "author": {
       "name": "Wilsonwaters"
     },

@@ -5,12 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.0.1] - 2026-10-18
 
-First release of the Webview app plugin for Grafana (`wilsonwaters-webview-app`),
+First **alpha** release of the Webview app plugin for Grafana (`wilsonwaters-webview-app`),
 a Grafana app plugin with a Go backend and a nested **Web View panel**
 (`wilsonwaters-webview-panel`) for embedding external web pages in a dashboard
-with a controllable, author-captured viewport.
+with a controllable, author-captured viewport. Privately signed for self-hosted
+(Path 1) use. This is an early alpha — see **Known limitations** below.
 
 ### Added
 
@@ -52,11 +53,19 @@ with a controllable, author-captured viewport.
 
 ### Known limitations
 
-- In-panel Proxy-mode rendering is deferred for this release: Grafana stamps
+- **In-panel Proxy-mode rendering is deferred** for this release: Grafana stamps
   `X-Frame-Options: deny` and a sandbox CSP on plugin resource routes, which
   blocks framing the proxy resource inside a panel. Direct mode renders in-panel;
   the proxy pipeline is backend-complete and verified. See the
   [README](README.md#known-limitations) and issue
   [#102](https://github.com/wilsonwaters/grafana-webview-app/issues/102).
+- **No allowlist configuration UI yet.** The domain allowlist (the proxy's core
+  security control) is configured via the Grafana plugin settings API or
+  provisioning — see the [administration guide](docs/administration.md). An
+  in-app editor is planned for a follow-up release
+  ([#129](https://github.com/wilsonwaters/grafana-webview-app/issues/129)).
+- **Grafana 13.2+ not yet verified.** Validated against Grafana 12.3–13.1; a
+  dependency bump for 13.2+ is planned for a follow-up
+  ([#131](https://github.com/wilsonwaters/grafana-webview-app/issues/131)).
 
-[Unreleased]: https://github.com/wilsonwaters/grafana-webview-app/commits/main
+[0.0.1]: https://github.com/wilsonwaters/grafana-webview-app/releases/tag/v0.0.1
