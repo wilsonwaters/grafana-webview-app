@@ -263,14 +263,14 @@ mage -v build:linux
 
 ## Multi-version E2E testing
 
-The plugin supports Grafana **>= 12.3.0** (`grafanaDependency` in `src/plugin.json`).
+The plugin supports Grafana **>= 12.4.0** (`grafanaDependency` in `src/plugin.json`).
 E2E tests should pass against the supported range.
 
 Locally, pick the Grafana version with environment variables passed to the server:
 
 ```bash
 # minimum supported version
-GRAFANA_VERSION=12.3.0 npm run server
+GRAFANA_VERSION=12.4.0 npm run server
 
 # latest dev image (forward-compatibility check)
 GRAFANA_IMAGE=grafana-dev GRAFANA_VERSION=<latest-dev-tag> npm run server

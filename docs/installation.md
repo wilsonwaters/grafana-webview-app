@@ -43,7 +43,7 @@ see [`docs/signing.md`](./signing.md). For the architecture and threat model, se
 
 | Requirement | Detail |
 | --- | --- |
-| **Grafana** | **>= 12.3.0** (`grafanaDependency` in `src/plugin.json`). |
+| **Grafana** | **>= 12.4.0** (`grafanaDependency` in `src/plugin.json`). |
 | **Backend-plugin support** | This is an **app plugin with a Go backend** (`"backend": true`, executable `gpx_webview`). The Grafana host must be able to **run the plugin binary** as a subprocess. Hosted/managed Grafana that does not permit backend plugins can only use **Direct mode** (see below). |
 | **Platform binary** | The released archive bundles the backend executable. Install on a host whose OS/architecture matches the packaged binary, or build from source for your platform (see [§3.4](#34-build-from-source)). |
 | **Install permission** | Filesystem access to Grafana's plugins directory and the ability to restart Grafana (or your orchestration equivalent). |
@@ -156,7 +156,7 @@ docker run -d --name grafana \
   -p 3000:3000 \
   -v /path/to/wilsonwaters-webview-app:/var/lib/grafana/plugins/wilsonwaters-webview-app \
   -e GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=wilsonwaters-webview-app,wilsonwaters-webview-panel \
-  grafana/grafana:12.3.0
+  grafana/grafana:12.4.0
 ```
 
 **Privately-signed example:** omit the unsigned allow-list, mount a build whose
@@ -168,7 +168,7 @@ docker run -d --name grafana \
   -p 3000:3000 \
   -v /path/to/wilsonwaters-webview-app:/var/lib/grafana/plugins/wilsonwaters-webview-app \
   -e GF_SERVER_ROOT_URL=https://grafana.example.com \
-  grafana/grafana:12.3.0
+  grafana/grafana:12.4.0
 ```
 
 Notes:

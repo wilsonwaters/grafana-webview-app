@@ -5,7 +5,7 @@
 
 [![CI](https://github.com/wilsonwaters/grafana-webview-app/actions/workflows/ci.yml/badge.svg)](https://github.com/wilsonwaters/grafana-webview-app/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/wilsonwaters/grafana-webview-app)](LICENSE)
-[![Grafana](https://img.shields.io/badge/Grafana-%3E%3D12.3.0-orange)](https://grafana.com)
+[![Grafana](https://img.shields.io/badge/Grafana-%3E%3D12.4.0-orange)](https://grafana.com)
 
 A Grafana **App plugin** (`wilsonwaters-webview-app`) that embeds an external web
 page inside a Grafana dashboard panel and lets the dashboard author control the
@@ -33,7 +33,7 @@ author capture and save exactly the region of a page that a viewer should see.
 
 ## Quick start
 
-1. **Install** the plugin into a Grafana `>= 12.3.0` instance (backend-plugin
+1. **Install** the plugin into a Grafana `>= 12.4.0` instance (backend-plugin
    support is required for proxy mode; direct mode works without it). See the
    **[Installation guide](docs/installation.md)** for signing and install steps.
 2. **Add a panel:** create or edit a dashboard, add a panel, and pick
@@ -133,7 +133,7 @@ the architecture and decision log see
 
 | Requirement | Version |
 |-------------|---------|
-| Grafana | >= 12.3.0 |
+| Grafana | >= 12.4.0 |
 | Grafana Plugin SDK for Go | see `go.mod` |
 
 ## Installation
