@@ -28,11 +28,11 @@ jobs:
     env:
       GRAFANA_ACCESS_POLICY_TOKEN: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - name: Setup Node.js environment
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -54,32 +54,32 @@ jobs:
         run: |
           if [ -f "Magefile.go" ]
           then
-            echo "has-backend=true" >> $GITHUB_OUTPUT
+            echo "has-backend=true" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Setup Go environment
         if: steps.check-for-backend.outputs.has-backend == 'true'
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
       - name: Lint backend
         if: steps.check-for-backend.outputs.has-backend == 'true'
-        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: latest
           args: ./...
 
       - name: Build backend
         if: steps.check-for-backend.outputs.has-backend == 'true'
-        uses: magefile/mage-action@6f50bbb8ea47d56e62dee92392788acbc8192d0b # v3.1.0
+        uses: magefile/mage-action@a662bd8c29d8106879588cfff83b2faf6e6f59db # v4.0.0
         with:
           version: latest
           args: buildAll
 
       - name: Test backend
         if: steps.check-for-backend.outputs.has-backend == 'true'
-        uses: magefile/mage-action@6f50bbb8ea47d56e62dee92392788acbc8192d0b # v3.1.0
+        uses: magefile/mage-action@a662bd8c29d8106879588cfff83b2faf6e6f59db # v4.0.0
         with:
           version: latest
           args: test
@@ -89,7 +89,7 @@ jobs:
         run: |
           if [ -f "playwright.config.ts" ]
           then
-            echo "has-e2e=true" >> $GITHUB_OUTPUT
+            echo "has-e2e=true" >> "$GITHUB_OUTPUT"
           fi
 
       # Private signing. The plugin is not in the Grafana catalog, so a public/
@@ -108,19 +108,21 @@ jobs:
         run: |
           sudo apt-get install jq
 
-          export GRAFANA_PLUGIN_ID=$(cat dist/plugin.json | jq -r .id)
-          export GRAFANA_PLUGIN_VERSION=$(cat dist/plugin.json | jq -r .info.version)
-          export GRAFANA_PLUGIN_ARTIFACT=${GRAFANA_PLUGIN_ID}-${GRAFANA_PLUGIN_VERSION}.zip
+          GRAFANA_PLUGIN_ID="$(jq -r .id dist/plugin.json)"
+          GRAFANA_PLUGIN_VERSION="$(jq -r .info.version dist/plugin.json)"
+          GRAFANA_PLUGIN_ARTIFACT="${GRAFANA_PLUGIN_ID}-${GRAFANA_PLUGIN_VERSION}.zip"
 
-          echo "plugin-id=${GRAFANA_PLUGIN_ID}" >> $GITHUB_OUTPUT
-          echo "plugin-version=${GRAFANA_PLUGIN_VERSION}" >> $GITHUB_OUTPUT
-          echo "archive=${GRAFANA_PLUGIN_ARTIFACT}" >> $GITHUB_OUTPUT
+          {
+            echo "plugin-id=${GRAFANA_PLUGIN_ID}"
+            echo "plugin-version=${GRAFANA_PLUGIN_VERSION}"
+            echo "archive=${GRAFANA_PLUGIN_ARTIFACT}"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Package plugin
         id: package-plugin
         run: |
-          mv dist ${PLUGIN_ID}
-          zip ${ARCHIVE} ${PLUGIN_ID} -r
+          mv dist "${PLUGIN_ID}"
+          zip "${ARCHIVE}" "${PLUGIN_ID}" -r
         env:
           ARCHIVE: ${{ steps.metadata.outputs.archive }}
           PLUGIN_ID: ${{ steps.metadata.outputs.plugin-id }}
@@ -128,7 +130,7 @@ jobs:
       - name: Check plugin.json
         run: |
           docker run --pull=always \
-            -v $PWD/${ARCHIVE}:/archive.zip \
+            -v "${PWD}/${ARCHIVE}:/archive.zip" \
             grafana/plugin-validator-cli -analyzer=metadatavalid /archive.zip
         env:
           ARCHIVE: ${{ steps.metadata.outputs.archive }}
@@ -145,13 +147,13 @@ jobs:
         continue-on-error: true
         run: |
           docker run --pull=always \
-            -v $PWD/${ARCHIVE}:/archive.zip \
+            -v "${PWD}/${ARCHIVE}:/archive.zip" \
             grafana/plugin-validator-cli /archive.zip
         env:
           ARCHIVE: ${{ steps.metadata.outputs.archive }}
 
       - name: Archive Build
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ steps.metadata.outputs.plugin-id }}-${{ steps.metadata.outputs.plugin-version }}
           path: ${{ steps.metadata.outputs.plugin-id }}
@@ -171,28 +173,29 @@ jobs:
     name: Security suite (non-skippable)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup Go environment
-        uses: actions/setup-go@v6
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
 
       - name: Run mandatory security suite (AC 17-29)
         run: ./scripts/security-suite.sh
 
-  # AC 32 / decision Q13b: the E2E Grafana-version matrix is AUTO-RESOLVED by the
-  # official `grafana/plugin-actions/e2e-version` action rather than pinned by
-  # hand. From this plugin's `dependencies.grafanaDependency` (>=12.3.0) the action
-  # derives the matrix: the latest patch of every supported Grafana minor from the
-  # minimum (12.3.x) up to current, plus `grafana-enterprise:nightly` (capped at 6
-  # versions by the action's default limit). Q13b decided to KEEP
-  # this auto-resolved set as-is (do not pin a narrower list, do not expand to the
-  # full minor range), so the matrix always tracks the supported range and newly
-  # released minors without a workflow edit. `playwright-tests` below fans out over
-  # it. This job is intentionally left unchanged by TC6 beyond this documentation.
+  # AC 32 / decisions Q13b and D3: the E2E Grafana-version matrix is AUTO-RESOLVED
+  # by the official `grafana/plugin-actions/e2e-version` action rather than pinned
+  # by hand. From this plugin's `dependencies.grafanaDependency` (>=12.4.0) the
+  # action derives the matrix: the latest patch of every supported Grafana minor
+  # from the minimum (12.4.x, 13.0.x, 13.1.x, 13.2.x, ...) up to current, plus
+  # `grafana-enterprise:nightly` (capped at 6 versions by the action's default
+  # limit). This covers both React runtimes: 12.4-13.1 run React 18 and 13.2+
+  # runs React 19. Keep this auto-resolved set as-is (do not pin a narrower list,
+  # do not expand to the full minor range), so the matrix always tracks the
+  # supported range and newly released minors without a workflow edit.
+  # `playwright-tests` below fans out over it.
   resolve-versions:
     name: Resolve e2e images
     runs-on: ubuntu-latest
@@ -203,13 +206,13 @@ jobs:
       matrix: ${{ steps.resolve-versions.outputs.matrix }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Resolve Grafana E2E versions
         id: resolve-versions
-        uses: grafana/plugin-actions/e2e-version@e2e-version/v2.0.0
+        uses: grafana/plugin-actions/e2e-version@b2d42498af86999c092e974be98860757fd3cb10 # e2e-version/v3.2.0
 
   playwright-tests:
     needs: [resolve-versions, build]
@@ -221,12 +224,12 @@ jobs:
     name: e2e test ${{ matrix.GRAFANA_IMAGE.name }}@${{ matrix.GRAFANA_IMAGE.VERSION }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Download plugin
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           path: dist
           name: ${{ needs.build.outputs.plugin-id }}-${{ needs.build.outputs.plugin-version }}
@@ -237,7 +240,7 @@ jobs:
           chmod +x ./dist/gpx_*
 
       - name: Setup Node.js environment
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -251,7 +254,7 @@ jobs:
           ANONYMOUS_AUTH_ENABLED=false DEVELOPMENT=false GRAFANA_VERSION=${{ matrix.GRAFANA_IMAGE.VERSION }} GRAFANA_IMAGE=${{ matrix.GRAFANA_IMAGE.NAME }} docker compose up -d
 
       - name: Wait for grafana server
-        uses: grafana/plugin-actions/wait-for-grafana@wait-for-grafana/v1.0.2
+        uses: grafana/plugin-actions/wait-for-grafana@4205a0824a13b71fdb9b9b49f28f5f72b754f81f # wait-for-grafana/v1.0.5
         with:
           url: http://localhost:3000/login
 
@@ -272,7 +275,7 @@ jobs:
 
       # Uncomment this step to upload the server log to Github artifacts. Remember Github artifacts are public on the Internet if the repository is public.
       # - name: Upload server log
-      #   uses: actions/upload-artifact@v4
+      #   uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       #   if: ${{ always() && steps.run-tests.outcome == 'failure' }}
       #   with:
       #     name: ${{ matrix.GRAFANA_IMAGE.NAME }}-v${{ matrix.GRAFANA_IMAGE.VERSION }}-${{github.run_id}}-server-log
