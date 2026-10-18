@@ -1,24 +1,52 @@
+import type { PanelEditPage } from '@grafana/plugin-e2e';
 import { expect } from './fixtures';
 
+const WEB_VIEW = 'Web View';
+
 /**
- * Shared helpers for the TC4 e2e specs.
+ * Selects the Web View visualization in the editor of a new panel.
  *
- * `setVisualization` is known-flaky on cold start (the visualization picker can
- * be slow to register the nested panel). Retry with backoff so specs do not flake
- * for reasons unrelated to what they assert.
+ * Grafana 12.4.x opens the editor of a new panel with the visualization picker
+ * already open, and the picker toggle is visible at the same time. plugin-e2e
+ * 3.15's `setVisualization` clicks the toggle whenever it is visible, which
+ * closes the picker, and then waits for the "All visualizations" tab until it
+ * times out. When the picker is already open, select the visualization with the
+ * plugin-e2e selectors. Otherwise, use `setVisualization`.
  */
-export async function setWebViewVisualization(panelEditPage: any, page: any): Promise<void> {
+async function selectWebViewVisualization(panelEditPage: PanelEditPage): Promise<void> {
+  const { components, constants } = panelEditPage.ctx.selectors;
+  const allVisualizationsTab = panelEditPage.getByGrafanaSelector(components.Tab.title(constants.Tab.title));
+  const vizPickerToggle = panelEditPage.getByGrafanaSelector(components.PanelEditor.toggleVizPicker);
+
+  // Wait until the editor shows the open picker or the toggle that opens it.
+  await expect(allVisualizationsTab.or(vizPickerToggle).first()).toBeVisible({ timeout: 15000 });
+
+  if (await allVisualizationsTab.isVisible()) {
+    await allVisualizationsTab.click();
+    await panelEditPage.getByGrafanaSelector(components.PluginVisualization.item(WEB_VIEW)).click();
+  } else {
+    await panelEditPage.setVisualization(WEB_VIEW);
+  }
+  await expect(panelEditPage.getVisualizationName()).toHaveText(WEB_VIEW);
+}
+
+/**
+ * Selects the Web View visualization and waits for its options to render. Use
+ * this in every spec instead of calling `panelEditPage.setVisualization`.
+ *
+ * Selecting the visualization can be slow on cold start (the visualization
+ * picker can be slow to register the nested panel). Retry with backoff so specs
+ * do not flake for reasons unrelated to what they assert.
+ */
+export async function setWebViewVisualization(panelEditPage: PanelEditPage, page: any): Promise<void> {
   let lastErr: unknown;
   for (let i = 0; i < 4; i++) {
     try {
-      // Cap each attempt so a hung setVisualization (it can occasionally stall for
-      // a long time on a cold worker) is abandoned quickly and retried, rather than
+      // Cap each attempt so a hung selection (it can occasionally stall for a
+      // long time on a cold worker) is abandoned quickly and retried, rather than
       // consuming the whole per-test timeout in a single attempt.
       await Promise.race([
-        (async () => {
-          await panelEditPage.setVisualization('Web View');
-          await expect(panelEditPage.getVisualizationName()).toHaveText('Web View');
-        })(),
+        selectWebViewVisualization(panelEditPage),
         new Promise((_, reject) =>
           setTimeout(() => reject(new Error('setVisualization attempt timed out (25s)')), 25000)
         ),

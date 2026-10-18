@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures';
+import { setWebViewVisualization } from './tc4Helpers';
 
 /**
  * PC4 runtime verification: numeric inputs, dimensions, and reset button.
@@ -11,22 +12,7 @@ test.describe('Viewport editor PC4: numeric inputs, dimensions, reset', () => {
   test('numeric inputs, dimension inputs, and reset button work correctly', async ({ panelEditPage, page }) => {
     test.setTimeout(120000);
 
-    // setVisualization is known-flaky on first cold start; retry with backoff.
-    let vizSet = false;
-    for (let i = 0; i < 5; i++) {
-      try {
-        await panelEditPage.setVisualization('Web View');
-        vizSet = true;
-        break;
-      } catch {
-        if (i < 4) {
-          await page.waitForTimeout(2000);
-        }
-      }
-    }
-    if (!vizSet) {
-      throw new Error('setVisualization failed after 5 retries');
-    }
+    await setWebViewVisualization(panelEditPage, page);
     await expect(panelEditPage.getVisualizationName()).toHaveText('Web View');
 
     // Set URL via the canonical standard field (F4). The ViewportEditor preview

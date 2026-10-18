@@ -4,14 +4,16 @@
  * These tests drive the real Grafana UI to verify that the PC5 view-mode
  * behaviours work end-to-end in a real browser.
  *
- * Known-flaky note: `panelEditPage.setVisualization` can be slow on first
- * render. Retries are configured in playwright.config.ts (2 retries on CI).
+ * The visualization is selected with the shared `setWebViewVisualization`
+ * helper, which handles the Grafana 12.4 picker behaviour and cold-start
+ * slowness. Retries are also configured in playwright.config.ts (2 on CI).
  */
 import { test, expect } from './fixtures';
+import { setWebViewVisualization } from './tc4Helpers';
 
 test.describe('PC5: View-mode behaviours', () => {
   test('debug overlay shows mode, X, Y, zoom when enabled', async ({ panelEditPage, page }) => {
-    await panelEditPage.setVisualization('Web View');
+    await setWebViewVisualization(panelEditPage, page);
 
     // Set a URL so the panel renders an iframe rather than the placeholder.
     await page.getByRole('textbox', { name: 'URL' }).fill('https://example.com');
@@ -38,7 +40,7 @@ test.describe('PC5: View-mode behaviours', () => {
   });
 
   test('auto-refresh: iframe reloads when interval is set', async ({ panelEditPage, page }) => {
-    await panelEditPage.setVisualization('Web View');
+    await setWebViewVisualization(panelEditPage, page);
 
     await page.getByRole('textbox', { name: 'URL' }).fill('https://example.com');
     await page.keyboard.press('Tab');
@@ -61,7 +63,7 @@ test.describe('PC5: View-mode behaviours', () => {
   });
 
   test('screenshot: debug overlay with mode, coordinates, zoom', async ({ panelEditPage, page }) => {
-    await panelEditPage.setVisualization('Web View');
+    await setWebViewVisualization(panelEditPage, page);
 
     await page.getByRole('textbox', { name: 'URL' }).fill('https://example.com');
     await page.keyboard.press('Tab');
