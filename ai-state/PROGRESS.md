@@ -2,6 +2,40 @@
 
 Narrative log of project status, maintained primarily by the orchestrator agent.
 
+## ⇒ HANDOFF (2026-10-18) — release work handed to another agent (target: 1.0.0)
+
+**Stakeholder decision (2026-10-18):** a DIFFERENT agent will resolve the dependency-CVE /
+13.x issues and push forward to a **1.0.0** release. This orchestrator has STOPPED release
+work (no scanner suppression, no dep bump, no further tagging).
+
+**Project state: feature-, test-, and docs-complete.** All 9 streams merged (foundation,
+panel-core, security-foundation, frameability, proxy, content-rewriting, direct-only-fallback,
+testing-cicd TC1–TC6, docs-release DR1–DR7) + #105 (AllowPrivateIP). `main` is CI-green on the
+supported range (Grafana 12.3–13.1). The release WORKFLOW is fixed and works up to the security gate.
+
+**Why the release isn't cut yet — the next agent must handle:**
+1. **osv-scanner gate (build-plugin internal validator) fails** on the dep tree: **1 critical
+   (`websocket-driver`, DEV-only/webpack-dev-server, fixable non-breaking) + ~21 high**. `npm audit`:
+   74 vulns (1 crit/52 high/21 mod) full; 23 (8 high/15 mod, no crit) prod-only (`--omit=dev`).
+   **Most highs only clear via `npm audit fix --force` → `@grafana/ui@13.2.4` (breaking) = the #131 13.x bump.**
+   build-plugin@v1.0.2 ALWAYS runs this internal validator (no skip input); osv-scanner uses a live CVE DB
+   so pinned deps keep drifting red. → Fix path: do **#131** (bump @grafana/* to 13.x, `npm audit fix [--force]`,
+   fix type/test fallout, **revert Levitate advisory #124**, fix the 13.2+ e2e harness), which also clears most CVEs.
+   (A documented time-boxed `osv-scanner.toml` ignore was the alpha stopgap option — NOT taken; stakeholder chose
+   to go straight to 1.0.0 via another agent.)
+2. **Release workflow is FIXED** (#137, merged): `release.yml` pins `node-version: '22'` + `go-version: '1.26.3'`,
+   dropped the invalid `sign_root_urls`; signing rootUrls live in `package.json` `sign` script
+   (`--rootUrls http://localhost:3000,https://graphs.alintech.com.au`); lockfile synced. First two release runs
+   failed at: (a) Node-20 npm `edgesOut` crash [FIXED], (b) osv-scanner CVE gate [ABOVE, open].
+3. **Tag state:** `v0.0.1` exists on origin pointing at `e40771f` (fixed main) but CANNOT pass the gate until
+   the CVEs are addressed. The next agent targeting **1.0.0** should set `package.json` version to `1.0.0`
+   (currently `0.0.1`), update the CHANGELOG `[0.0.1]`→`[1.0.0]`, drop/retire the `v0.0.1` tag, and tag `v1.0.0`.
+   NOTE: THIS session's git proxy denies `refs/tags/*` (403) — a human/maintainer or an unrestricted agent must push tags.
+
+**Open follow-up issues:** #131 (13.x deps + revert #124 + e2e harness — now ALSO the CVE remediation),
+#129 (allowlist editor UI + the config-page jsonData-clobber + proxy fixes), #113 (provisioning→backend
+allowlist delivery), #133 (stale `AllowPrivateIP`/`hideSelectors` code comments), #102 (in-panel proxy render / FR5).
+
 ## Status summary
 
 Setup complete and the **execution loop is running** (task branch → PR → review → CI-green →
