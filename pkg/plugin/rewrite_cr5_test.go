@@ -270,7 +270,7 @@ func TestCR5EmptyHideSelectorsByteIdentical(t *testing.T) {
 	}
 }
 
-// --- Completion Criterion: /proxy threads hide; /proxy-resource ignores it ---
+// --- Completion Criterion: /proxy threads hide to HTML --------------------------
 
 // TestCR5ProxyEndpointAppliesHide covers Completion Criterion "valid hide-selectors
 // applied through the full /proxy ModifyResponse path": the `hide` query param is
@@ -302,37 +302,8 @@ func TestCR5ProxyEndpointAppliesHide(t *testing.T) {
 	}
 }
 
-// TestCR5ProxyResourceIgnoresHide covers Completion Criterion "/proxy-resource
-// ignores `hide`": subresources are not HTML documents and are passed through
-// byte-identical even when a `hide` param is present.
-func TestCR5ProxyResourceIgnoresHide(t *testing.T) {
-	const css = `.ad { color: red; }` // CSS that textually contains ".ad"
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/css")
-		if _, err := w.Write([]byte(css)); err != nil {
-			t.Errorf("upstream write: %v", err)
-		}
-	}))
-	defer upstream.Close()
-
-	cfg := settingsWith(allowExample(DomainOptions{}))
-	h := newResourceHandler(t, cfg, upstream)
-
-	req := httptest.NewRequest(http.MethodGet,
-		proxyResourcePath+"?url="+url.QueryEscape("http://example.com/styles.css")+"&hide="+url.QueryEscape(".ad"), nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("got status %d, want 200 (body=%q)", rec.Code, rec.Body.String())
-	}
-	if body := rec.Body.String(); body != css {
-		t.Errorf("/proxy-resource body altered despite hide param: got %q, want byte-identical %q", body, css)
-	}
-	if ct := rec.Header().Get("Content-Type"); ct != "text/css" {
-		t.Errorf("/proxy-resource Content-Type = %q, want text/css (no HTML rewrite)", ct)
-	}
-}
+// The non-HTML half of this criterion ("hide never alters a non-HTML body")
+// moved to TestProxyNonHTMLIgnoresHide when /proxy-resource was removed (FR5).
 
 // --- hideSelectorsOf: query-param sourcing -----------------------------------
 

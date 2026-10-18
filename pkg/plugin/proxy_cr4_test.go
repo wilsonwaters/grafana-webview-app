@@ -188,24 +188,24 @@ func TestRedirectMaxRedirectsZeroDisables(t *testing.T) {
 	}
 }
 
-// TestRedirectResourceEndpointRewritesToProxyResource covers Completion Criterion:
-// a redirect on the /proxy-resource endpoint is rewritten to a /proxy-resource URL
-// (so a redirected subresource stays proxied as a subresource).
-func TestRedirectResourceEndpointRewritesToProxyResource(t *testing.T) {
+// TestRedirectAlwaysRewritesToProxy replaces the /proxy-resource redirect test
+// (FR5 removed that route): a redirect is always rewritten to a /proxy URL,
+// whatever the target looks like, and never to /proxy-resource.
+func TestRedirectAlwaysRewritesToProxy(t *testing.T) {
 	upstream := redirectUpstream(t, http.StatusFound, "http://example.com/real.css")
 	defer upstream.Close()
 
 	cfg := settingsWith(allowExample(DomainOptions{}))
-	h := newResourceHandler(t, cfg, upstream)
+	h := newTestHandler(t, cfg, upstream)
 
-	rec := doProxyResource(h, "http://example.com/styles.css")
+	rec := doProxy(h, "http://example.com/styles.css")
 	if rec.Code != http.StatusFound {
-		t.Fatalf("resource redirect: got status %d, want 302", rec.Code)
+		t.Fatalf("redirect: got status %d, want 302", rec.Code)
 	}
 	loc := rec.Header().Get("Location")
-	wantPrefix := resourceBase + proxyResourcePath + "?"
-	if !strings.HasPrefix(loc, wantPrefix) {
-		t.Fatalf("Location = %q, want a /proxy-resource URL prefixed %q", loc, wantPrefix)
+	wantPrefix := resourceBase + proxyPath + "?"
+	if !strings.HasPrefix(loc, wantPrefix) || strings.Contains(loc, "proxy-resource") {
+		t.Fatalf("Location = %q, want a /proxy URL prefixed %q", loc, wantPrefix)
 	}
 	u, err := url.Parse(loc)
 	if err != nil {

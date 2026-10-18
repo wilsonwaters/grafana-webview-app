@@ -22,14 +22,13 @@ func (a *App) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // registerRoutes registers the plugin's resource routes on mux. Any other path
 // returns 404. The create-plugin scaffold routes /ping and /echo were removed
 // (VR-8): they bypassed the security pipeline and /echo decoded unbounded
-// request bodies.
+// request bodies. The /proxy-resource subresource route was removed with FR5:
+// the panel renders the proxied page in a srcdoc iframe that loads
+// subresources straight from the upstream, so nothing calls it.
 func (a *App) registerRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/health", a.handleHealth)
 	if a.proxy != nil {
 		mux.Handle(proxyPath, a.proxy)
-		// CR3: the subresource endpoint shares a.proxy's pipeline/transport/
-		// rate-limiter/audit/metrics via the proxyResourceHandler wrapper.
-		mux.Handle(proxyResourcePath, a.proxyResource)
 		// FR1: the frameability-check endpoint runs the same security pipeline.
 		mux.Handle(checkFrameablePath, a.checkFrameable)
 	}

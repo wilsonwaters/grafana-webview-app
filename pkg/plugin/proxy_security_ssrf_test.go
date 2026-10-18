@@ -3,10 +3,15 @@ package plugin
 // Security test suite — SSRF, blocklist, allowlist, scheme validation (TC1, AC
 // 17–22). This suite is HERMETIC: it performs NO real network I/O and NO real
 // DNS. Every test exercises the FULL endpoint stack (the real
-// proxyHandler.ServeHTTP / proxyResourceHandler / checkFrameableHandler) by
-// injecting a stub security.Resolver into a transport built from the production
-// secure dialer (security.NewDialer), so DNS resolution returns canned answers
-// while the real SF4 resolve-then-dial + connect-time guard run unchanged.
+// proxyHandler.ServeHTTP / checkFrameableHandler, and the App's registered
+// resource routes) by injecting a stub security.Resolver into a transport built
+// from the production secure dialer (security.NewDialer), so DNS resolution
+// returns canned answers while the real SF4 resolve-then-dial + connect-time
+// guard run unchanged.
+//
+// FR5 removed the /proxy-resource route. The AC tests that also drove it now
+// assert that the route returns 404 (so it cannot proxy anything), and cover the
+// remaining endpoints (/proxy and /check-frameable) instead.
 //
 // All helper types/functions in this file are file-local and prefixed `tc1` so
 // they cannot collide with helpers in sibling test files landing in this same
@@ -17,7 +22,7 @@ package plugin
 // AC → test mapping (see ai-state/reference/implementation-spec.md lines 321–326):
 //
 //	AC 17 → TestTC1AC17FreshInstallEmptyAllowlistFailsClosed
-//	AC 18 → TestTC1AC18AllowlistEnforcedOnAllThreeEndpoints
+//	AC 18 → TestTC1AC18AllowlistEnforcedOnAllEndpoints
 //	AC 19 → TestTC1AC19AllowlistedHostResolvingToPrivateIsBlocked
 //	AC 20 → TestTC1AC20MetadataAndLinkLocalBlockedRegardlessOfAllowlist
 //	AC 21 → TestTC1AC21DNSRebindingPrevented (+ sub-tests)
@@ -35,11 +40,11 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"sync"
 	"testing"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/wilsonwaters/webview/pkg/security"
 )
 
@@ -190,12 +195,35 @@ func tc1ProxyWithResolver(resolver security.Resolver) *proxyHandler {
 	return p
 }
 
-// tc1DoProxyResource issues GET /proxy-resource?url=<target> against handler.
-func tc1DoProxyResource(handler http.Handler, target string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodGet, proxyResourcePath+"?url="+url.QueryEscape(target), nil)
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	return rec
+// tc1NewApp builds an App from the given settings jsonData, exactly as Grafana
+// does, so a test can drive the real registered resource routes.
+func tc1NewApp(t *testing.T, jsonData string) *App {
+	t.Helper()
+	inst, err := NewApp(context.Background(), backend.AppInstanceSettings{JSONData: []byte(jsonData)})
+	if err != nil {
+		t.Fatalf("NewApp(%s): %v", jsonData, err)
+	}
+	return inst.(*App)
+}
+
+// tc1AppGet issues GET <path>?url=<target> through app.CallResource (the real
+// resource mux) as an Editor and returns the HTTP status.
+func tc1AppGet(t *testing.T, app *App, path, target string) int {
+	t.Helper()
+	var r mockCallResourceResponseSender
+	err := app.CallResource(context.Background(), &backend.CallResourceRequest{
+		PluginContext: backend.PluginContext{User: &backend.User{Login: "editor", Role: orgRoleEditor}},
+		Method:        http.MethodGet,
+		Path:          path,
+		URL:           path + "?url=" + url.QueryEscape(target),
+	}, &r)
+	if err != nil {
+		t.Fatalf("CallResource %s: %v", path, err)
+	}
+	if r.response == nil {
+		t.Fatalf("CallResource %s: no response", path)
+	}
+	return r.response.Status
 }
 
 // -----------------------------------------------------------------------------
@@ -203,10 +231,11 @@ func tc1DoProxyResource(handler http.Handler, target string) *httptest.ResponseR
 // -----------------------------------------------------------------------------
 
 // TestTC1AC17FreshInstallEmptyAllowlistFailsClosed asserts that with the default
-// (empty) allowlist a fresh install denies EVERY proxy request across all three
-// endpoints, failing closed before any upstream is contacted. We give each
+// (empty) allowlist a fresh install denies EVERY proxy request on every
+// endpoint, failing closed before any upstream is contacted. We give each
 // handler a transport that would fail the test if dialled, proving the denial
-// happens pre-fetch.
+// happens pre-fetch. The fresh-install App's real routes are driven too, and
+// the removed /proxy-resource route answers 404.
 func TestTC1AC17FreshInstallEmptyAllowlistFailsClosed(t *testing.T) {
 	// settingsWith(nil) is the fresh-install shape: a nil AllowedDomains maps to a
 	// nil allowlist, which MatchHostname treats as deny-all.
@@ -215,20 +244,26 @@ func TestTC1AC17FreshInstallEmptyAllowlistFailsClosed(t *testing.T) {
 		"http://anything.test/",
 		"https://1.1.1.1/",
 	}
+	freshApp := tc1NewApp(t, "")
 
 	for _, target := range targets {
-		// /proxy and /proxy-resource: allowlist denial is a hard 403.
+		// /proxy: allowlist denial is a hard 403.
 		pProxy := newProxyHandler(settingsWith(nil))
 		pProxy.transport = tc1FailIfDialled(t)
 		if rec := doProxy(pProxy, target); rec.Code != http.StatusForbidden {
 			t.Errorf("/proxy empty allowlist %q: got %d, want 403 (body=%q)", target, rec.Code, rec.Body.String())
 		}
 
-		pResource := newProxyHandler(settingsWith(nil))
-		pResource.transport = tc1FailIfDialled(t)
-		resourceHandler := proxyResourceHandler{p: pResource}
-		if rec := tc1DoProxyResource(resourceHandler, target); rec.Code != http.StatusForbidden {
-			t.Errorf("/proxy-resource empty allowlist %q: got %d, want 403 (body=%q)", target, rec.Code, rec.Body.String())
+		// The same through the fresh-install App's registered routes.
+		if got := tc1AppGet(t, freshApp, "proxy", target); got != http.StatusForbidden {
+			t.Errorf("app /proxy empty allowlist %q: got %d, want 403", target, got)
+		}
+		if got := tc1AppGet(t, freshApp, "check-frameable", target); got != http.StatusForbidden {
+			t.Errorf("app /check-frameable empty allowlist %q: got %d, want 403", target, got)
+		}
+		// /proxy-resource no longer exists (FR5), so it cannot proxy anything.
+		if got := tc1AppGet(t, freshApp, "proxy-resource", target); got != http.StatusNotFound {
+			t.Errorf("app /proxy-resource %q: got %d, want 404 (route removed)", target, got)
 		}
 
 		// /check-frameable: allowlist denial is also a hard 403 (writeDenial with
@@ -259,14 +294,17 @@ type tc1RoundTripFunc func(*http.Request) (*http.Response, error)
 func (f tc1RoundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
 
 // -----------------------------------------------------------------------------
-// AC 18: Allowlist enforcement applies equally to /proxy, /proxy-resource, and
-// /check-frameable.
+// AC 18: Allowlist enforcement applies equally to every endpoint that fetches:
+// /proxy and /check-frameable (/proxy-resource was removed by FR5).
 // -----------------------------------------------------------------------------
 
-// TestTC1AC18AllowlistEnforcedOnAllThreeEndpoints sends a non-allowlisted host
-// to each of the three endpoints with an allowlist of exactly example.com, and
-// asserts every endpoint denies it with 403 before any upstream is contacted.
-func TestTC1AC18AllowlistEnforcedOnAllThreeEndpoints(t *testing.T) {
+// TestTC1AC18AllowlistEnforcedOnAllEndpoints sends a non-allowlisted host to
+// each fetching endpoint with an allowlist of exactly example.com, and asserts
+// every endpoint denies it with 403 before any upstream is contacted. It drives
+// the handlers directly and through the App's registered routes, and asserts
+// the removed /proxy-resource route answers 404, so no route bypasses the
+// allowlist.
+func TestTC1AC18AllowlistEnforcedOnAllEndpoints(t *testing.T) {
 	const target = "https://evil.example/secret"
 	cfg := settingsWith(allowExample(DomainOptions{})) // exact match, subdomains off
 
@@ -276,16 +314,21 @@ func TestTC1AC18AllowlistEnforcedOnAllThreeEndpoints(t *testing.T) {
 		t.Errorf("/proxy non-allowlisted: got %d, want 403 (body=%q)", rec.Code, rec.Body.String())
 	}
 
-	pResource := newProxyHandler(cfg)
-	pResource.transport = tc1FailIfDialled(t)
-	if rec := tc1DoProxyResource(proxyResourceHandler{p: pResource}, target); rec.Code != http.StatusForbidden {
-		t.Errorf("/proxy-resource non-allowlisted: got %d, want 403 (body=%q)", rec.Code, rec.Body.String())
-	}
-
 	pFrame := newProxyHandler(cfg)
 	pFrame.transport = tc1FailIfDialled(t)
 	if rec := doCheckFrameable(checkFrameableHandler{p: pFrame}, target); rec.Code != http.StatusForbidden {
 		t.Errorf("/check-frameable non-allowlisted: got %d, want 403 (body=%q)", rec.Code, rec.Body.String())
+	}
+
+	app := tc1NewApp(t, `{"allowedDomains":[{"domain":"example.com"}]}`)
+	for path, want := range map[string]int{
+		"proxy":           http.StatusForbidden,
+		"check-frameable": http.StatusForbidden,
+		"proxy-resource":  http.StatusNotFound,
+	} {
+		if got := tc1AppGet(t, app, path, target); got != want {
+			t.Errorf("app /%s non-allowlisted: got %d, want %d", path, got, want)
+		}
 	}
 }
 
@@ -297,10 +340,11 @@ func TestTC1AC18AllowlistEnforcedOnAllThreeEndpoints(t *testing.T) {
 
 // TestTC1AC19AllowlistedHostResolvingToPrivateIsBlocked drives an ALLOWLISTED
 // hostname (example.com) whose DNS resolves to RFC 1918 / private space through
-// the real /proxy and /proxy-resource stacks (transport = secure dialer over a
-// stub resolver). The pipeline passes the allowlist gate, then the SF4 dial-time
-// resolve-then-dial blocks the private IP, so the ErrorHandler maps it to 403.
-// It also asserts the library-level resolved-IP rejection directly via
+// the real /proxy stack (transport = secure dialer over a stub resolver). The
+// pipeline passes the allowlist gate, then the SF4 dial-time resolve-then-dial
+// blocks the private IP, so the ErrorHandler maps it to 403. /check-frameable
+// must never dial the private IP either (its verdict falls back to proxy). It
+// also asserts the library-level resolved-IP rejection directly via
 // ResolveAndValidate (ReasonBlockedIP / private).
 func TestTC1AC19AllowlistedHostResolvingToPrivateIsBlocked(t *testing.T) {
 	privateIPs := []struct {
@@ -330,11 +374,16 @@ func TestTC1AC19AllowlistedHostResolvingToPrivateIsBlocked(t *testing.T) {
 				t.Errorf("/proxy private-resolving allowlisted host: got %d, want 403 (body=%q)", rec.Code, rec.Body.String())
 			}
 
-			// End-to-end through /proxy-resource: same outcome.
-			pResource := newProxyHandler(settingsWith(allowExample(DomainOptions{})))
-			pResource.transport = tc1ResolverTransport(tc1NewStubResolver(tc.ip))
-			if rec := tc1DoProxyResource(proxyResourceHandler{p: pResource}, "https://example.com/style.css"); rec.Code != http.StatusForbidden {
-				t.Errorf("/proxy-resource private-resolving allowlisted host: got %d, want 403 (body=%q)", rec.Code, rec.Body.String())
+			// End-to-end through /check-frameable: the private IP is never dialled.
+			recDialer := &tc1RecordingDialer{}
+			pFrame := newProxyHandler(settingsWith(allowExample(DomainOptions{})))
+			pFrame.transport = tc1AllowlistedTransport(tc1NewStubResolver(tc.ip), recDialer)
+			rec := doCheckFrameable(checkFrameableHandler{p: pFrame}, "https://example.com/page")
+			if got := decodeFrameable(t, rec); got.Frameable || got.RecommendedMode != recommendedModeProxy {
+				t.Errorf("/check-frameable private-resolving allowlisted host: verdict %+v, want proxy fallback", got)
+			}
+			if dialed := recDialer.addrs(); len(dialed) != 0 {
+				t.Errorf("/check-frameable private-resolving allowlisted host: dialled %v, want no dial", dialed)
 			}
 		})
 	}
@@ -535,7 +584,7 @@ func TestTC1AC21DNSRebindingPrevented(t *testing.T) {
 // -----------------------------------------------------------------------------
 
 // TestTC1AC22NonHTTPSchemesRejected drives a range of non-http(s) schemes
-// through the full /proxy and /proxy-resource stacks (allowlisted host) and
+// through the full /proxy and /check-frameable stacks (allowlisted host) and
 // asserts each is rejected with 400 before any upstream is contacted. The
 // allowlist lists example.com so the denial is decided by the scheme gate (SF2),
 // not the allowlist — locking that a bad scheme is a 400 client error.
@@ -557,10 +606,10 @@ func TestTC1AC22NonHTTPSchemesRejected(t *testing.T) {
 			t.Errorf("/proxy scheme %q: got %d, want 400 (body=%q)", target, rec.Code, rec.Body.String())
 		}
 
-		pResource := newProxyHandler(cfg)
-		pResource.transport = tc1FailIfDialled(t)
-		if rec := tc1DoProxyResource(proxyResourceHandler{p: pResource}, target); rec.Code != http.StatusBadRequest {
-			t.Errorf("/proxy-resource scheme %q: got %d, want 400 (body=%q)", target, rec.Code, rec.Body.String())
+		pFrame := newProxyHandler(cfg)
+		pFrame.transport = tc1FailIfDialled(t)
+		if rec := doCheckFrameable(checkFrameableHandler{p: pFrame}, target); rec.Code != http.StatusBadRequest {
+			t.Errorf("/check-frameable scheme %q: got %d, want 400 (body=%q)", target, rec.Code, rec.Body.String())
 		}
 	}
 }

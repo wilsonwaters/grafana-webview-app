@@ -48,8 +48,8 @@ const proxyPath = "/proxy"
 
 // wvRedirParam is the reserved, internal query parameter the proxy uses to carry
 // the redirect-hop depth across browser-driven re-entries (CR4). It lives ONLY on
-// the proxy URL (the /proxy?url=… or /proxy-resource?url=… link the browser
-// follows), NEVER on the upstream request: the outbound request is rebuilt purely
+// the proxy URL (the /proxy?url=… Location the panel's fetch follows), NEVER on
+// the upstream request: the outbound request is rebuilt purely
 // from the `url` target param (see serveProxy's Rewrite / buildTargetURL), so this
 // control param is never forwarded upstream. serve reads it inbound to learn the
 // current hop depth; ModifyResponse writes depth+1 onto the rewritten Location.
@@ -432,16 +432,13 @@ func writeDenial(w http.ResponseWriter, reason, message string) string {
 	return reason
 }
 
-// endpointTopLevel / endpointResource / endpointCheckFrameable name the
-// endpoints that share the security pipeline. The value is recorded on the
-// audit log's `endpoint` field so the streams are distinguishable even though
-// they share the metrics collectors (sharing is acceptable — see
-// newProxyMetrics). endpointTopLevel is the HTML-rewriting /proxy endpoint;
-// endpointResource is the non-rewriting, Content-Type-preserving /proxy-resource
-// subresource endpoint (CR3); endpointCheckFrameable is /check-frameable (FR1).
+// endpointTopLevel / endpointCheckFrameable name the endpoints that share the
+// security pipeline: the HTML-rewriting /proxy endpoint and /check-frameable
+// (FR1). The value is recorded on the audit log's `endpoint` field so the
+// streams are distinguishable even though they share the metrics collectors
+// (sharing is acceptable — see newProxyMetrics).
 const (
 	endpointTopLevel       = "proxy"
-	endpointResource       = "proxy-resource"
 	endpointCheckFrameable = "check-frameable"
 )
 
@@ -514,53 +511,22 @@ func (p *proxyHandler) endAudit(req *http.Request, a *requestAudit) {
 	}
 }
 
-// proxyResourceHandler adapts a proxyHandler to serve the /proxy-resource
-// subresource endpoint (CR3). It carries NO state of its own: it shares the SAME
-// pipeline, transport, rate limiter, audit logger and metrics as the owning
-// proxyHandler, and differs ONLY in the ModifyResponse step — no HTML rewriting,
-// so the upstream Content-Type and body (including a gzip Content-Encoding) are
-// passed through unchanged, subject to the P4 size limit. a.proxyResource is
-// constructed once alongside a.proxy and registered at proxyResourcePath.
-type proxyResourceHandler struct {
-	p *proxyHandler
-}
-
-// ServeHTTP implements the /proxy-resource endpoint. It runs the IDENTICAL
-// security pipeline + header policy as /proxy via the shared serve method,
-// selecting the resource ModifyResponse (framing + response-header strip only —
-// NO HTML rewrite; Content-Type and body streamed through unchanged).
-func (h proxyResourceHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	h.p.serve(w, req, endpointResource)
-}
-
-// ServeHTTP implements the /proxy endpoint. It delegates to the shared serve
-// method, which runs the full security pipeline; the endpoint argument selects
-// the HTML-rewriting ModifyResponse for /proxy.
-func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	p.serve(w, req, endpointTopLevel)
-}
-
-// serve runs the FULL security pipeline shared by /proxy and /proxy-resource —
-// BEFORE any upstream connection — because httputil's Director/Rewrite cannot
+// ServeHTTP implements the /proxy endpoint. It runs the FULL security pipeline
+// BEFORE any upstream connection, because httputil's Director/Rewrite cannot
 // return an error and must never be the place a denial is decided. Only once
 // every gate passes does it build and invoke a ReverseProxy whose Transport is
-// the SF4 secure dialer and whose ModifyResponse is selected by `endpoint`:
-// /proxy strips framing headers and HTML-rewrites the body; /proxy-resource
-// strips framing/response headers only and streams the body (and Content-Type)
-// through unchanged.
+// the SF4 secure dialer and whose ModifyResponse strips framing and dangerous
+// response headers and HTML-rewrites the body for the panel's srcdoc iframe.
 //
 // Pipeline order: parse url param → SF2 ValidateURL (scheme/userinfo/malformed) →
 // SF3 MatchHostname (empty allowlist ⇒ deny) → SF2 port re-check against the
 // matched domain's AllowedPorts → SF5 Allow (rate tiers) and Acquire
 // (concurrency). On any denial the handler writes the mapped status and returns
 // without contacting the upstream.
-//
-// Both endpoints share the audit log (P5) and metrics (P6); the `endpoint`
-// value distinguishes the two streams on the audit entry's `endpoint` field.
-func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint string) {
+func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// P5 / AC 28 + P6 / AC 29: exactly one audit entry and one metrics
 	// observation per request, emitted by the deferred endAudit on every path.
-	a := p.beginAudit(w, endpoint)
+	a := p.beginAudit(w, endpointTopLevel)
 	defer p.endAudit(req, a)
 	w = a.rec
 
@@ -660,10 +626,9 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	depth := redirectDepthOf(req)
 
 	// CR5: read the author hide-selectors from the repeated `hide` query params.
-	// These are applied ONLY to top-level proxied HTML (in prepareHTMLBody via
+	// These are applied ONLY to proxied HTML (in prepareHTMLBody via
 	// rewriteHTML); they are a PROXY-request-only control and are never forwarded
-	// upstream (the outbound URL is rebuilt from `url` alone). For /proxy-resource
-	// the values are read but unused — subresources are not HTML documents.
+	// upstream (the outbound URL is rebuilt from `url` alone).
 	hideSelectors := hideSelectorsOf(req)
 
 	// Build the per-request relaxation Policy from the matched domain's opt-in.
@@ -678,10 +643,8 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// ReverseProxy's ErrorHandler (a dial-time blocked IP/metadata host, an
 	// over-size response, an upstream timeout, or a gateway failure). serveProxy
 	// returns the denial-reason token for that outcome (empty when the upstream
-	// was served cleanly) so the deferred metrics emission records it. The
-	// endpoint selects the ModifyResponse: /proxy HTML-rewrites the body,
-	// /proxy-resource passes the body + Content-Type through unchanged.
-	a.denied = p.serveProxy(w, req, target, endpoint, depth, hideSelectors, pol)
+	// was served cleanly) so the deferred metrics emission records it.
+	a.denied = p.serveProxy(w, req, target, depth, hideSelectors, pol)
 }
 
 // hideSelectorsOf reads the repeated `hide` query params (CR5) from the inbound
@@ -772,17 +735,9 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 // secure-dialer-backed transport, ModifyResponse strips framing headers and
 // re-applies CORS, and ErrorHandler maps transport/upstream failures to clean
 // status codes (403 for a blocked IP/metadata host caught at dial time, 502/504
-// otherwise).
-//
-// The endpoint argument selects the ModifyResponse body handling AFTER the
-// shared size guard (P4) and framing/response-header strip (P1/P3):
-//   - endpointTopLevel (/proxy): prepareHTMLBody detects HTML, gzip-decodes when
-//     present, and HTML-rewrites the body (CR2). Non-HTML passes through.
-//   - endpointResource (/proxy-resource): NO rewriting. The upstream Content-Type
-//     is PRESERVED and the body (including a gzip Content-Encoding) streams through
-//     unchanged so the browser interprets CSS/JS/images and decompresses gzip
-//     itself. CR3 deliberately does NOT decode subresources — there is nothing to
-//     rewrite, so the compressed bytes pass straight through.
+// otherwise). After the size guard (P4) and the framing/response-header strip
+// (P1/P3), prepareHTMLBody detects HTML, gzip-decodes when present, and
+// HTML-rewrites the body (CR2, FR5). Non-HTML passes through.
 //
 // It returns the denial-reason token for a request the ErrorHandler rejected
 // (size-limit / timeout / ip-blocklist / metadata / upstream) or the empty
@@ -790,7 +745,7 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 // metrics emission can record denials_total for the right reason. The ErrorHandler
 // runs synchronously inside rp.ServeHTTP, so capturing into a local here is
 // race-free for this single-goroutine-per-request handler.
-func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL, endpoint string, depth int, hideSelectors []string, pol security.Policy) string {
+func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL, depth int, hideSelectors []string, pol security.Policy) string {
 	maxBytes := p.cfg.MaxResponseBytes
 
 	var denied string
@@ -811,12 +766,10 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			stripRequestHeaders(r.Out.Header)
 		},
 		// P4: enforce the max-response-body size, then the P1/P3 framing/header
-		// strip, then the endpoint-specific body step. The size step runs FIRST
-		// so an over-Content-Length response short-circuits with errResponseTooLarge
-		// before any header rewriting; the framing/header strip (P1/P3) runs next on
-		// the headers (identical for both endpoints); finally the body is either
-		// HTML-rewritten (/proxy) or left untouched (/proxy-resource — Content-Type
-		// and body, incl. gzip, streamed through unchanged).
+		// strip, then the body step. The size step runs FIRST so an
+		// over-Content-Length response short-circuits with errResponseTooLarge
+		// before any header rewriting; the framing/header strip (P1/P3) runs next
+		// on the headers; finally an HTML body is rewritten.
 		ModifyResponse: func(resp *http.Response) error {
 			if err := enforceResponseSize(resp, maxBytes); err != nil {
 				return err
@@ -831,15 +784,8 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			// blocked at the redirect step). A non-redirect status falls through
 			// unchanged. handled==true means the redirect path fully decided the
 			// response, so the body steps below must be skipped.
-			if handled, rerr := p.handleRedirect(resp, target, endpoint, depth); handled || rerr != nil {
+			if handled, rerr := p.handleRedirect(resp, target, depth); handled || rerr != nil {
 				return rerr
-			}
-			if endpoint == endpointResource {
-				// CR3: subresource passthrough. No HTML rewrite, no gzip decode —
-				// the upstream Content-Type and (possibly gzip) body are preserved
-				// and streamed through, bounded only by the P4 limited body that
-				// enforceResponseSize already wrapped around resp.Body.
-				return nil
 			}
 			return prepareHTMLBody(resp, maxBytes, target, p.logger, hideSelectors)
 		},
@@ -948,9 +894,10 @@ func isRedirectStatus(status int) bool {
 
 // handleRedirect implements CR4 redirect handling for a proxied response, run in
 // ModifyResponse AFTER the size guard and framing/header strip but BEFORE the
-// endpoint body step. The proxy does NOT follow redirects server-side; instead it
-// rewrites the Location to a proxy URL so the BROWSER re-enters the proxy for the
-// next hop, where the FULL security pipeline re-validates that hop.
+// body step. The proxy does NOT follow redirects server-side; instead it
+// rewrites the Location to a /proxy URL so the browser (the panel's fetch)
+// re-enters the proxy for the next hop, where the FULL security pipeline
+// re-validates that hop.
 //
 // It returns (handled, err):
 //   - handled==false, err==nil: not a (followable) redirect — caller continues to
@@ -959,9 +906,9 @@ func isRedirectStatus(status int) bool {
 //     non-http(s) scheme (data:/mailto:/…), which is left as-is rather than
 //     rewritten into a non-fetchable proxy URL.
 //   - handled==true, err==nil: the redirect was rewritten in place. Location now
-//     points at a proxy URL (/proxy or /proxy-resource, matching endpoint) carrying
-//     the encoded absolute next-hop target and _wvredir=depth+1. The body step is
-//     skipped (a redirect body is an inert courtesy page).
+//     points at a /proxy URL carrying the encoded absolute next-hop target and
+//     _wvredir=depth+1. The body step is skipped (a redirect body is an inert
+//     courtesy page).
 //   - err!=nil: the redirect is REFUSED at the redirect step. err is
 //     errRedirectDepthExceeded (depth cap reached / MaxRedirects==0 ⇒ redirects
 //     disabled) or errRedirectBlocked (resolved Location host fails the SF2+SF3
@@ -976,7 +923,7 @@ func isRedirectStatus(status int) bool {
 // the browser only ever talks to the proxy — never the upstream directly — a
 // destination that fails allowlist (here) or IP-blocklist (on re-request) is
 // refused before the browser can contact it.
-func (p *proxyHandler) handleRedirect(resp *http.Response, target *url.URL, endpoint string, depth int) (bool, error) {
+func (p *proxyHandler) handleRedirect(resp *http.Response, target *url.URL, depth int) (bool, error) {
 	if resp == nil || !isRedirectStatus(resp.StatusCode) {
 		return false, nil
 	}
@@ -1029,15 +976,9 @@ func (p *proxyHandler) handleRedirect(resp *http.Response, target *url.URL, endp
 		return false, errRedirectBlocked
 	}
 
-	// Rewrite Location to a proxy URL the browser will re-enter, carrying the
-	// encoded absolute next-hop target and the incremented hop depth. The base path
-	// is the SAME endpoint the current request hit, so a redirected subresource
-	// stays on /proxy-resource and a redirected page stays on /proxy.
-	base := resourceBase + proxyPath
-	if endpoint == endpointResource {
-		base = resourceBase + proxyResourcePath
-	}
-	resp.Header.Set("Location", buildRedirectProxyURL(base, abs.String(), depth+1))
+	// Rewrite Location to a /proxy URL the panel's fetch will re-enter, carrying
+	// the encoded absolute next-hop target and the incremented hop depth.
+	resp.Header.Set("Location", buildRedirectProxyURL(resourceBase+proxyPath, abs.String(), depth+1))
 	return true, nil
 }
 

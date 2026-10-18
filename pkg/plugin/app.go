@@ -37,12 +37,6 @@ type App struct {
 	// for concurrent use.
 	proxy *proxyHandler
 
-	// proxyResource is the /proxy-resource subresource handler (CR3). It wraps
-	// the SAME proxyHandler — sharing its pipeline, transport, rate limiter,
-	// audit logger and metrics — and differs only in serving subresources without
-	// HTML rewriting (Content-Type preserved, body streamed through unchanged).
-	proxyResource proxyResourceHandler
-
 	// checkFrameable is the /check-frameable endpoint handler (FR1). It wraps the
 	// SAME proxyHandler — sharing its settings, allowlist, rate limiter and SF4
 	// secure-dialer transport — and runs the identical pre-fetch security pipeline
@@ -67,9 +61,6 @@ func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemg
 	// limiter (including per-domain overrides) and the secure-dialer-backed
 	// transport; keyed rate-limit buckets are created lazily on first use.
 	app.proxy = newProxyHandler(cfg)
-	// The subresource endpoint shares the same proxyHandler (and thus the same
-	// pipeline, transport, rate limiter, audit logger and metrics).
-	app.proxyResource = proxyResourceHandler{p: app.proxy}
 	// FR1: the /check-frameable endpoint shares the same proxyHandler (pipeline,
 	// transport, rate limiter) and runs the identical validation before fetching.
 	app.checkFrameable = checkFrameableHandler{p: app.proxy}

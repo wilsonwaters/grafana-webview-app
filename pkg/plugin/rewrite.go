@@ -19,10 +19,6 @@ import (
 // so the panel's fetch of /proxy re-enters the proxy for the next hop.
 const resourceBase = "/api/plugins/wilsonwaters-webview-app/resources"
 
-// proxyResourcePath is the resource path of the subresource-proxy endpoint
-// (CR3).
-const proxyResourcePath = "/proxy-resource"
-
 // buildRedirectProxyURL assembles basePath?url=<enc(target)>&_wvredir=<depth> via
 // url.Values (CR4). When the browser follows a rewritten Location, serve reads
 // _wvredir back to learn the hop depth and enforce the MaxRedirects cap. Both
