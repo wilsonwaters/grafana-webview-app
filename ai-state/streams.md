@@ -147,6 +147,12 @@ release blocked on #123 (nested-logo validator ERROR) + the expired `GRAFANA_ACC
 Levitate temporarily advisory (#124, revert at 13.x bump).
 
 ### 9. Documentation & Release (Path 1)  —  `docs-release`
+**Status (2026-10-18):** DR1–DR7 DONE (#126,#125,#134,#128,#127,#132,#135) — all repo docs, developer guide,
+configuration guide (+screenshots), administration guide, threat-model/architecture/SECURITY.md + handler
+reference, installation + troubleshooting, README polish + example dashboard. Release-blocker #123 (nested logo)
+cleared (#130). **Only DR8 (private-signed v1.0 release) remains — awaiting stakeholder release-readiness go/no-go**
+(see OPEN-QUESTIONS / PROGRESS: #129 allowlist UI, #113 provisioning, 12.3–13.1 vs 13.2+ matrix per #131).
+
 **Outcome:** Complete repo + `docs/` documentation, example dashboard, and a private-signed
 v1.0 release for self-hosted users.
 **Capabilities:** developer/installation/configuration/administration/troubleshooting/

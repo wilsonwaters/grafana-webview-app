@@ -215,6 +215,13 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#135/#134/#132/#130 (DR7/DR3/DR6/#123)** merged — **docs-release content COMPLETE (DR1–DR7).** DR7: README
+  polish (hero, badges, quick-start, doc links, known-limitations, pipeline-order nit fixed) + example dashboard
+  (direct + proxy panels, real options, not auto-provisioned per Q15/#113). DR3: config guide + 7 screenshots.
+  DR6: installation + troubleshooting. #130: nested-logo validator ERROR cleared. All accuracy-reviewed, no
+  blocking. **ONLY DR8 (private-signed v1.0 release) REMAINS — stakeholder-gated (tag push publishes a GitHub
+  release; do NOT run autonomously).** Pending release-readiness decisions: #129 (allowlist UI), #113
+  (provisioning), release matrix 12.3–13.1 vs 13.2+ (#131). Minor: #133 (stale comments).
 - **#128 (DR4)** merged — administration guide (allowlist/tuning/audit/metrics/incident-response), config keys +
   metric names + reason→status table verified accurate. Review initially REQUEST-CHANGES (it pointed admins at
   the bundled Config page for the allowlist — which only edits apiUrl/apiKey and **overwrites jsonData if saved**,
