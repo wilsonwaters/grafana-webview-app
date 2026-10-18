@@ -215,6 +215,14 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#136 (DR8 release-prep)** merged — v0.0.1 (alpha): package.json 0.0.1, plugin.json description/keywords,
+  CHANGELOG 0.0.1 alpha entry (known limits: #102/#129/#131). Green on supported range. **⚠️ TAGGING BLOCKED:**
+  `git push origin v0.0.1` → **HTTP 403 policy denial** — this session's git proxy allows branch pushes (main +
+  claude/*) but NOT `refs/tags/*`; no GitHub MCP create-tag/release tool exists. **DR8 final step is a MAINTAINER
+  action:** on an up-to-date main (`ae49fed` or later), run `git tag v0.0.1 && git push origin v0.0.1` → triggers
+  `release.yml` → build + private-sign (token valid) + validator gate (ERROR cleared via #123) → a DRAFT GitHub
+  release to review + Publish. Everything is prepped; only the tag push remains. **Stakeholder decided: ship as
+  ALPHA v0.0.1; allowlist UI (#129) + Grafana 13.2+ (#131) + proxy fixes are follow-up PRs.**
 - **#135/#134/#132/#130 (DR7/DR3/DR6/#123)** merged — **docs-release content COMPLETE (DR1–DR7).** DR7: README
   polish (hero, badges, quick-start, doc links, known-limitations, pipeline-order nit fixed) + example dashboard
   (direct + proxy panels, real options, not auto-provisioned per Q15/#113). DR3: config guide + 7 screenshots.

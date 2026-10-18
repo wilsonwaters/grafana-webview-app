@@ -50,7 +50,7 @@
 | DR5 | #53 | Threat model, SECURITY.md content, architecture docs, and backend handler reference | docs-release | L | done |
 | DR6 | #54 | Installation and troubleshooting docs | docs-release | M | done |
 | DR7 | #55 | README polish and example dashboard JSON | docs-release | M | done |
-| DR8 | #56 | Private-signed v1.0 release (Path 1 complete) | docs-release | M | blocked |
+| DR8 | #56 | Private-signed v1.0 release (Path 1 complete) | docs-release | M | prep-merged; MAINTAINER must push tag v0.0.1 |
 | CP1 | #57 | Pre-submission plugin-validator run and metadata completeness check | catalog-prep | M | blocked |
 | CP2 | #58 | Self security audit against the threat model with evidence checklist | catalog-prep | M | blocked |
 | CP3 | #59 | Submission cover letter — docs/publishing.md | catalog-prep | M | blocked |
