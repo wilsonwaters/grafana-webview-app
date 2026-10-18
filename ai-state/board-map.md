@@ -45,11 +45,11 @@
 | — | #124 | ci: Levitate forward-compat check made advisory (TEMPORARY — revert at 13.x bump) | testing-cicd | S | in-review (PR open) |
 | DR1 | #49 | Flesh out repo docs — README, CHANGELOG, CONTRIBUTING, CODE_OF_CONDUCT | docs-release | M | done |
 | DR2 | #50 | Developer guide — setup, workflow, testing, debugging | docs-release | M | done |
-| DR3 | #51 | Configuration guide for dashboard authors | docs-release | M | in-progress |
+| DR3 | #51 | Configuration guide for dashboard authors | docs-release | M | done |
 | DR4 | #52 | Administration guide — allowlist, rate limits, audit logging, metrics, incident response | docs-release | L | done |
 | DR5 | #53 | Threat model, SECURITY.md content, architecture docs, and backend handler reference | docs-release | L | done |
 | DR6 | #54 | Installation and troubleshooting docs | docs-release | M | done |
-| DR7 | #55 | README polish and example dashboard JSON | docs-release | M | blocked |
+| DR7 | #55 | README polish and example dashboard JSON | docs-release | M | in-progress |
 | DR8 | #56 | Private-signed v1.0 release (Path 1 complete) | docs-release | M | blocked |
 | CP1 | #57 | Pre-submission plugin-validator run and metadata completeness check | catalog-prep | M | blocked |
 | CP2 | #58 | Self security audit against the threat model with evidence checklist | catalog-prep | M | blocked |
