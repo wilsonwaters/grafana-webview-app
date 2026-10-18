@@ -28,9 +28,15 @@ jobs:
       - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.0.2
         id: build-plugin
         # Private signing for self-hosted distribution (Path 1). Reads the Grafana
-        # Cloud access policy token from the GRAFANA_ACCESS_POLICY_TOKEN secret and
-        # signs for the deployment host (GRAFANA_INSTANCE_URL) plus localhost so the
-        # released build can also be smoke-tested locally.
+        # Cloud access policy token from the GRAFANA_ACCESS_POLICY_TOKEN secret.
+        # The action signs by running our package.json `sign` script, which carries
+        # the private-signing rootUrls (deployment host + localhost) itself -- the
+        # build-plugin action has NO rootUrls input, so the URLs live in the sign
+        # script (single source of truth, shared with ci.yml).
+        # node-version/go-version are pinned to match this repo's toolchain
+        # (package.json engines node>=22; go.mod go 1.26.3). The action defaults
+        # (node 20 / go 1.21) do NOT match and caused the v0.0.1 release to fail
+        # (npm install crashed under Node 20; mage would build against the wrong Go).
         # `attestation: true` publishes a signed build-provenance attestation for
         # the packaged zip (clears the validator's provenance recommendation and
         # lets installers verify the artifact was built from this source).
@@ -39,7 +45,8 @@ jobs:
         # See docs/signing.md. (Token: https://grafana.com/developers/plugin-tools/publish-a-plugin/sign-a-plugin#generate-an-access-policy-token)
         with:
           policy_token: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
-          sign_root_urls: ${{ vars.GRAFANA_INSTANCE_URL }},http://localhost:3000
+          node-version: '22'
+          go-version: '1.26.3'
           attestation: true
 
       # AC 32: @grafana/plugin-validator release GATE. Runs the full validator

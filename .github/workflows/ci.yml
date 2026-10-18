@@ -94,10 +94,13 @@ jobs:
 
       # Private signing. The plugin is not in the Grafana catalog, so a public/
       # community signature would be rejected (HTTP 409). We sign privately for the
-      # deployment host (GRAFANA_INSTANCE_URL) plus http://localhost:3000 so the
-      # signed build also loads in the CI e2e Grafana and in local testing.
+      # deployment host plus http://localhost:3000 so the signed build also loads in
+      # the CI e2e Grafana and in local testing. The rootUrls live in the package.json
+      # `sign` script (single source of truth, shared with the release workflow) --
+      # do not pass a `-- --rootUrls` override here or sign-plugin receives the flag
+      # twice.
       - name: Sign plugin (private)
-        run: npm run sign -- --rootUrls "http://localhost:3000,${{ vars.GRAFANA_INSTANCE_URL }}"
+        run: npm run sign
         if: ${{ env.GRAFANA_ACCESS_POLICY_TOKEN != '' }}
 
       - name: Get plugin metadata
