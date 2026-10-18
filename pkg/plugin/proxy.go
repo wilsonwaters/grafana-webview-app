@@ -129,6 +129,12 @@ var strippedResponseHeaders = []string{
 	"Public-Key-Pins",             // HPKP: would pin cert keys against the Grafana origin
 	"Public-Key-Pins-Report-Only", // HPKP report-only sibling: same pinning policy, report mode
 	"Clear-Site-Data",             // could wipe the viewer's cookies/storage/cache for the Grafana origin
+
+	// Client-side navigation — a browser honours "Refresh: 0; url=..." like a
+	// redirect, but it bypasses the per-hop redirect re-validation (CR4) that
+	// only Location gets (VR-5). The <meta http-equiv=refresh> twin is removed
+	// by the rewriter.
+	"Refresh",
 }
 
 // xGrafanaHeaderPrefix is swept (case-insensitively) off every outgoing request:
