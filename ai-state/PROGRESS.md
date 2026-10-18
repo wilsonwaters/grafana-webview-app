@@ -215,6 +215,7 @@ LESSON: verify actual GitHub Actions status on each PR, not only local gates.
 
 ## Last completions
 
+- **#137 (release-fix)** merged — fixes the failed v0.0.1 release run: release.yml now pins node-version 22 (was Node-20 default → npm install edgesOut crash on the react-data-grid ssh git dep) + go-version 1.26.3 (go.mod), drops the invalid sign_root_urls input; package.json `sign` carries --rootUrls (localhost + graphs.alintech.com.au; ci.yml sign simplified); lockfile synced to 0.0.1. Locally verified (Node-22 npm install + build + mage build:linux ok; sign cmd carries rootUrls). CI build+sign + supported-range e2e green. **NEXT: maintainer re-tags v0.0.1 on current main (1d47b77) to re-trigger the release** (delete+re-push v0.0.1, or tag v0.0.2).
 - **#136 (DR8 release-prep)** merged — v0.0.1 (alpha): package.json 0.0.1, plugin.json description/keywords,
   CHANGELOG 0.0.1 alpha entry (known limits: #102/#129/#131). Green on supported range. **⚠️ TAGGING BLOCKED:**
   `git push origin v0.0.1` → **HTTP 403 policy denial** — this session's git proxy allows branch pushes (main +
