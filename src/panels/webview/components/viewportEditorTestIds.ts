@@ -5,6 +5,8 @@ export const viewportEditorTestIds = {
   iframe: 'data-testid webview-viewport-editor-iframe',
   /** The empty-URL hint shown when no URL is configured. */
   hint: 'data-testid webview-viewport-editor-hint',
+  /** The error shown instead of the iframe when the URL is not an absolute http(s) URL (VR-1). */
+  invalidUrl: 'data-testid webview-viewport-editor-invalid-url',
   /** The live X / Y / zoom readout. */
   readout: 'data-testid webview-viewport-editor-readout',
   /** Numeric input for viewportX. */

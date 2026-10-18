@@ -5,6 +5,8 @@ import { useStyles2 } from '@grafana/ui';
 import { normalizeOptions, type PanelOptions } from '../../../types';
 import { buildViewportTransform } from '../viewport';
 import { buildProxySrc, resolveLoadMode } from '../loadMode';
+import { iframeSandbox } from '../sandbox';
+import { validateWebViewUrl } from '../url';
 import { useBackendAvailable } from '../useBackendAvailable';
 import { webViewPanelTestIds } from './testIds';
 
@@ -34,6 +36,15 @@ type Props = PanelProps<PanelOptions>;
  *   the browser blocks (same-origin policy). `hideSelectors` is preserved in the
  *   schema and will be applied server-side during HTML rewriting in proxy mode —
  *   see stream content-rewriting task CR5.
+ *
+ * URL safety (VR-1): the URL is checked with `validateWebViewUrl` on every
+ * render, before any iframe is built. A URL that is not an absolute `http:` or
+ * `https:` URL renders an accessible error message and never an iframe. This
+ * check is the security control: saved dashboards can hold any value.
+ *
+ * Sandbox (VR-2): the iframe `sandbox` value comes from `iframeSandbox`. Proxy
+ * mode never gets `allow-same-origin`. Direct mode gets it only for a URL on a
+ * different origin from Grafana.
  *
  * Multi-instance safety: no module-level mutable state, no fixed DOM ids. Each
  * component instance is independently keyed by its own React state (refreshKey),
@@ -125,6 +136,10 @@ export function WebViewPanel({ options, width, height }: Props) {
     );
   }
 
+  // VR-1: validate before anything else. This runs at render time in both load
+  // modes, so a saved dashboard with an unsafe URL never produces an iframe.
+  const urlCheck = validateWebViewUrl(opts.url);
+
   const transform = buildViewportTransform(opts);
 
   // The debug overlay is rendered in our own DOM (not inside the iframe, which is
@@ -152,6 +167,14 @@ export function WebViewPanel({ options, width, height }: Props) {
     </div>
   );
 
+  if (!urlCheck.valid) {
+    return renderContainer(
+      <div className={styles.empty} role="alert" data-testid={webViewPanelTestIds.invalidUrl}>
+        This URL cannot be displayed. {urlCheck.message}
+      </div>
+    );
+  }
+
   const renderIframe = (src: string) => (
     <iframe
       // PC5: refreshKey forces a fresh iframe mount on each auto-refresh tick.
@@ -162,8 +185,8 @@ export function WebViewPanel({ options, width, height }: Props) {
       src={src}
       data-testid={webViewPanelTestIds.iframe}
       className={styles.iframe}
-      // SECURITY: never broaden this sandbox value.
-      sandbox="allow-scripts allow-same-origin"
+      // SECURITY (VR-2): the sandbox value comes from the shared per-mode helper.
+      sandbox={iframeSandbox(resolvedMode, urlCheck.url)}
       referrerPolicy="no-referrer"
       style={{
         width: opts.iframeWidth,
@@ -205,12 +228,12 @@ export function WebViewPanel({ options, width, height }: Props) {
     }
 
     // Settled available: render the proxy iframe exactly as before.
-    return renderContainer(renderIframe(buildProxySrc(opts)));
+    return renderContainer(renderIframe(buildProxySrc({ ...opts, url: urlCheck.url })));
   }
 
   // Direct mode: load the raw URL (cross-origin) immediately — no backend needed,
   // never waits on the probe.
-  return renderContainer(renderIframe(opts.url));
+  return renderContainer(renderIframe(urlCheck.url));
 }
 
 const getStyles = (theme: GrafanaTheme2) => ({

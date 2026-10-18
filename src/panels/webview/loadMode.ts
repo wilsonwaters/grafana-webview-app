@@ -17,6 +17,9 @@ export const PLUGIN_ID = 'wilsonwaters-webview-app';
  */
 export const PROXY_RESOURCE_BASE = `/api/plugins/${PLUGIN_ID}/resources/proxy`;
 
+/** The load mode a panel actually renders with, after `auto` is resolved. */
+export type ResolvedLoadMode = 'direct' | 'proxy';
+
 /**
  * Resolves the effective load mode for the view-mode render.
  *
@@ -27,7 +30,7 @@ export const PROXY_RESOURCE_BASE = `/api/plugins/${PLUGIN_ID}/resources/proxy`;
  *
  * Pure function — safe to unit test in isolation.
  */
-export function resolveLoadMode(opts: PanelOptions): 'direct' | 'proxy' {
+export function resolveLoadMode(opts: PanelOptions): ResolvedLoadMode {
   if (opts.loadMode === 'direct') {
     return 'direct';
   }

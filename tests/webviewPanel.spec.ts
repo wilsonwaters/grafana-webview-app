@@ -26,7 +26,8 @@ test.describe('Web View panel registration', () => {
     const iframe = panelEditPage.panel.locator.getByTestId('data-testid webview-panel-iframe');
     await expect(iframe).toBeVisible();
     await expect(iframe).toHaveAttribute('src', 'https://example.com');
-    // SECURITY: the iframe must use exactly this sandbox value — never broaden it.
+    // SECURITY (VR-2): a cross-origin direct URL gets exactly this sandbox value.
+    // It is computed per mode; never broaden it.
     await expect(iframe).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
   });
 });

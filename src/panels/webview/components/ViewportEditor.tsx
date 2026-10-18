@@ -11,6 +11,8 @@ import {
   VIEWPORT_ZOOM_MIN,
   zoomAtCursor,
 } from '../viewport';
+import { iframeSandbox } from '../sandbox';
+import { validateWebViewUrl } from '../url';
 import { viewportEditorTestIds } from './viewportEditorTestIds';
 
 /**
@@ -61,6 +63,12 @@ const WHEEL_ZOOM_STEP = 1.1;
  * but does NOT add a second URL text input. This avoids duplication while keeping
  * the preview reactive: Grafana re-renders the editor whenever any option changes,
  * so typing in the standard URL field above updates the preview automatically.
+ *
+ * ## URL safety (VR-1, VR-2)
+ * The preview validates the URL with `validateWebViewUrl` before it builds an
+ * iframe. An unsafe URL shows an error message in the preview (editor-time
+ * feedback) and never an iframe. The iframe `sandbox` value comes from the
+ * shared `iframeSandbox` helper, as in the view-mode panel.
  *
  * ## Persistence note
  * A custom editor's `onChange` is bound to a single options path (Grafana wires
@@ -204,13 +212,16 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
   }, []);
 
   const hasUrl = opts.url.trim().length > 0;
+  // VR-1: only a validated http(s) URL is previewed (and can be positioned).
+  const urlCheck = validateWebViewUrl(opts.url);
+  const canPreview = urlCheck.valid;
 
   // Wheel-zoom is attached as a NON-passive native listener so we can
   // preventDefault and stop the editor pane / page from scrolling while the
   // author zooms. React's synthetic onWheel is passive and cannot preventDefault.
   useEffect(() => {
     const el = containerRef.current;
-    if (!el || !hasUrl) {
+    if (!el || !canPreview) {
       return;
     }
     const onWheel = (e: WheelEvent) => {
@@ -223,7 +234,7 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
     };
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [commit, hasUrl]);
+  }, [commit, canPreview]);
 
   // ---------------------------------------------------------------------------
   // Numeric input handlers (viewport X / Y / zoom)
@@ -307,18 +318,18 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
         ref={containerRef}
         className={styles.preview}
         data-testid={viewportEditorTestIds.preview}
-        onMouseDown={hasUrl ? onMouseDown : undefined}
+        onMouseDown={canPreview ? onMouseDown : undefined}
         role="application"
         aria-label="Interactive viewport preview"
       >
-        {hasUrl ? (
+        {urlCheck.valid ? (
           <iframe
             title="Viewport preview"
-            src={opts.url}
+            src={urlCheck.url}
             data-testid={viewportEditorTestIds.iframe}
             className={styles.iframe}
-            // SECURITY: keep this sandbox in lockstep with the view-mode panel.
-            sandbox="allow-scripts allow-same-origin"
+            // SECURITY (VR-2): the sandbox value comes from the shared helper.
+            sandbox={iframeSandbox('direct', urlCheck.url)}
             referrerPolicy="no-referrer"
             style={{
               width: iframeWidth,
@@ -327,6 +338,10 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
               transformOrigin: 'top left',
             }}
           />
+        ) : hasUrl ? (
+          <div className={styles.hint} role="alert" data-testid={viewportEditorTestIds.invalidUrl}>
+            This URL cannot be displayed. {urlCheck.message}
+          </div>
         ) : (
           <div className={styles.hint} data-testid={viewportEditorTestIds.hint}>
             Enter a URL in the &ldquo;URL&rdquo; field above to position the viewport.
@@ -341,7 +356,7 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
         <span>Zoom: {viewport.viewportZoom.toFixed(2)}×</span>
       </div>
 
-      {hasUrl && (
+      {canPreview && (
         <div className={styles.help}>Drag to pan · scroll to zoom ({VIEWPORT_ZOOM_MIN}–{VIEWPORT_ZOOM_MAX}×)</div>
       )}
 

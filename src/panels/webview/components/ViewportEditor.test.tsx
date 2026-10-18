@@ -57,6 +57,61 @@ describe('panels/webview/ViewportEditor', () => {
     expect(iframe).toHaveStyle({ pointerEvents: 'none' });
   });
 
+  // ---------------------------------------------------------------------------
+  // S1: URL safety (VR-1) and sandbox (VR-2) in the editor preview
+  // ---------------------------------------------------------------------------
+
+  test.each([
+    'javascript:alert(document.cookie)',
+    'JAVASCRIPT:alert(1)',
+    ' javascript:alert(1)',
+    'data:text/html,<script>alert(1)</script>',
+    'vbscript:msgbox(1)',
+    'file:///etc/passwd',
+    '/relative/path',
+  ])('an unsafe URL %j shows an accessible error and NO iframe in the preview', (url) => {
+    const { props } = buildProps({ url });
+    const { container } = render(<ViewportEditor {...props} />);
+
+    const error = screen.getByTestId(viewportEditorTestIds.invalidUrl);
+    expect(error).toHaveAttribute('role', 'alert');
+    expect(error).toHaveTextContent(/cannot be displayed/i);
+    expect(container.querySelector('iframe')).toBeNull();
+    // The empty-URL hint is for an empty URL only.
+    expect(screen.queryByTestId(viewportEditorTestIds.hint)).not.toBeInTheDocument();
+  });
+
+  test('an unsafe URL disables drag panning in the preview', () => {
+    const { props, onChange } = buildProps({ url: 'javascript:alert(1)' });
+    render(<ViewportEditor {...props} />);
+
+    const preview = screen.getByTestId(viewportEditorTestIds.preview);
+    fireEvent.mouseDown(preview, { clientX: 100, clientY: 100 });
+    fireEvent.mouseMove(window, { clientX: 50, clientY: 50 });
+    fireEvent.mouseUp(window);
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test('preview iframe of a cross-origin URL gets allow-scripts allow-same-origin', () => {
+    const { props } = buildProps({ url: 'https://example.com' });
+    render(<ViewportEditor {...props} />);
+
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute(
+      'sandbox',
+      'allow-scripts allow-same-origin'
+    );
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute('referrerpolicy', 'no-referrer');
+  });
+
+  test('preview iframe of a URL on the Grafana origin gets allow-scripts only', () => {
+    // jsdom serves the test page from http://localhost.
+    const { props } = buildProps({ url: 'http://localhost/d/abc' });
+    render(<ViewportEditor {...props} />);
+
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute('sandbox', 'allow-scripts');
+  });
+
   test('readout reflects the current X / Y / zoom values', () => {
     const { props } = buildProps({ viewportX: 42, viewportY: 7, viewportZoom: 2 });
     render(<ViewportEditor {...props} />);

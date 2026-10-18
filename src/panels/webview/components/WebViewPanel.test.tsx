@@ -482,6 +482,121 @@ describe('panels/webview/WebViewPanel', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // S1: URL safety (VR-1) and per-mode sandbox (VR-2)
+  // ---------------------------------------------------------------------------
+
+  describe('URL safety (VR-1)', () => {
+    const unsafeUrls = [
+      'javascript:alert(document.cookie)',
+      'JaVaScRiPt:alert(1)',
+      '  javascript:alert(1)',
+      'java\tscript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'blob:https://example.com/0b8f1c1e',
+      'vbscript:msgbox(1)',
+      'file:///etc/passwd',
+      '/api/user',
+      '//example.com/',
+      'https://user:secret@example.com/',
+    ];
+
+    test.each(unsafeUrls)('direct mode: %j renders an accessible error and NO iframe', (url) => {
+      const { container } = render(<WebViewPanel {...buildProps({ url, loadMode: 'direct' })} />);
+
+      const error = screen.getByTestId(webViewPanelTestIds.invalidUrl);
+      expect(error).toHaveAttribute('role', 'alert');
+      expect(error).toHaveTextContent(/cannot be displayed/i);
+      expect(container.querySelector('iframe')).toBeNull();
+    });
+
+    test.each(unsafeUrls)('proxy mode: %j renders an accessible error and NO iframe', (url) => {
+      const { container } = render(<WebViewPanel {...buildProps({ url, loadMode: 'proxy' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.invalidUrl)).toBeInTheDocument();
+      expect(container.querySelector('iframe')).toBeNull();
+      // The URL check runs before the backend guard.
+      expect(screen.queryByTestId(webViewPanelTestIds.backendLoading)).not.toBeInTheDocument();
+    });
+
+    test('auto mode + detectedMode=proxy with an unsafe URL renders NO iframe', () => {
+      const { container } = render(
+        <WebViewPanel {...buildProps({ url: 'javascript:alert(1)', loadMode: 'auto', detectedMode: 'proxy' })} />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.invalidUrl)).toBeInTheDocument();
+      expect(container.querySelector('iframe')).toBeNull();
+    });
+
+    test('the error message does not echo the unsafe URL', () => {
+      render(<WebViewPanel {...buildProps({ url: 'javascript:alert(document.cookie)' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.invalidUrl)).not.toHaveTextContent('document.cookie');
+    });
+
+    test('changing a safe URL to an unsafe one removes the iframe', () => {
+      const { rerender, container } = render(<WebViewPanel {...buildProps({ url: 'https://example.com' })} />);
+      expect(container.querySelector('iframe')).not.toBeNull();
+
+      rerender(<WebViewPanel {...buildProps({ url: 'javascript:alert(1)' })} />);
+
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(screen.getByTestId(webViewPanelTestIds.invalidUrl)).toBeInTheDocument();
+    });
+
+    test('surrounding whitespace is trimmed from the iframe src', () => {
+      render(<WebViewPanel {...buildProps({ url: '  https://example.com  ' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://example.com');
+    });
+
+    test('the debug overlay still shows on the invalid-URL state', () => {
+      render(<WebViewPanel {...buildProps({ url: 'javascript:alert(1)', showDebugOverlay: true })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.invalidUrl)).toBeInTheDocument();
+      expect(screen.getByTestId(webViewPanelTestIds.debugOverlay)).toHaveTextContent('mode: direct');
+    });
+  });
+
+  describe('per-mode sandbox (VR-2)', () => {
+    test('direct mode + cross-origin URL → allow-scripts allow-same-origin', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute(
+        'sandbox',
+        'allow-scripts allow-same-origin'
+      );
+    });
+
+    test('direct mode + URL on the Grafana origin → allow-scripts only', () => {
+      // jsdom serves the test page from http://localhost.
+      render(<WebViewPanel {...buildProps({ url: 'http://localhost/api/user', loadMode: 'direct' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('sandbox', 'allow-scripts');
+    });
+
+    test('proxy mode → allow-scripts only (never allow-same-origin)', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />);
+
+      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(iframe).toHaveAttribute('sandbox', 'allow-scripts');
+      expect(iframe.getAttribute('sandbox')).not.toContain('allow-same-origin');
+    });
+
+    test('every iframe keeps referrerPolicy="no-referrer"', () => {
+      const { container } = render(
+        <>
+          <WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />
+          <WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />
+        </>
+      );
+
+      const iframes = container.querySelectorAll('iframe');
+      expect(iframes).toHaveLength(2);
+      iframes.forEach((iframe) => expect(iframe).toHaveAttribute('referrerpolicy', 'no-referrer'));
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // DF3: view-mode backend-availability guard (proxy only)
   // ---------------------------------------------------------------------------
 
