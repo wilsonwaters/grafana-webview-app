@@ -164,6 +164,62 @@ func TestApplyDefaultMemoryLimit(t *testing.T) {
 	}
 }
 
+// TestDomainRateLimitKeyedOnAllowlistEntry covers RV1-9: the per-domain rate
+// tier is keyed on the matched allowlist entry. Subdomains of an
+// allowSubdomains entry share that entry's bucket (they cannot each get a
+// fresh one), the entry's rateLimitPerMin applies to them, and an exact entry
+// keeps its own bucket. Both /proxy and /check-frameable use the same keying.
+func TestDomainRateLimitKeyedOnAllowlistEntry(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+
+	t.Run("global per-domain limit across subdomains", func(t *testing.T) {
+		cfg := settingsWith([]AllowedDomain{
+			{Domain: "example.com", Options: DomainOptions{AllowSubdomains: true}},
+			{Domain: "exact.example.org"},
+		})
+		cfg.RateLimitPerDomainPerMin = 2
+		p := newTestHandler(t, cfg, upstream)
+
+		for i, host := range []string{"a.example.com", "b.example.com"} {
+			if rec := doProxy(p, "http://"+host+"/"); rec.Code != http.StatusOK {
+				t.Fatalf("request %d to %s: status %d, want 200", i, host, rec.Code)
+			}
+		}
+		// A third, never-seen subdomain shares the exhausted example.com bucket.
+		rec := doProxy(p, "http://c.example.com/")
+		if rec.Code != http.StatusTooManyRequests || !strings.Contains(rec.Body.String(), "rate-domain") {
+			t.Fatalf("third subdomain: status %d body %q, want 429 rate-domain", rec.Code, rec.Body.String())
+		}
+		// /check-frameable draws on the same bucket.
+		if rec := doCheckFrameable(checkFrameableHandler{p: p}, "http://d.example.com/"); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("/check-frameable on a fourth subdomain: status %d, want 429", rec.Code)
+		}
+		// Another allowlist entry has its own bucket.
+		if rec := doProxy(p, "http://exact.example.org/"); rec.Code != http.StatusOK {
+			t.Fatalf("other entry: status %d, want 200", rec.Code)
+		}
+	})
+
+	t.Run("entry override applies to subdomains", func(t *testing.T) {
+		cfg := settingsWith([]AllowedDomain{
+			{Domain: "Example.COM.", Options: DomainOptions{AllowSubdomains: true, RateLimitPerMin: 1}},
+		})
+		cfg.RateLimitPerDomainPerMin = 100
+		p := newTestHandler(t, cfg, upstream)
+
+		if rec := doProxy(p, "http://a.example.com/"); rec.Code != http.StatusOK {
+			t.Fatalf("first subdomain: status %d, want 200", rec.Code)
+		}
+		if rec := doProxy(p, "http://b.example.com/"); rec.Code != http.StatusTooManyRequests {
+			t.Fatalf("second subdomain: status %d, want 429 (override of 1/min on the entry)", rec.Code)
+		}
+	})
+}
+
 // rv2FailingResolver is a security.Resolver whose lookup fails with an error
 // that names an internal DNS server address.
 type rv2FailingResolver struct{}

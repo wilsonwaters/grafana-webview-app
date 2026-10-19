@@ -134,9 +134,10 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// SF5: rate-limit tiers (per instance, per domain), then the concurrency cap.
+	// SF5: rate-limit tiers (per instance, per matched allowlist entry), then
+	// the concurrency cap.
 	instanceID := instanceIDFromContext(req)
-	if allowed, reason := p.rateLimiter.Allow(instanceID, validated.Hostname); !allowed {
+	if allowed, reason := p.rateLimiter.Allow(instanceID, match.Domain); !allowed {
 		a.denied = writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
 		return
 	}

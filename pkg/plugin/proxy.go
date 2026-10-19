@@ -602,8 +602,12 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// SF5: rate-limit tiers (per instance, per domain), then concurrency cap.
+	// The domain tier is keyed on the matched allowlist entry, not the request
+	// host, so every subdomain of an allowSubdomains entry shares one bucket
+	// (and that entry's rateLimitPerMin), and the buckets stay bounded by the
+	// allowlist size.
 	instanceID := instanceIDFromContext(req)
-	if allowed, reason := p.rateLimiter.Allow(instanceID, validated.Hostname); !allowed {
+	if allowed, reason := p.rateLimiter.Allow(instanceID, match.Domain); !allowed {
 		a.denied = writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
 		return
 	}
