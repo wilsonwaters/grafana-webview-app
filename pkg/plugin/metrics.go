@@ -12,7 +12,10 @@ import (
 // endpoints. Both endpoints record into the same collectors; the audit log's
 // `endpoint` field tells them apart. Names follow the snake_case convention with
 // a shared webview_proxy_ namespace; counters end in _total and the duration
-// histogram in _seconds (P6 / AC 29).
+// histogram in _seconds (P6 / AC 29). The webview_proxy_ names are kept on
+// purpose for v1.0.0 (RV1-38) rather than moved under the grafana_plugin_
+// namespace: they are documented, and renaming them later would break
+// dashboards and alerts built on them.
 const (
 	metricRequestsTotal      = "webview_proxy_requests_total"
 	metricDenialsTotal       = "webview_proxy_denials_total"
@@ -89,9 +92,10 @@ func statusForReason(reason string) int {
 	return http.StatusInternalServerError
 }
 
-// proxyMetrics holds the Prometheus collectors for the /proxy endpoint. It is
-// constructed once (per registry) by newProxyMetrics and is safe for concurrent
-// use — all prometheus collectors are internally synchronised.
+// proxyMetrics holds the Prometheus collectors for the /proxy and
+// /check-frameable endpoints (both record into them). It is constructed once
+// (per registry) by newProxyMetrics and is safe for concurrent use — all
+// prometheus collectors are internally synchronised.
 type proxyMetrics struct {
 	requests *prometheus.CounterVec
 	denials  *prometheus.CounterVec
@@ -103,7 +107,7 @@ type proxyMetrics struct {
 	privateIPPermitted *prometheus.CounterVec
 }
 
-// newProxyMetrics defines and registers the /proxy collectors against reg.
+// newProxyMetrics defines and registers the collectors against reg.
 //
 // In production newProxyHandler passes prometheus.DefaultRegisterer so the
 // metrics are gathered by the SDK's diagnostics adapter (backed by
@@ -137,8 +141,8 @@ func newProxyMetrics(reg prometheus.Registerer) *proxyMetrics {
 	}
 }
 
-// observeRequest records the per-request metrics emitted once per /proxy request
-// in the handler's single deferred block: the requests_total counter keyed by
+// observeRequest records the per-request metrics emitted once per /proxy or
+// /check-frameable request in the handler's single deferred block (endAudit): the requests_total counter keyed by
 // final status and the request-duration histogram. denied carries the denial
 // reason (empty for a successful/upstream-served request); when non-empty the
 // denials_total counter is incremented for that reason. Successful requests do

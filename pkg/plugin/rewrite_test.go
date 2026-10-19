@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -169,7 +171,7 @@ func TestRewriteURLAttributeSet(t *testing.T) {
 			if got != c.want {
 				t.Errorf("%s[%s] = %q, want %q", c.selector, c.attr, got, c.want)
 			}
-			if strings.Contains(got, resourceBase) {
+			if strings.Contains(got, "/api/plugins/") {
 				t.Errorf("%s[%s] = %q still routes through Grafana", c.selector, c.attr, got)
 			}
 		})
@@ -353,6 +355,47 @@ func TestBaseNonHTTPFallsBackToPage(t *testing.T) {
 	}
 	if got := attr(t, doc, "img", "src"); got != "http://example.com/dir/a.png" {
 		t.Errorf("img src = %q, want http://example.com/dir/a.png", got)
+	}
+}
+
+// TestBaseIgnoresTemplateAndForeignContent covers RV2: a <base href> inside
+// <template> contents or in SVG/MathML content does not set the document base
+// URL in a browser, so the rewriter ignores it. It stays where it is, the base
+// the rewriter uses is the page URL (or the first HTML-namespace base), and
+// relative refs resolve against that.
+func TestBaseIgnoresTemplateAndForeignContent(t *testing.T) {
+	cases := map[string]string{
+		"template in head": `<html><head><template><base href="http://evil.example/t/"></template></head><body><img src="a.png"></body></html>`,
+		"template in body": `<html><head></head><body><template><div><base href="http://evil.example/t/"></div></template><img src="a.png"></body></html>`,
+		"svg":              `<html><head></head><body><svg><base href="http://evil.example/s/"></base></svg><img src="a.png"></body></html>`,
+		"math":             `<html><head></head><body><math><base href="http://evil.example/m/"></base></math><img src="a.png"></body></html>`,
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			doc := rewriteDoc(t, in, examplePage)
+			first := doc.Find("head").Children().First()
+			if goquery.NodeName(first) != "base" {
+				t.Fatalf("first head child = %q, want the injected base", goquery.NodeName(first))
+			}
+			if href, _ := first.Attr("href"); href != examplePage {
+				t.Errorf("document base href = %q, want the page URL %q", href, examplePage)
+			}
+			if got := attr(t, doc, "img", "src"); got != "http://example.com/dir/a.png" {
+				t.Errorf("img src = %q, want it resolved against the page URL", got)
+			}
+			if n := doc.Find(`base[href^="http://evil.example/"]`).Length(); n != 1 {
+				t.Errorf("ignored base count = %d, want it left in place", n)
+			}
+		})
+	}
+
+	// A real HTML base after an ignored one is still used.
+	doc := rewriteDoc(t, `<html><head><template><base href="http://evil.example/t/"></template><base href="/app/"></head><body><img src="a.png"></body></html>`, examplePage)
+	if href := attr(t, doc, "head > base", "href"); href != "http://example.com/app/" {
+		t.Errorf("document base href = %q, want http://example.com/app/", href)
+	}
+	if got := attr(t, doc, "img", "src"); got != "http://example.com/app/a.png" {
+		t.Errorf("img src = %q, want http://example.com/app/a.png", got)
 	}
 }
 
@@ -679,8 +722,8 @@ func TestRewriteThroughProxyIntegration(t *testing.T) {
 	if got := attr(t, doc, "a", "href"); got != "http://example.com/dir/next" {
 		t.Errorf("a href = %q, want http://example.com/dir/next", got)
 	}
-	if strings.Contains(body, resourceBase) {
-		t.Errorf("rewritten body still references %s: %s", resourceBase, body)
+	if strings.Contains(body, "/api/plugins/") {
+		t.Errorf("rewritten body still references the Grafana plugin API: %s", body)
 	}
 	if doc.Find("head base").Length() != 1 || doc.Find(`meta[name="referrer"]`).Length() != 1 {
 		t.Error("base or referrer meta missing through proxy")
@@ -696,7 +739,7 @@ func TestRewriteContentLengthUpdated(t *testing.T) {
 	const html = `<html><body><img src="/a.png"></body></html>`
 	resp := &http.Response{Header: http.Header{}, Body: nopBody(html)}
 	resp.Header.Set("Content-Type", "text/html")
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
 		t.Fatalf("prepareHTMLBody: %v", err)
 	}
 	body := readAllString(t, resp)
@@ -719,7 +762,7 @@ func TestNonHTMLByteIdenticalPassthrough(t *testing.T) {
 	resp := &http.Response{Header: http.Header{}, Body: nopBody(payload)}
 	resp.Header.Set("Content-Type", "application/json")
 	resp.ContentLength = int64(len(payload))
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
 		t.Fatalf("prepareHTMLBody: %v", err)
 	}
 	if body := readAllString(t, resp); body != payload {
@@ -727,13 +770,11 @@ func TestNonHTMLByteIdenticalPassthrough(t *testing.T) {
 	}
 }
 
-// TestRewriteFailureDegradesToOriginal covers "a rewriteHTML failure serves the
-// DECODED ORIGINAL HTML (status 200), NOT a 502". It swaps in a
-// deterministically-failing rewriter via the htmlRewriter seam, drives
-// prepareHTMLBody, and asserts: no error is returned (so the ReverseProxy serves
-// 200), the ORIGINAL body bytes are preserved verbatim, and Content-Length
-// matches the original length.
-func TestRewriteFailureDegradesToOriginal(t *testing.T) {
+// TestRewriteFailureFailsClosed covers RV2: a rewriter failure other than the
+// size limit fails closed. prepareHTMLBody returns an error that wraps
+// errRewriteFailed (so the ReverseProxy sends 502), and the un-rewritten
+// original is never placed on the response.
+func TestRewriteFailureFailsClosed(t *testing.T) {
 	orig := htmlRewriter
 	t.Cleanup(func() { htmlRewriter = orig })
 	htmlRewriter = func(_ []byte, _ *url.URL, _ string, _ []string, _ int64) ([]byte, error) {
@@ -741,23 +782,54 @@ func TestRewriteFailureDegradesToOriginal(t *testing.T) {
 	}
 
 	const html = `<html><body><img src="/a.png">original</body></html>`
-	resp := &http.Response{Header: http.Header{}, Body: nopBody(html)}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: nopBody(html)}
 	resp.Header.Set("Content-Type", "text/html")
 
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil); err != nil {
-		t.Fatalf("prepareHTMLBody must NOT return an error on rewrite failure (degrade): %v", err)
+	err := prepareHTMLBody(context.Background(), resp, 1<<20, mustParseURL(t, examplePage), nil)
+	if !errors.Is(err, errRewriteFailed) || !errors.Is(err, errInjectedRewriteFailure) {
+		t.Fatalf("prepareHTMLBody error = %v, want errRewriteFailed wrapping the rewriter error", err)
 	}
-	body := readAllString(t, resp)
-	if body != html {
-		t.Errorf("degraded body = %q, want the DECODED ORIGINAL %q", body, html)
+	rec := httptest.NewRecorder()
+	if reason := proxyErrorHandler(rec, nil, err); reason != denialReasonUpstream || rec.Code != http.StatusBadGateway {
+		t.Fatalf("proxyErrorHandler = %q/%d, want %q/502", reason, rec.Code, denialReasonUpstream)
 	}
-	if resp.Header.Get("Content-Length") != itoa(len(html)) {
-		t.Errorf("Content-Length = %q, want %d", resp.Header.Get("Content-Length"), len(html))
+	if strings.Contains(rec.Body.String(), "original") {
+		t.Errorf("error body leaks the original page: %q", rec.Body.String())
+	}
+}
+
+// TestProxyParseFailureFailsClosed covers RV2 through /proxy: a document nested
+// deeper than the HTML parser accepts (more than 512 open elements) is a 502
+// with none of the upstream markup, not the un-rewritten original.
+func TestProxyParseFailureFailsClosed(t *testing.T) {
+	page := "<html><head></head><body>" + strings.Repeat("<div>", 600) + "secret-marker" + strings.Repeat("</div>", 600) + "</body></html>"
+	for _, gz := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "gzip"}[gz], func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				body := []byte(page)
+				if gz {
+					w.Header().Set("Content-Encoding", "gzip")
+					body = gzipBytes(t, body)
+				}
+				_, _ = w.Write(body)
+			}))
+			defer upstream.Close()
+			p := newTestHandler(t, settingsWith(allowExample(DomainOptions{})), upstream)
+
+			rec := doProxy(p, "http://example.com/deep")
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", rec.Code)
+			}
+			if strings.Contains(rec.Body.String(), "secret-marker") || strings.Contains(rec.Body.String(), "<div>") {
+				t.Errorf("502 body leaks upstream markup: %.200q", rec.Body.String())
+			}
+		})
 	}
 }
 
 // errInjectedRewriteFailure is the deterministic error a test rewriter returns to
-// exercise the degradation path.
+// exercise the fail-closed path.
 var errInjectedRewriteFailure = errorString("injected rewrite failure")
 
 type errorString string

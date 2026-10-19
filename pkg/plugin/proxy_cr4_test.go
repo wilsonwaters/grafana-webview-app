@@ -67,7 +67,7 @@ func TestRedirectToAllowlistedHostRewritesLocation(t *testing.T) {
 		t.Fatalf("redirect: got status %d, want 302 (body=%q)", rec.Code, rec.Body.String())
 	}
 	loc := rec.Header().Get("Location")
-	wantPrefix := resourceBase + proxyPath + "?"
+	wantPrefix := redirectProxyRef + "?"
 	if !strings.HasPrefix(loc, wantPrefix) {
 		t.Fatalf("Location = %q, want a /proxy URL prefixed %q", loc, wantPrefix)
 	}
@@ -203,7 +203,7 @@ func TestRedirectAlwaysRewritesToProxy(t *testing.T) {
 		t.Fatalf("redirect: got status %d, want 302", rec.Code)
 	}
 	loc := rec.Header().Get("Location")
-	wantPrefix := resourceBase + proxyPath + "?"
+	wantPrefix := redirectProxyRef + "?"
 	if !strings.HasPrefix(loc, wantPrefix) || strings.Contains(loc, "proxy-resource") {
 		t.Fatalf("Location = %q, want a /proxy URL prefixed %q", loc, wantPrefix)
 	}
@@ -362,7 +362,7 @@ func TestRedirectStatusCodesAllHandled(t *testing.T) {
 		if rec.Code != status {
 			t.Errorf("status %d: got %d, want it preserved", status, rec.Code)
 		}
-		if !strings.HasPrefix(rec.Header().Get("Location"), resourceBase+proxyPath+"?") {
+		if !strings.HasPrefix(rec.Header().Get("Location"), redirectProxyRef+"?") {
 			t.Errorf("status %d: Location not rewritten to a proxy URL", status)
 		}
 		upstream.Close()
@@ -379,5 +379,64 @@ func TestRedirectStatusCodesAllHandled(t *testing.T) {
 	}
 	if got := rec.Header().Get("Location"); got != "http://example.com/next" {
 		t.Fatalf("304: Location = %q, want it left untouched", got)
+	}
+}
+
+// TestRedirectLocationResolvesUnderGrafanaSubPath covers RV1-1: the rewritten
+// Location is relative, so it resolves under the URL of the /proxy request the
+// browser is following, including a Grafana sub-path
+// (root_url = http://host/grafana/). It also carries the request's hide
+// selectors to the next hop.
+func TestRedirectLocationResolvesUnderGrafanaSubPath(t *testing.T) {
+	if "/"+redirectProxyRef != proxyPath {
+		t.Fatalf("redirectProxyRef %q is not the last segment of proxyPath %q", redirectProxyRef, proxyPath)
+	}
+	upstream := redirectUpstream(t, http.StatusFound, "https://example.com/next?x=1")
+	defer upstream.Close()
+
+	cfg := settingsWith(allowExample(DomainOptions{}))
+	h := newTestHandler(t, cfg, upstream)
+
+	q := url.Values{}
+	q.Set("url", "http://example.com/start")
+	q.Add(hideParam, "#banner")
+	q.Add(hideParam, "div > .ad, .x")
+	req := httptest.NewRequest(http.MethodGet, proxyPath+"?"+q.Encode(), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("redirect: got status %d, want 302 (body=%q)", rec.Code, rec.Body.String())
+	}
+	loc := rec.Header().Get("Location")
+	if strings.HasPrefix(loc, "/") || strings.Contains(loc, "://") {
+		t.Fatalf("Location = %q, want a relative reference", loc)
+	}
+
+	for _, page := range []string{
+		"http://localhost:3701/grafana/api/plugins/wilsonwaters-webview-app/resources/proxy?" + q.Encode(),
+		"http://localhost:3000/api/plugins/wilsonwaters-webview-app/resources/proxy?" + q.Encode(),
+	} {
+		base, err := url.Parse(page)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ref, err := url.Parse(loc)
+		if err != nil {
+			t.Fatalf("parse Location %q: %v", loc, err)
+		}
+		next := base.ResolveReference(ref)
+		if next.Host != base.Host || next.Path != base.Path {
+			t.Errorf("Location %q resolved against %s = %s, want the same /proxy path", loc, page, next)
+		}
+		got := next.Query()
+		if got.Get("url") != "https://example.com/next?x=1" {
+			t.Errorf("next hop url = %q", got.Get("url"))
+		}
+		if got.Get(wvRedirParam) != "1" {
+			t.Errorf("next hop %s = %q, want 1", wvRedirParam, got.Get(wvRedirParam))
+		}
+		if hide := got[hideParam]; len(hide) != 2 || hide[0] != "#banner" || hide[1] != "div > .ad, .x" {
+			t.Errorf("next hop hide = %q, want the request's selectors", hide)
+		}
 	}
 }

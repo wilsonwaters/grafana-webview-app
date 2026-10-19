@@ -268,7 +268,7 @@ func TestRewriteOutputLimit(t *testing.T) {
 
 // TestProxyRewrittenHTMLOverLimitIs413 covers VR-6 through /proxy: an HTML page
 // that fits MaxResponseBytes but whose rewritten form does not is a 413, not
-// the degrade-to-original 200 used for other rewrite failures.
+// the 502 used for other rewrite failures.
 func TestProxyRewrittenHTMLOverLimitIs413(t *testing.T) {
 	const limit = 8192
 	html := "<html><head>" + `<base href="http://example.com/` + strings.Repeat("d", 1000) + `/">` +

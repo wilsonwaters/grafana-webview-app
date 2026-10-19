@@ -318,6 +318,17 @@ func (c *ac19CapturingLogger) warnEntries() []auditEntry {
 	return out
 }
 
+// permitWarnEntries returns only the private-IP permit Warns.
+func (c *ac19CapturingLogger) permitWarnEntries() []auditEntry {
+	var out []auditEntry
+	for _, w := range c.warnEntries() {
+		if w.msg == "proxy private-ip permitted by opt-in" {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 func (c *ac19CapturingLogger) infoEntries() []auditEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -364,8 +375,9 @@ func TestAC19PermitEmitsDistinctAuditAndMetric(t *testing.T) {
 			t.Errorf("audit Info allowPrivateIP = %v, want true", infos[0].kv["allowPrivateIP"])
 		}
 
-		// The distinct permit Warn fired with permittedIP + ipClass.
-		warns := logger.warnEntries()
+		// The distinct permit Warn fired with permittedIP + ipClass. (The trapped
+		// dial also logs a "proxy upstream error" Warn, which is not counted.)
+		warns := logger.permitWarnEntries()
 		if len(warns) != 1 {
 			t.Fatalf("expected exactly one permit Warn, got %d: %+v", len(warns), warns)
 		}
@@ -398,7 +410,7 @@ func TestAC19PermitEmitsDistinctAuditAndMetric(t *testing.T) {
 
 		_ = doProxy(p, "https://example.com/page")
 
-		if warns := logger.warnEntries(); len(warns) != 0 {
+		if warns := logger.permitWarnEntries(); len(warns) != 0 {
 			t.Errorf("public-IP opted-in: expected NO permit Warn, got %+v", warns)
 		}
 		if n := testutil.ToFloat64(p.metrics.privateIPPermitted.WithLabelValues(security.ReasonPrivate)); n != 0 {

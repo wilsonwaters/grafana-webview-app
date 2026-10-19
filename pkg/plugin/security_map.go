@@ -47,12 +47,13 @@ func toEntryOptions(o DomainOptions) security.EntryOptions {
 
 // domainRateOverrides builds the per-domain rate-limit override map that
 // security.NewRateLimiter consumes. The map is keyed by the normalised
-// hostname so the keys line up with the domain string passed to
-// RateLimiter.Allow at request time (which is the normalised hostname produced
-// by ValidateURL). Only positive overrides are included; NewRateLimiter
-// additionally drops any non-positive value defensively. An entry with no
-// override (0) is omitted so the global per-domain default applies. A domain
-// whose configured value cannot be normalised is skipped.
+// configured domain, which is the Match.Domain of the allowlist entry that the
+// handlers pass to RateLimiter.Allow, so an override also applies to the
+// subdomains an allowSubdomains entry covers. Only positive overrides are
+// included; NewRateLimiter additionally drops any non-positive value
+// defensively. An entry with no override (0) is omitted so the global
+// per-domain default applies. A domain whose configured value cannot be
+// normalised is skipped.
 func domainRateOverrides(domains []AllowedDomain) map[string]int {
 	overrides := make(map[string]int)
 	for _, d := range domains {

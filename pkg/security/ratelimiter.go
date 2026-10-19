@@ -99,10 +99,9 @@ func (b *tokenBucket) allow(now time.Time) bool {
 // goroutines.
 //
 // Buckets are created lazily on first use for each distinct key and retained
-// for the lifetime of the limiter. The key space is bounded in practice by the
-// number of Grafana instances and the configured set of allowed domains, so
-// unbounded growth is not a concern for the intended use; full eviction of idle
-// buckets is intentionally out of scope.
+// for the lifetime of the limiter. The key space is bounded by the number of
+// Grafana instances (orgs) and of allowlist entries (Allow is keyed on the
+// matched entry), so idle buckets are not evicted.
 type RateLimiter struct {
 	mu sync.Mutex
 
@@ -197,9 +196,11 @@ func (rl *RateLimiter) WithClock(c Clock) *RateLimiter {
 // so if both tiers are exhausted the instance reason wins and no token is taken
 // from the domain bucket (the request is rejected before it reaches that tier).
 //
-// Both keys are used verbatim; the caller is expected to pass a stable instance
-// identifier and the already-normalised hostname produced by ValidateURL so
-// that domain buckets line up with the allowlist's canonical form.
+// Both keys are used verbatim. The caller passes a stable instance identifier
+// and, as domain, the canonical Domain of the allowlist entry the request
+// matched (Match.Domain), so every host an entry covers shares one bucket, the
+// entry's override applies to all of them, and the domain buckets are bounded
+// by the size of the allowlist.
 func (rl *RateLimiter) Allow(instanceID, domain string) (allowed bool, reason string) {
 	now := rl.now()
 

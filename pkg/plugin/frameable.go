@@ -3,6 +3,8 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -61,7 +63,7 @@ func (h checkFrameableHandler) ServeHTTP(w http.ResponseWriter, req *http.Reques
 
 // checkFrameable implements the /check-frameable endpoint contract (Q7).
 //
-// It runs the EXACT same pre-fetch security pipeline as /proxy's serve — parse
+// It runs the EXACT same pre-fetch security pipeline as /proxy (ServeHTTP) — parse
 // `url` → SF2 hostname normalise → SF3 allowlist match (empty allowlist denies)
 // → SF2 full ValidateURL with the matched domain's extra ports → SF5 rate-limit
 // then concurrency Acquire — reusing writeDenial / the reasonStatus table so the
@@ -87,8 +89,8 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 	w = a.rec
 
 	// Same-origin only (R1 D2): no CORS headers and no preflight handling.
-	rawTarget := req.URL.Query().Get("url")
-	if strings.TrimSpace(rawTarget) != "" {
+	rawTarget := strings.TrimSpace(req.URL.Query().Get("url"))
+	if rawTarget != "" {
 		a.url = rawTarget
 	}
 
@@ -102,7 +104,7 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	if strings.TrimSpace(rawTarget) == "" {
+	if rawTarget == "" {
 		a.denied = writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
 		return
 	}
@@ -132,9 +134,10 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	// SF5: rate-limit tiers (per instance, per domain), then the concurrency cap.
+	// SF5: rate-limit tiers (per instance, per matched allowlist entry), then
+	// the concurrency cap.
 	instanceID := instanceIDFromContext(req)
-	if allowed, reason := p.rateLimiter.Allow(instanceID, validated.Hostname); !allowed {
+	if allowed, reason := p.rateLimiter.Allow(instanceID, match.Domain); !allowed {
 		a.denied = writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
 		return
 	}
@@ -213,26 +216,22 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 	reqCtx, cancel := context.WithTimeout(security.WithPolicy(ctx, pol), p.frameableTimeout())
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
+	// Fetching a user-supplied URL is the purpose of this endpoint. targetURL
+	// passed the allowlist and URL validation, and p.transport dials only
+	// addresses that pass the IP blocklist (resolve-then-dial with a
+	// connect-time re-check).
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil) //nolint:gosec // G704: validated target, guarded dialer (see above)
 	if err != nil {
-		return frameableResponse{
-			Frameable:       false,
-			Reason:          "upstream unreachable: " + err.Error(),
-			RecommendedMode: recommendedModeProxy,
-		}
+		return p.unreachableVerdict(ctx, targetURL, err)
 	}
 	// Apply the same outbound header hygiene spirit as the proxy: identify
 	// honestly and leak nothing about the Grafana instance/viewer.
 	httpReq.Header.Set("User-Agent", proxyUserAgent)
 	httpReq.Header.Set("Accept", proxyAccept)
 
-	resp, err := client.Do(httpReq)
+	resp, err := client.Do(httpReq) //nolint:gosec // G704: validated target, guarded dialer (see NewRequestWithContext above)
 	if err != nil {
-		return frameableResponse{
-			Frameable:       false,
-			Reason:          "upstream unreachable: " + err.Error(),
-			RecommendedMode: recommendedModeProxy,
-		}
+		return p.unreachableVerdict(ctx, targetURL, err)
 	}
 	// Close the body without reading it: the verdict comes from headers only.
 	defer func() { _ = resp.Body.Close() }()
@@ -247,22 +246,54 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 		}
 	}
 
-	return frameingVerdictFromHeaders(resp.Header)
+	return framingVerdictFromHeaders(resp.Header)
 }
 
-// frameingVerdictFromHeaders inspects the framing-relevant response headers and
+// unreachableVerdict is the proxy-recommended verdict for a framing check whose
+// fetch failed. The reason given to the caller names only the class of
+// failure: the error itself can hold the resolved IP addresses of the target
+// (for example a blocked internal address), so it goes to the server log only.
+func (p *proxyHandler) unreachableVerdict(ctx context.Context, targetURL string, err error) frameableResponse {
+	p.logger.FromContext(ctx).Warn("check-frameable fetch failed", "url", redactURL(targetURL), "error", redactErrorURL(err))
+	return frameableResponse{
+		Frameable:       false,
+		Reason:          "upstream unreachable: " + fetchFailureReason(err),
+		RecommendedMode: recommendedModeProxy,
+	}
+}
+
+// fetchFailureReason describes why an upstream fetch failed without any detail
+// from the error message (no host names, IP addresses or ports).
+func fetchFailureReason(err error) string {
+	switch security.DialReasonOf(err) {
+	case security.ReasonBlockedIP:
+		return "the host resolves to a blocked address"
+	case security.ReasonMetadataHost:
+		return "the host is a blocked cloud-metadata endpoint"
+	case security.ReasonResolveFailed, security.ReasonNoHost:
+		return "the host could not be resolved"
+	}
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return "the request timed out"
+	}
+	return "the connection failed"
+}
+
+// framingVerdictFromHeaders inspects the framing-relevant response headers and
 // returns the Q7 verdict.
 //
-// X-Frame-Options: a value of DENY or SAMEORIGIN (case-insensitive) blocks
-// framing in a third-party (Grafana) origin.
+// X-Frame-Options: every value of every X-Frame-Options line is read (see
+// xFrameOptionsBlocks); DENY or SAMEORIGIN blocks framing in a third-party
+// (Grafana) origin.
 //
 // CSP frame-ancestors (conservative rule): the backend does NOT know the
 // Grafana origin, so it cannot prove a source list permits it. Therefore a
 // present frame-ancestors directive blocks UNLESS its source list contains the
 // wildcard `*` (which allows any origin). 'none' blocks outright. An ABSENT
 // frame-ancestors directive does not block via CSP.
-func frameingVerdictFromHeaders(h http.Header) frameableResponse {
-	if blocked, reason := xFrameOptionsBlocks(h.Get("X-Frame-Options")); blocked {
+func framingVerdictFromHeaders(h http.Header) frameableResponse {
+	if blocked, reason := xFrameOptionsBlocks(h.Values("X-Frame-Options")); blocked {
 		return frameableResponse{Frameable: false, Reason: reason, RecommendedMode: recommendedModeProxy}
 	}
 
@@ -280,16 +311,38 @@ func frameingVerdictFromHeaders(h http.Header) frameableResponse {
 	}
 }
 
-// xFrameOptionsBlocks reports whether an X-Frame-Options header value blocks
-// framing in a third-party origin. DENY and SAMEORIGIN both block (we are not
-// same-origin with the upstream). Matching is case-insensitive and tolerant of
-// surrounding whitespace. An empty or unrecognised value (e.g. a legacy
-// ALLOW-FROM, which modern browsers ignore) does not block here.
-func xFrameOptionsBlocks(value string) (bool, string) {
-	switch strings.ToUpper(strings.TrimSpace(value)) {
-	case "DENY":
+// xFrameOptionsBlocks reports whether the X-Frame-Options header lines block
+// framing in a third-party origin, following the HTML standard's processing:
+// the values of all lines are split on commas, trimmed and lowercased into a
+// set. One distinct value blocks when it is "deny" or "sameorigin" (the
+// Grafana page is not same-origin with the upstream). More than one distinct
+// value blocks when any of them is "deny", "sameorigin" or "allowall", so
+// "SAMEORIGIN, SAMEORIGIN" and a second DENY line both block. No header, or a
+// single unrecognised value (a legacy ALLOW-FROM, which browsers ignore), does
+// not block.
+func xFrameOptionsBlocks(lines []string) (bool, string) {
+	values := map[string]bool{}
+	var order []string
+	for _, line := range lines {
+		for _, v := range strings.Split(line, ",") {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if !values[v] {
+				values[v] = true
+				order = append(order, v)
+			}
+		}
+	}
+	switch {
+	case len(order) == 0:
+		return false, ""
+	case len(order) > 1:
+		if values["deny"] || values["sameorigin"] || values["allowall"] {
+			return true, "X-Frame-Options: " + strings.ToUpper(strings.Join(order, ", "))
+		}
+		return false, ""
+	case order[0] == "deny":
 		return true, "X-Frame-Options: DENY"
-	case "SAMEORIGIN":
+	case order[0] == "sameorigin":
 		return true, "X-Frame-Options: SAMEORIGIN"
 	default:
 		return false, ""
@@ -298,7 +351,7 @@ func xFrameOptionsBlocks(value string) (bool, string) {
 
 // cspFrameAncestorsBlocks parses a single Content-Security-Policy header value
 // for a frame-ancestors directive and applies the conservative blocking rule
-// (see frameingVerdictFromHeaders). It returns (true, reason) when the directive
+// (see framingVerdictFromHeaders). It returns (true, reason) when the directive
 // is present and does NOT permit any origin via `*`.
 func cspFrameAncestorsBlocks(csp string) (bool, string) {
 	for _, directive := range strings.Split(csp, ";") {

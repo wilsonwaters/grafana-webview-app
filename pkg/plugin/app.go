@@ -2,7 +2,11 @@ package plugin
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
@@ -75,16 +79,61 @@ func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemg
 	return &app, nil
 }
 
-// Dispose here tells plugin SDK that plugin wants to clean up resources when a new instance
-// created.
+// Dispose is called by the SDK when it replaces this instance (the settings
+// changed). It closes the idle upstream connections of the proxy transport.
+// The transport disables keep-alives, so there should be none; this only makes
+// sure an old instance holds no sockets.
 func (a *App) Dispose() {
-	// cleanup
+	if a.proxy == nil {
+		return
+	}
+	if t, ok := a.proxy.transport.(interface{ CloseIdleConnections() }); ok {
+		t.CloseIdleConnections()
+	}
 }
 
-// CheckHealth handles health checks sent from Grafana to the plugin.
+// healthDetails is the JSONDetails of the CheckHealth result.
+type healthDetails struct {
+	AllowlistEntries int      `json:"allowlistEntries"`
+	InvalidEntries   []string `json:"invalidEntries,omitempty"`
+}
+
+// CheckHealth reports the state of the domain allowlist. Invalid entries (not
+// a bare host name) are an error, because they are ignored and the hosts the
+// admin meant to allow get 403s. An empty allowlist is a valid, fail-closed
+// configuration, so it is OK with a message saying the proxy denies every
+// request.
 func (a *App) CheckHealth(_ context.Context, _ *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
-	return &backend.CheckHealthResult{
-		Status:  backend.HealthStatusOk,
-		Message: "ok",
-	}, nil
+	domains := a.Config.AllowedDomains
+	invalid := invalidAllowlistDomains(domains)
+	details, err := json.Marshal(healthDetails{AllowlistEntries: len(domains), InvalidEntries: invalid})
+	if err != nil {
+		return nil, err
+	}
+
+	result := &backend.CheckHealthResult{Status: backend.HealthStatusOk, JSONDetails: details}
+	switch {
+	case len(invalid) > 0:
+		result.Status = backend.HealthStatusError
+		result.Message = fmt.Sprintf("%d of %d allowlist entries are not a valid host name and are ignored: %s. Use a bare host name such as example.com, without a scheme, port or path.",
+			len(invalid), len(domains), strings.Join(quoteAll(invalid), ", "))
+		if len(invalid) == len(domains) {
+			result.Message += " No valid entries remain, so the proxy denies every request."
+		}
+	case len(domains) == 0:
+		result.Message = "The domain allowlist is empty, so the proxy denies every request. An admin adds domains on the plugin's Configuration page."
+	default:
+		result.Message = fmt.Sprintf("ok (allowlist entries: %d)", len(domains))
+	}
+	return result, nil
+}
+
+// quoteAll returns each string in Go-quoted form, so an empty or odd entry is
+// visible in a message.
+func quoteAll(values []string) []string {
+	out := make([]string, len(values))
+	for i, v := range values {
+		out[i] = strconv.Quote(v)
+	}
+	return out
 }

@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -9,22 +10,26 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/andybalholm/cascadia"
+	"github.com/wilsonwaters/webview/pkg/internal/htmlparse"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 	"golang.org/x/net/html/charset"
 )
 
-// resourceBase is the base path under which Grafana serves this plugin's
-// backend resources. The redirect handler (CR4) emits Location headers under it
-// so the panel's fetch of /proxy re-enters the proxy for the next hop.
-const resourceBase = "/api/plugins/wilsonwaters-webview-app/resources"
+// redirectProxyRef is the path of the redirect Location the proxy emits (CR4).
+// It is relative ("proxy", the last segment of proxyPath), so the browser
+// resolves it against the URL of the /proxy request it is following. The next
+// hop therefore stays under the same .../resources/ path whatever sub-path
+// Grafana is served from (root_url = https://host/grafana/).
+const redirectProxyRef = "proxy"
 
-// buildRedirectProxyURL assembles basePath?url=<enc(target)>&_wvredir=<depth> via
-// url.Values (CR4). When the browser follows a rewritten Location, ServeHTTP reads
-// _wvredir back to learn the hop depth and enforce the MaxRedirects cap. Both
-// params are url.Values-encoded so the upstream target cannot inject into the
-// query string, and a fragment on target is dropped.
-func buildRedirectProxyURL(basePath, target string, depth int) string {
+// buildRedirectProxyURL returns the relative redirect Location
+// proxy?url=<target>&_wvredir=<depth>[&hide=<selector>...] (CR4). When the
+// browser follows it, ServeHTTP reads _wvredir back to enforce the MaxRedirects
+// cap, and the hide selectors of the original request apply to the next hop
+// too. url.Values encodes every parameter, so the upstream target cannot inject
+// into the query string. A fragment on target is dropped.
+func buildRedirectProxyURL(target string, depth int, hideSelectors []string) string {
 	enc := target
 	if i := strings.IndexByte(enc, '#'); i >= 0 {
 		enc = enc[:i]
@@ -32,7 +37,10 @@ func buildRedirectProxyURL(basePath, target string, depth int) string {
 	q := url.Values{}
 	q.Set("url", enc)
 	q.Set(wvRedirParam, strconv.Itoa(depth))
-	return basePath + "?" + q.Encode()
+	if len(hideSelectors) > 0 {
+		q[hideParam] = append([]string(nil), hideSelectors...)
+	}
+	return redirectProxyRef + "?" + q.Encode()
 }
 
 // urlAttr names an element attribute whose value is a URL. selector selects
@@ -93,10 +101,9 @@ const referrerPolicyNoReferrer = "no-referrer"
 const sandboxCompatShim = `(function(){var jar="";try{document.cookie}catch(e){try{Object.defineProperty(Document.prototype,"cookie",{configurable:true,get:function(){return jar},set:function(v){var kv=String(v).split(";")[0];var k=kv.split("=")[0];var parts=jar?jar.split("; ").filter(function(p){return p.split("=")[0]!==k}):[];parts.push(kv);jar=parts.join("; ")}})}catch(e2){}}function mem(){var s={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(s,k)?s[k]:null},setItem:function(k,v){s[k]=String(v)},removeItem:function(k){delete s[k]},clear:function(){s={}},key:function(i){return Object.keys(s)[i]||null},get length(){return Object.keys(s).length}}}["localStorage","sessionStorage"].forEach(function(n){try{window[n].length}catch(e){try{Object.defineProperty(window,n,{configurable:true,value:mem()})}catch(e2){}}})})();`
 
 // htmlRewriter is the rewrite function prepareHTMLBody invokes on HTML bodies. It
-// defaults to rewriteHTMLLimited and is a package var ONLY so a test can
-// substitute a deterministically-failing rewriter to exercise the degradation
-// path (serve the decoded original on rewrite error). Production never
-// reassigns it.
+// defaults to rewriteHTMLLimited and is a package var only so a test can
+// substitute a failing rewriter to exercise the fail-closed path. Production
+// never reassigns it.
 var htmlRewriter = rewriteHTMLLimited
 
 // hideParam is the inbound /proxy query parameter carrying author-configured
@@ -142,8 +149,8 @@ const hideStyleDecl = "display:none!important"
 // and x/net/html APIs, whose renderer HTML-escapes attribute values — there is
 // no string concatenation of HTML, so a hostile upstream URL (or a hostile
 // hide-selector) cannot break out of an attribute. On any parse error it
-// returns the error so the caller can degrade to serving the decoded original
-// (the security gates already ran). An empty or nil hideSelectors is a no-op.
+// returns the error, and the proxy then refuses the page (502) rather than
+// serve it un-rewritten. An empty or nil hideSelectors is a no-op.
 // rewriteHTML applies no size limit; the proxy uses rewriteHTMLLimited.
 func rewriteHTML(htmlBytes []byte, pageURL *url.URL, contentType string, hideSelectors []string) ([]byte, error) {
 	return rewriteHTMLLimited(htmlBytes, pageURL, contentType, hideSelectors, 0)
@@ -162,16 +169,22 @@ func rewriteHTMLLimited(htmlBytes []byte, pageURL *url.URL, contentType string, 
 		return htmlBytes, nil
 	}
 	// Charset-aware decode: charset.NewReader sniffs the BOM / <meta charset> /
-	// the supplied Content-Type and yields a UTF-8 reader, so goquery (which
+	// the supplied Content-Type and yields a UTF-8 reader, so the parser (which
 	// assumes UTF-8) parses correctly regardless of the upstream encoding.
 	reader, err := charset.NewReader(bytes.NewReader(htmlBytes), contentType)
 	if err != nil {
 		return nil, fmt.Errorf("charset reader: %w", err)
 	}
-	doc, err := goquery.NewDocumentFromReader(reader)
+	// The parse is bounded (htmlParseLimits): a document whose tree would grow
+	// past the budget is refused as too large instead of exhausting memory.
+	root, err := htmlparse.ParseDocument(reader, htmlParseLimits)
 	if err != nil {
+		if errors.Is(err, htmlparse.ErrLimitExceeded) {
+			return nil, fmt.Errorf("%w: %w", errResponseTooLarge, err)
+		}
 		return nil, fmt.Errorf("parse html: %w", err)
 	}
+	doc := goquery.NewDocumentFromNode(root)
 
 	base, baseNode := ensureBase(doc, pageURL)
 
@@ -187,14 +200,57 @@ func rewriteHTMLLimited(htmlBytes []byte, pageURL *url.URL, contentType string, 
 	removeReferrerPolicies(doc)
 	injectSandboxCompat(doc, baseNode)
 
-	out, err := goquery.OuterHtml(doc.Selection)
-	if err != nil {
+	return renderLimited(root, len(htmlBytes), maxBytes)
+}
+
+// htmlParseLimits bounds the parse of one proxied HTML document, whatever
+// MaxResponseBytes is. A document that goes over a limit is refused with 413.
+// See ai-state/streams/v1-stabilisation/memory-sizing.md for the sizing.
+var htmlParseLimits = htmlparse.Limits{
+	// The tokenizer's memory for one tag grows with its attributes (about 27
+	// bytes per input byte for a tag of short, distinct attributes), so one
+	// tag, text run, comment or inline script may be at most 2 MiB.
+	MaxTokenBytes: 2 << 20,
+	// The estimated tree (nodes, attributes, text, cloned formatting
+	// elements). An ordinary 5 MiB page needs well under half of this.
+	MaxTreeBytes: 48 << 20,
+	// Text appends and attribute comparisons, which grow faster than the
+	// input on hostile documents. Ordinary pages use almost none of this.
+	MaxWork: 16 << 20,
+}
+
+// renderLimited renders the tree as HTML into a buffer and stops with
+// errResponseTooLarge as soon as the output would exceed maxBytes, so an
+// oversize document is never rendered in full first. sizeHint (the input
+// length) pre-sizes the buffer. maxBytes <= 0 means no limit.
+func renderLimited(root *html.Node, sizeHint int, maxBytes int64) ([]byte, error) {
+	var buf bytes.Buffer
+	grow := int64(sizeHint) + int64(sizeHint)/4 + 4096
+	if maxBytes > 0 && grow > maxBytes {
+		grow = maxBytes
+	}
+	buf.Grow(int(grow))
+	if err := html.Render(&limitedWriter{buf: &buf, max: maxBytes}, root); err != nil {
+		if errors.Is(err, errResponseTooLarge) {
+			return nil, errResponseTooLarge
+		}
 		return nil, fmt.Errorf("render html: %w", err)
 	}
-	if maxBytes > 0 && int64(len(out)) > maxBytes {
-		return nil, errResponseTooLarge
+	return buf.Bytes(), nil
+}
+
+// limitedWriter appends to buf and fails with errResponseTooLarge, writing
+// nothing, when a write would take buf past max bytes (max <= 0: no limit).
+type limitedWriter struct {
+	buf *bytes.Buffer
+	max int64
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	if w.max > 0 && int64(w.buf.Len())+int64(len(p)) > w.max {
+		return 0, errResponseTooLarge
 	}
-	return []byte(out), nil
+	return w.buf.Write(p)
 }
 
 // growthBudget bounds the bytes that URL rewriting may add to a document
@@ -245,7 +301,7 @@ func (b *growthBudget) allow(oldLen, newLen int) bool {
 func ensureBase(doc *goquery.Document, pageURL *url.URL) (*url.URL, *html.Node) {
 	base := pageURL
 	var node *html.Node
-	if existing := doc.Find("base[href]").First(); existing.Length() > 0 {
+	if existing := documentBase(doc); existing.Length() > 0 {
 		node = existing.Get(0)
 		if href, ok := existing.Attr("href"); ok {
 			if ref, err := url.Parse(strings.TrimSpace(href)); err == nil {
@@ -275,6 +331,26 @@ func ensureBase(doc *goquery.Document, pageURL *url.URL) (*url.URL, *html.Node) 
 	}
 	parent.InsertBefore(node, parent.FirstChild)
 	return base, node
+}
+
+// documentBase returns the <base href> element that sets the document base URL
+// in a browser: the first one in the HTML namespace that is not inside a
+// <template>. A <base> in SVG or MathML content, or in template contents, does
+// not change the base URL, so it is ignored. The selection is empty when the
+// document has no such element.
+func documentBase(doc *goquery.Document) *goquery.Selection {
+	return doc.Find("base[href]").FilterFunction(func(_ int, s *goquery.Selection) bool {
+		n := s.Get(0)
+		if n.Namespace != "" {
+			return false
+		}
+		for p := n.Parent; p != nil; p = p.Parent {
+			if p.Type == html.ElementNode && p.DataAtom == atom.Template && p.Namespace == "" {
+				return false
+			}
+		}
+		return true
+	}).First()
 }
 
 // injectSandboxCompat inserts <meta name="referrer" content="no-referrer"> and

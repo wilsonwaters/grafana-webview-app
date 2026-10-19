@@ -28,19 +28,17 @@ package plugin
 //	AC 21 → TestTC1AC21DNSRebindingPrevented (+ sub-tests)
 //	AC 22 → TestTC1AC22NonHTTPSchemesRejected
 //
-// AC 19 note: the per-domain private-IP opt-in (DomainOptions.AllowPrivateIP) is
-// parsed into config and mapped into security.EntryOptions, but it is NOT wired
-// into the endpoint dial path — buildProxyHandler constructs the secure dialer
-// with security.NewDialer(nil, …) and the SF1 blocklist is enforced strictly with
-// no opt-in relaxation (see resolvedial.go / ipblocklist.go). This suite therefore
-// asserts the DENY case and the resolved-IP rejection, exactly as the AC's
-// parenthetical permits when the opt-in is not present in the code.
+// AC 19 note: this suite covers the default (no opt-in) case, where an
+// allowlisted host that resolves to a private address is refused. The
+// per-domain private-IP opt-in (DomainOptions.AllowPrivateIP, RFC 1918 only)
+// is covered in proxy_ac19_optin_test.go.
 
 import (
 	"context"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
@@ -150,8 +148,9 @@ func (d *tc1RecordingDialer) addrs() []string {
 // dialer's Control hook with NewControl() and then performs a real net.Dial to
 // the validated IP — which would (a) hit the network and (b) hide the validated
 // address from us. Reconstructing it keeps the suite hermetic while still driving
-// the genuine validation functions, and asserting the SAME first-IP-direct dial
-// the production helper performs (it dials ips[0] with the Control re-check).
+// the genuine validation functions, and asserting the validated-IP direct dial
+// the production helper performs (its first attempt is ips[0], with the
+// Control re-check).
 func tc1AllowlistedTransport(resolver security.Resolver, rec *tc1RecordingDialer) *http.Transport {
 	control := security.NewControl()
 	return &http.Transport{
@@ -207,7 +206,10 @@ func tc1NewApp(t *testing.T, jsonData string) *App {
 }
 
 // tc1AppGet issues GET <path>?url=<target> through app.CallResource (the real
-// resource mux) as an Editor and returns the HTTP status.
+// resource mux) as an Editor and returns the HTTP status. For
+// /check-frameable it also fails the test if the response is the role denial:
+// an Editor must get past the role gate, so a 403 there must come from the
+// allowlist, not from the role check.
 func tc1AppGet(t *testing.T, app *App, path, target string) int {
 	t.Helper()
 	var r mockCallResourceResponseSender
@@ -222,6 +224,9 @@ func tc1AppGet(t *testing.T, app *App, path, target string) int {
 	}
 	if r.response == nil {
 		t.Fatalf("CallResource %s: no response", path)
+	}
+	if path == "check-frameable" && strings.Contains(string(r.response.Body), `"reason":"role"`) {
+		t.Errorf("app /check-frameable as Editor: role denial %q, want the request past the role gate", r.response.Body)
 	}
 	return r.response.Status
 }
