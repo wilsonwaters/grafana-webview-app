@@ -11,10 +11,12 @@ Related: [Installation guide](./installation.md) ·
 Before anything else, two facts explain most issues:
 
 1. **The allowlist is empty by default and denies everything (403).** Nothing
-   proxies until you add domains. See [Administration guide §2](./administration.md#2-allowlist-management).
-2. **In-panel proxy rendering is deferred for v1 (FR5 / #102).** The proxy pipeline
-   works, but proxied content does not render *inside the panel* yet. See
-   [that entry](#in-panel-proxy-mode-content-does-not-render-fr5--102) below.
+   proxies, and **Test URL** fails, until an administrator adds domains on the
+   Configuration page. See [Administration guide §2](./administration.md#2-allowlist-management).
+2. **Proxy mode sends only the HTML page through Grafana.** The panel shows it in
+   an isolated frame, and the viewer's browser loads the page's images, scripts
+   and stylesheets directly from the site. See
+   [Proxy-mode page shows without styles, images or scripts](#proxy-mode-page-shows-without-styles-images-or-scripts).
 
 ---
 
@@ -25,11 +27,14 @@ Before anything else, two facts explain most issues:
   - [Plugin won't load — unsigned not allowed](#plugin-wont-load--unsigned-not-allowed)
   - [App loads but the Web View panel is missing](#app-loads-but-the-web-view-panel-is-missing)
   - [Changes to plugin.json / settings don't take effect](#changes-to-pluginjson--settings-dont-take-effect)
+- [Panel URL](#panel-url)
+  - [Panel shows "This URL cannot be displayed"](#panel-shows-this-url-cannot-be-displayed)
 - [Proxy / allowlist](#proxy--allowlist)
   - [Panel or Test URL returns 403 "not allowlisted"](#panel-or-test-url-returns-403-not-allowlisted)
-  - [403 even though I configured the domain — the #113 caveat](#403-even-though-i-configured-the-domain--the-113-caveat)
+  - [403 even though I configured the domain](#403-even-though-i-configured-the-domain)
+  - [Test URL returns 403 "requires the Editor or Admin role"](#test-url-returns-403-requires-the-editor-or-admin-role)
   - [403 for an internal / private-IP target](#403-for-an-internal--private-ip-target)
-  - [In-panel proxy-mode content does not render (FR5 / #102)](#in-panel-proxy-mode-content-does-not-render-fr5--102)
+  - [Proxy-mode page shows without styles, images or scripts](#proxy-mode-page-shows-without-styles-images-or-scripts)
 - [Direct mode](#direct-mode)
   - [Direct iframe is blank / page refuses to display](#direct-iframe-is-blank--page-refuses-to-display)
   - [Proxy mode and "Test URL" are greyed out](#proxy-mode-and-test-url-are-greyed-out)
@@ -55,22 +60,23 @@ plugin shows as "invalid signature"); the app does not appear or won't enable.
 **Cause:** this is a **privately-signed** build (Path 1), valid **only** for the
 Grafana base URL(s) it was signed for (`rootUrls`). If your Grafana's configured
 `[server] root_url` does not exactly match one of the signed `rootUrls`, the
-signature is rejected. The published release is signed for the deployment host
-(`GRAFANA_INSTANCE_URL`) **plus** `http://localhost:3000` only — any other URL
-mismatches.
+signature is rejected. The published release is signed for the project's
+deployment host (`https://graphs.alintech.com.au`) **plus**
+`http://localhost:3000` only — any other URL mismatches.
 
 **Fix:**
 
 - Make Grafana's `root_url` exactly match a signed URL (scheme + host + any
   sub-path), **or**
-- **Re-sign for your instance:** `npm run sign -- --rootUrls https://grafana.example.com`
+- **Re-sign for your instance:** `npx @grafana/sign-plugin@latest --rootUrls https://grafana.example.com`
   (see [`docs/signing.md`](./signing.md#private-signing-for-specific-instances-path-1)),
   **or**
-- Run **unsigned** by allow-listing both ids (see next entry).
+- Run **unsigned** by allow-listing both ids (see next entry). Do this only on a
+  trusted network.
 
 A public/community signature is separately rejected with **HTTP 409** until the
-plugin is accepted into the Grafana catalog (Path 2, deferred) — do not try to
-community-sign this build. See [`docs/signing.md`](./signing.md).
+plugin is accepted into the Grafana catalog (Path 2, not yet submitted) — do not
+try to community-sign this build. See [`docs/signing.md`](./signing.md).
 
 ### Plugin won't load — unsigned not allowed
 
@@ -108,14 +114,39 @@ app id, the panel is blocked.
 **Symptom:** you edited the allowlist, tuning, or `plugin.json`, but behaviour is
 unchanged.
 
-**Cause:** the backend parses its settings **once, at instance start**
-(`LoadSettings` in `pkg/plugin/config.go`), and `plugin.json` is read at Grafana
-startup. Nothing re-reads them live.
+**Cause and fix:**
 
-**Fix:** **restart Grafana** (or reload the plugin instance) after any settings or
-`plugin.json` change, then re-verify with a Test URL. See
+- **Settings saved on the Configuration page** apply to the next request, with
+  no restart. If nothing changed, check that the save succeeded: when a field is
+  invalid, the page shows *"The settings were not saved"* and marks the field.
+  Correct it and save again.
+- **Settings that come back after a restart** are set by a provisioning file.
+  Grafana applies `provisioning/plugins/*.yaml` at every start and replaces the
+  saved settings. Change or remove the file. See
+  [Administration guide §11](./administration.md#11-known-operational-caveats).
+- **`plugin.json` changes** are read only when Grafana starts. Restart Grafana.
+
+Then re-verify with a Test URL. See
 [Administration guide §2](./administration.md#2-allowlist-management) and
 [§10](./administration.md#10-upgrade--rollback).
+
+---
+
+## Panel URL
+
+### Panel shows "This URL cannot be displayed"
+
+**Symptom:** the panel (or the editor preview) shows *"This URL cannot be
+displayed"* followed by a reason, and no page.
+
+**Cause:** the panel loads only absolute `http://` or `https://` URLs with a
+host. It refuses other schemes (for example `javascript:`, `data:`, `blob:`,
+`file:`), relative or protocol-relative URLs, URLs with a user name or password,
+URLs that contain control characters such as tabs or line breaks, and URLs over
+8192 characters. This check protects every viewer of the dashboard.
+
+**Fix:** enter the full address, for example `https://status.example.com/page`.
+Remove any `user:password@` part and any pasted line breaks.
 
 ---
 
@@ -126,46 +157,57 @@ startup. Nothing re-reads them live.
 **Symptom:** proxy fetches / "Test URL" return **403**; `webview_proxy_denials_total{reason="allowlist"}`
 increments.
 
-**Cause:** the target host is not in `jsonData.allowedDomains`. The allowlist is
-**empty by default and denies all requests** — this is intentional
-SSRF/open-proxy containment, not a bug.
+**Cause:** the target host is not on the allowlist. The allowlist is **empty by
+default and denies all requests** — this is intentional SSRF/open-proxy
+containment, not a bug. **Test URL** uses the same allowlist, so it also returns
+403 for a site that is not on the list, even one that allows framing.
 
-**Fix:** add the host to the allowlist via the plugin-settings API
-(`POST /api/plugins/wilsonwaters-webview-app/settings` with the **complete**
-`jsonData`). Note:
+**Fix:** an administrator adds the host on the app's **Configuration** page
+(**Administration → Plugins and data → Plugins → Webview → Configuration**) and
+clicks **Save settings**. The change applies to the next request. Note:
 
-- `domain` is a **bare hostname** (no scheme, port, or path).
-- Exact match only unless you set `allowSubdomains: true`.
-- Only ports 80/443 unless you list extra `allowedPorts`.
+- **Domain** is a **bare hostname** (no scheme, port, or path).
+- Exact match only unless **Allow subdomains** is selected.
+- Only ports 80/443 unless the entry lists **Additional ports**.
 
-See [Administration guide §2](./administration.md#2-allowlist-management). Then
-restart/reload and re-test. **Do not** use the bundled Configuration page to edit
-the allowlist — it overwrites `jsonData` and drops `allowedDomains`.
+See [Administration guide §2](./administration.md#2-allowlist-management).
 
-### 403 even though I configured the domain — the #113 caveat
+### 403 even though I configured the domain
 
-**Symptom:** you added the domain, but an allowlisted host still returns **403**.
+**Symptom:** you added the domain, but the host still returns **403** with
+*"target host is not allowlisted"*.
 
-**Cause (two common ones):**
+**Common causes:**
 
-1. **The configuration never reached the backend (#113).** Provisioning
-   `jsonData.allowedDomains` via `provisioning/plugins/*.yaml` does **not** reliably
-   deliver the allowlist to the backend in every Grafana setup. A 403 on a host you
-   believe you allowlisted is the signature of this caveat.
-2. **The Configuration page clobbered it.** Saving the bundled Configuration page
-   rewrites `jsonData` to just `apiUrl`/`apiKey`, silently dropping
-   `allowedDomains`.
+1. **The host does not match the entry.** For example the page is on
+   `www.example.com` but the entry is `example.com` without **Allow
+   subdomains**.
+2. **A redirect leaves the allowlist.** The page redirects to another host that
+   is not on the list (the message then says *"redirect target host is not
+   allowlisted"*). Add that host too.
+3. **A provisioning file replaced the saved settings.** Grafana applies
+   `provisioning/plugins/*.yaml` at every start; it replaces what was saved on
+   the Configuration page.
+4. **The save did not succeed.** The page shows *"The settings were not saved"*
+   when a field is invalid.
 
-**Fix:**
+**Fix:** open the Configuration page and check the entry, add any redirect
+target, and save again. Then run **Test URL** against the host and confirm you
+get a verdict rather than a 403. See
+[Administration guide §11](./administration.md#11-known-operational-caveats).
 
-- Configure the allowlist through the **settings API**, not provisioning or the
-  Config page (see [Administration guide §2](./administration.md#2-allowlist-management)).
-- **Always verify:** run a **Test URL** against an allowlisted host (or
-  `/check-frameable?url=…`) and confirm an **HTTP 200** verdict rather than a 403.
-  This is the single most reliable confirmation the config reached the backend.
-- Restart/reload after changing settings.
+### Test URL returns 403 "requires the Editor or Admin role"
 
-See [Administration guide §11](./administration.md#11-known-operational-caveats).
+**Symptom:** **Test URL** shows *"The URL test requires the Editor or Admin
+role."*; `denials_total{reason="role"}` increments.
+
+**Cause:** the check is limited to users whose basic organisation role is
+Editor or Admin. A custom RBAC role that lets a Viewer edit dashboards does not
+count.
+
+**Fix:** ask an administrator to give you the Editor role, or set the **Load
+mode** to **Direct** or **Proxy** by hand. Viewers can still see proxy-mode
+panels.
 
 ### 403 for an internal / private-IP target
 
@@ -174,41 +216,56 @@ See [Administration guide §11](./administration.md#11-known-operational-caveats
 
 **Cause:** the backend enforces a **hardcoded, non-configurable IP blocklist**
 (loopback, RFC 1918 private, link-local **including `169.254.169.254` cloud
-metadata**, CGNAT, IPv6 ULA, reserved) on every resolved and connect-time IP, and
-blocks cloud-metadata hostnames by name. This cannot be disabled at runtime.
+metadata**, CGNAT, IPv6 ULA, reserved, and internal IPv4 addresses inside 6to4 or
+NAT64 IPv6 addresses) on every resolved and connect-time IP, and blocks
+cloud-metadata hostnames by name. This cannot be disabled at runtime.
 
 **Fix:**
 
-- For a **trusted internal RFC 1918 target** only, an admin may set the per-domain
-  **`allowPrivateIP: true`** opt-in — this relaxes **RFC 1918 IPv4 only** and never
-  loopback, link-local, or the metadata IP. See
+- For a **trusted internal RFC 1918 target** only, an admin may select the
+  per-domain **Allow private IP addresses** opt-in (`allowPrivateIP`) — this
+  relaxes **RFC 1918 IPv4 only** and never loopback, link-local, or the metadata
+  IP. Remember that each viewer's browser must also reach the site to load its
+  images, scripts and stylesheets. See
   [Administration guide §3](./administration.md#3-the-allowprivateip-opt-in).
 - Cloud-metadata endpoints are **never** reachable; there is no opt-in for them.
 - If you also run Grafana `[security.egress]` controls, the target must pass those
   too — see [Administration guide §9](./administration.md#9-interaction-with-grafanas-securityegress-controls).
 
-### In-panel proxy-mode content does not render (FR5 / #102)
+### Proxy-mode page shows without styles, images or scripts
 
-**Symptom:** a page that needs proxy mode (it blocks direct framing) fetches and
-sanitises correctly server-side, but the **panel stays blank** in proxy mode — even
-though the backend and "Test URL" work.
+**Symptom:** a proxy-mode panel shows the page text, but styles, images or
+interactive parts are missing; or the page loads but stays empty or shows its
+own error.
 
-**Cause:** this is a **known, documented v1 limitation**, not a misconfiguration.
-Grafana serves plugin resource routes (`/api/plugins/*/resources/*`) with
-`X-Frame-Options: deny` and a sandbox CSP, which forbids the panel iframe from
-framing the `/proxy` URL directly (even same-origin). The proxy pipeline itself is
-complete and security-tested; only the **in-panel display** of proxied content is
-deferred.
+Proxy mode sends only the HTML page through Grafana. The panel shows it in a
+frame with an isolated origin (`sandbox="allow-scripts"`), and the viewer's
+browser loads images, scripts and stylesheets directly from the site. No
+Grafana setting such as `allow_embedding` is needed. Check these causes in
+order:
 
-**Fix / workaround for v1:**
+| What you see | Likely cause | Fix |
+| --- | --- | --- |
+| Markup and images only; no scripts or external styles, in every browser | Grafana runs with `[security] content_security_policy = true`. The proxied page inherits Grafana's CSP. | Use direct mode for that site if it allows framing, or turn the Grafana CSP off if your security policy allows it. |
+| No styles and no images | The viewer's browser cannot reach the site (for example an internal host that only the Grafana server can reach). | Make the site reachable from viewers' browsers, or use a different page. |
+| Page shell renders but its data never appears | The page is a single-page app that calls its own APIs. From the isolated frame these calls are cross-origin and fail. | Not supported in proxy mode. Use direct mode if the site allows framing. |
+| Page asks for a login, forgets settings, or shows a consent banner on every load | Cookies and storage are in memory only and reset on every reload; the proxy sends no credentials. | Not supported. Use a public page. A banner that is part of the page HTML can be hidden with `hideSelectors`. |
+| Text in a fallback font, or a module script fails | Web fonts and module scripts need the site to allow cross-origin requests. | Usually cosmetic. Not fixable from Grafana. |
+| A "blocked" or captcha page, or 403/429 from the site | Bot protection (for example Akamai or reCAPTCHA) blocks the proxy or the browser. | Not supported. Use direct mode if the site allows framing. |
 
-- **Direct mode is unaffected** — use it for sites that permit framing.
-- Do not rely on in-panel proxy rendering in v1. The backend endpoints remain fully
-  usable, and the planned fix (fetch-then-`srcdoc`) is deferred post-v1.
+The browser's developer tools (Console and Network tabs) show which requests
+fail. For example, the new Bureau of Meteorology radar page is a single-page app
+with bot protection and does not work in proxy mode, but the legacy loop
+`https://reg.bom.gov.au/products/IDR663.loop.shtml` works in both modes.
 
-See [`docs/architecture.md` §7](./architecture.md#7-known-limitation-in-panel-proxy-rendering-fr5--102),
-[Administration guide §11](./administration.md#11-known-operational-caveats), and
-[#102](https://github.com/wilsonwaters/grafana-webview-app/issues/102).
+If instead the panel shows *"The page could not be loaded through the backend
+proxy (HTTP …)"*, the proxy refused the request: look up the status in the
+[error-code map](#error-code--reason-map). If it shows that the backend proxy is
+unavailable, see
+["Proxy mode greyed out"](#proxy-mode-and-test-url-are-greyed-out).
+
+See [`docs/architecture.md` §7](./architecture.md#7-proxy-mode-rendering-fr5)
+for the design.
 
 ---
 
@@ -224,11 +281,11 @@ straight into an iframe with no server-side involvement, so the browser enforces
 the site's framing headers.
 
 **Fix:** the page needs **proxy mode** (the backend strips `X-Frame-Options` and
-the CSP `frame-ancestors` directive). Run "Test URL" — it recommends `proxy` for
-framing-hostile pages. **But note the FR5/#102 limitation above:** in v1, proxy
-content does not render in-panel. Direct mode only works for sites that permit
-framing. Also confirm the panel's sandbox/network isn't otherwise blocking the
-load.
+the CSP `frame-ancestors` directive). Ask an administrator to allowlist the
+domain, then run "Test URL" — it recommends `proxy` for framing-hostile pages —
+or set **Load mode** to **Proxy**. Read
+[the proxy-mode entry above](#proxy-mode-page-shows-without-styles-images-or-scripts)
+for the kinds of page that do not work in proxy mode.
 
 ### Proxy mode and "Test URL" are greyed out
 
@@ -248,8 +305,9 @@ be present, check the Grafana server logs for a plugin-backend start failure
 
 ## Errors under load / bad targets
 
-All limits below live in `jsonData` and are **fail-closed** (a zero/negative value
-is reset to the default — you loosen a limit by *raising* it, never by zeroing it).
+All limits below are set in the **Global limits** section of the Configuration
+page (stored in `jsonData`) and are **fail-closed** (a zero/negative value is
+reset to the default — you loosen a limit by *raising* it, never by zeroing it).
 See [Administration guide §4](./administration.md#4-tuning).
 
 ### 429 Too Many Requests
@@ -257,22 +315,28 @@ See [Administration guide §4](./administration.md#4-tuning).
 **Symptom:** proxy requests return **429**; `denials_total{reason="rate-limit"}` or
 `{reason="concurrency"}` increments.
 
-**Cause:** a rate tier or the concurrency cap was exceeded — per-instance
-(`rateLimitPerInstancePerMin`, default 60), per-domain
-(`rateLimitPerDomainPerMin`, default 30), or `maxConcurrentRequests` (default 10).
+**Cause:** a rate tier or the concurrency cap was exceeded — the per-organisation
+tier (**Rate limit per Grafana instance**, `rateLimitPerInstancePerMin`,
+default 60), the per-domain tier (`rateLimitPerDomainPerMin`, default 30), or
+`maxConcurrentRequests` (default 10). Every proxy-mode panel on every open
+dashboard makes one request per load and per auto-refresh, and **Test URL**
+counts too.
 
-**Fix:** raise the relevant limit for high-traffic dashboards; prefer a per-domain
-`options.rateLimitPerMin` override when only one busy domain needs headroom. If the
-spike is unexpected, check the audit log / metrics for abuse before raising limits.
-See [Administration guide §4](./administration.md#4-tuning).
+**Fix:** raise the relevant limit for high-traffic dashboards, or lengthen the
+panels' auto-refresh interval; prefer a per-domain **Rate limit override** when
+only one busy domain needs headroom. If the spike is unexpected, check the audit
+log / metrics for abuse before raising limits. See
+[Administration guide §4](./administration.md#4-tuning).
 
 ### 413 Payload / response too large
 
 **Symptom:** proxy returns **413**; `denials_total{reason="size-limit"}` increments.
 
 **Cause:** the upstream response body exceeds `maxResponseBytes` (default 5 MiB).
-This also bounds the **gzip-decoded** size (decompression-bomb guard), so a small
-compressed body can still trip it if it decodes large.
+This also bounds the **gzip-decoded** size (decompression-bomb guard) and the
+size of the rewritten HTML, so a small compressed body can still trip it if it
+decodes large. The proxy reads the whole response before it replies, so an
+oversize response is always a 413, never a cut-off page.
 
 **Fix:** raise `maxResponseBytes` only if you legitimately proxy large pages. See
 [Administration guide §4](./administration.md#4-tuning).
@@ -294,10 +358,12 @@ stalled fetches don't pile up against `maxConcurrentRequests`. See
 **Symptom:** proxy returns **502**; `denials_total{reason="upstream"}` or
 `{reason="redirect-loop"}` increments.
 
-**Cause:** an upstream resolve/transport/gateway failure, **or** the redirect
-depth cap (`maxRedirects`, default 3) was exceeded. Each redirect hop is
-re-validated against the allowlist and IP blocklist; a redirect **into a
-non-allowlisted host** is a 403 (reason `allowlist`), not a 502.
+**Cause:** an upstream resolve/transport/gateway failure, a response with a
+`Content-Encoding` other than gzip (the proxy cannot bound its decoded size), a
+malformed gzip body, **or** the redirect depth cap (`maxRedirects`, default 3)
+was exceeded. Each redirect hop is re-validated against the allowlist and IP
+blocklist; a redirect **into a non-allowlisted host** is a 403 (reason
+`allowlist`), not a 502.
 
 **Fix:** confirm the upstream is reachable from the Grafana host (and permitted by
 `[security.egress]` if you run it). Raise `maxRedirects` if the target legitimately
@@ -347,7 +413,8 @@ the recorded reason never drift. Full details:
 
 | Status | `denials_total{reason}` | Cause | Where to look |
 | --- | --- | --- | --- |
-| **403** | `allowlist` | Host not allowlisted (incl. redirect into a non-allowlisted host) | [Allowlist 403](#panel-or-test-url-returns-403-not-allowlisted), [#113 caveat](#403-even-though-i-configured-the-domain--the-113-caveat) |
+| **403** | `allowlist` | Host not allowlisted (incl. redirect into a non-allowlisted host) | [Allowlist 403](#panel-or-test-url-returns-403-not-allowlisted), [Configured but 403](#403-even-though-i-configured-the-domain) |
+| **403** | `role` | **Test URL** by a user whose org role is below Editor | [Role 403](#test-url-returns-403-requires-the-editor-or-admin-role) |
 | **403** | `ip-blocklist` | Resolved/connect IP is blocked | [Private-IP 403](#403-for-an-internal--private-ip-target) |
 | **403** | `metadata` | Cloud-metadata host | [Private-IP 403](#403-for-an-internal--private-ip-target) |
 | **429** | `rate-limit` | Per-instance or per-domain rate tier exceeded | [429](#429-too-many-requests) |
@@ -357,7 +424,7 @@ the recorded reason never drift. Full details:
 | **400** | `bad-request` | Missing `url` / unbuildable target | [400](#400-bad-request-scheme--port--url) |
 | **405** | `method` | Non-GET method | [400](#400-bad-request-scheme--port--url) |
 | **504** | `timeout` | Per-request budget expired | [504](#504-timeout) |
-| **502** | `upstream` | Upstream resolve/transport/gateway failure | [502](#502-upstream--redirect-errors) |
+| **502** | `upstream` | Upstream resolve/transport/gateway failure, unsupported `Content-Encoding` | [502](#502-upstream--redirect-errors) |
 | **502** | `redirect-loop` | Redirect depth cap exceeded | [502](#502-upstream--redirect-errors) |
 
 If you believe a denial indicates a **security bypass** (e.g. an internal address

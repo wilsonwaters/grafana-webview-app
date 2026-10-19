@@ -10,7 +10,7 @@ This folder contains an importable Grafana dashboard that demonstrates the
 | Panel | Load mode | What you should see |
 |-------|-----------|---------------------|
 | **Direct mode — renders in-panel** | `direct` (`url: https://example.com`) | The external page rendered directly inside the panel. Needs no backend and no allowlist. |
-| **Proxy mode — requires allowlisting** | `proxy` (`url: https://example.org`) | The documented proxy-mode fallback. In-panel proxy rendering is deferred for v1 ([#102](https://github.com/wilsonwaters/grafana-webview-app/issues/102)), and the backend proxies nothing until the domain is allowlisted (see the prerequisite below). |
+| **Proxy mode — requires allowlisting** | `proxy` (`url: https://example.org`) | The page fetched through the backend proxy and rendered inside the panel in an isolated frame, once `example.org` is allowlisted. Until then the panel shows *"The page could not be loaded through the backend proxy (HTTP 403)"* with the reason *"target host is not allowlisted"*. The debug overlay shows the resolved mode. |
 
 A text panel at the top of the dashboard repeats these notes in-product.
 
@@ -29,18 +29,11 @@ uid is already taken in your instance.
 
 Proxy mode is **fail-closed**. The proxy domain allowlist is **empty by default
 (deny-all)**, so the proxy panel will not fetch anything until an administrator
-adds its target domain (`example.org`) to the allowlist. See
+adds its target domain (`example.org`) on the app's **Configuration** page
+(**Administration → Plugins and data → Plugins → Webview → Configuration**). The
+change applies to the next request; reload the dashboard to see the page. See
 [Administration → Allowlist management](../administration.md#2-allowlist-management).
 
-Even once the domain is allowlisted, in-panel rendering of proxied content is
-deferred for v1 ([#102](https://github.com/wilsonwaters/grafana-webview-app/issues/102)):
-the backend proxy pipeline runs and is verified, but the panel shows the
-documented fallback rather than the proxied page. The direct-mode panel is the one
-that visibly renders in this release.
-
 > **Note:** this example is intentionally **not** auto-provisioned with a
-> pre-allowlisted domain. Shipping a demo domain in product configuration via
-> `provisioning/` is unreliable for backend delivery
-> ([#113](https://github.com/wilsonwaters/grafana-webview-app/issues/113)) and we
-> do not bake demo domains into shipped config. Import the dashboard here and
-> allowlist the domain yourself.
+> pre-allowlisted domain. Production installs start with an empty allowlist, so
+> import the dashboard here and allowlist the domain yourself.

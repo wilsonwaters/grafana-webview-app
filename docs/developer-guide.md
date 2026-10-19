@@ -36,7 +36,7 @@ installation and configuration, see the companion docs listed under
 |------|---------|-------|
 | **Node.js** | `>= 22` | Pinned in `.nvmrc` (`22`); also enforced by the `engines` field in `package.json`. Use `nvm use` to match. |
 | **npm** | `10.x` | The repo pins `npm@10.9.7` via the `packageManager` field. |
-| **Go** | per `go.mod` | `go.mod` declares the Go toolchain version; CI resolves it with `go-version-file: go.mod`. |
+| **Go** | `1.27.2` | The `go` directive in `go.mod`. With the default `GOTOOLCHAIN=auto`, an older local Go downloads 1.27.2 automatically. |
 | **Mage** | latest | `go install github.com/magefile/mage@latest`. Ensure `$(go env GOPATH)/bin` is on your `PATH`. |
 | **Docker** + **Docker Compose v2** | current | The `docker compose` subcommand (v2) is required by the dev server. |
 | **Playwright Chromium** | installed via npm | Needed for end-to-end tests (see [Running tests](#running-tests)). |
@@ -44,6 +44,38 @@ installation and configuration, see the companion docs listed under
 This is an **app plugin with a Go backend** (`"backend": true`, `"executable": "gpx_webview"`
 in `src/plugin.json`). You therefore need both the Node and Go toolchains to build
 it fully.
+
+Toolchain as of v1.0.0: create-plugin scaffold 7.13.0, `@grafana/*` 13.2.4 with
+React 19 (the code stays React 18 compatible, because Grafana 12.4–13.1 run
+React 18), `@grafana/plugin-e2e` 3.15, grafana-plugin-sdk-go v0.297.0.
+
+### Windows workstations
+
+`@grafana/create-plugin` does not support Windows. On a Windows checkout the
+frontend build emits no `module.js` (a glob is built from a backslash path), and
+Jest finds no tests when the path contains a dot directory. Run the Node
+toolchain in a Linux container (or WSL), with `node_modules` in a named volume
+so the Linux binaries do not clash with a Windows install:
+
+```powershell
+docker run --rm -v "${PWD}:/work" -v "webview-node-modules:/work/node_modules" -w /work node:22 `
+  bash -c "npm ci && npm run typecheck && npm run lint && npm run test:ci && npm run build"
+```
+
+- `mage -v buildAll`, `go vet` and `bash scripts/security-suite.sh` work natively.
+  `go test -race` needs cgo; run it in the `golang:1.27.2` image.
+- For e2e tests, run Playwright in the official image on the Grafana container's
+  network:
+
+  ```powershell
+  docker run --rm --network container:wilsonwaters-webview-app -v "${PWD}:/work" `
+    -v "webview-node-modules:/work/node_modules" -w /work --ipc=host `
+    mcr.microsoft.com/playwright:v1.64.1-noble npx playwright test --retries=2
+  ```
+
+- `.gitattributes` keeps `*.sh` files at LF line endings so the dev container's
+  entrypoint works. If an old checkout still has CRLF, delete the file and run
+  `git checkout -- <file>`.
 
 ---
 
@@ -135,11 +167,22 @@ npm run server       # == docker compose up --build
 docker compose up -d --build
 ```
 
-- Grafana is served at **http://localhost:3000**.
+- Grafana is served at **http://localhost:3000**. You are signed in
+  automatically as an anonymous **Admin**.
 - The compose file mounts `./dist` into the container's plugin directory and sets
   `GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=wilsonwaters-webview-app,wilsonwaters-webview-panel`,
   so the **unsigned** dev build loads without signing.
+- It mounts `./provisioning`, which allowlists `example.com` for manual testing
+  and the e2e tests. Grafana applies it at every start, so allowlist changes you
+  save on the Configuration page are lost on restart.
 - Tear down with `docker compose down`.
+
+> **Local development only.** The dev container enables anonymous access with the
+> **Admin** role, runs Grafana in development mode and loads unsigned plugins.
+> Never expose it to an untrusted network, and never copy these settings to a
+> production Grafana. To test like CI (anonymous access off, development mode
+> off), start it with
+> `ANONYMOUS_AUTH_ENABLED=false DEVELOPMENT=false docker compose up -d --build`.
 
 ### Loading the unsigned plugin locally
 
@@ -274,9 +317,14 @@ GRAFANA_VERSION=12.4.0 npm run server
 
 # latest dev image (forward-compatibility check)
 GRAFANA_IMAGE=grafana-dev GRAFANA_VERSION=<latest-dev-tag> npm run server
+
+# the way CI runs one matrix entry (anonymous access and development mode off)
+ANONYMOUS_AUTH_ENABLED=false DEVELOPMENT=false GRAFANA_VERSION=13.2.4 \
+  docker compose up -d --build --force-recreate
 ```
 
-Then run `npm run e2e` in a second terminal.
+Then run `npm run e2e` in a second terminal. Use `--force-recreate` between
+runs so each run starts from the provisioned settings.
 
 In CI, the version matrix is **auto-resolved** by the official
 `grafana/plugin-actions/e2e-version` action (see

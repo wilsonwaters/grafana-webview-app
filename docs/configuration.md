@@ -12,7 +12,8 @@ model, see [`architecture.md`](./architecture.md). The project overview is in th
 [README](../README.md).
 
 > **Who can do this.** Adding and editing panels requires an **Editor** or
-> **Admin** role on the dashboard. **Proxy mode additionally requires an
+> **Admin** role on the dashboard. The **Test URL** button needs the **Editor** or
+> **Admin** organisation role. **Proxy mode and Test URL additionally require an
 > administrator to allowlist the target domain first** — see
 > [Before you start](#before-you-start).
 
@@ -31,7 +32,7 @@ model, see [`architecture.md`](./architecture.md). The project overview is in th
 9. [Debug overlay](#8-debug-overlay)
 10. [Hide elements (proxy mode only)](#9-hide-elements-proxy-mode-only)
 11. [Multiple panels on one dashboard](#10-multiple-panels-on-one-dashboard)
-12. [Known limitation: in-panel proxy rendering](#known-limitation-in-panel-proxy-rendering)
+12. [Proxy mode: what to expect](#proxy-mode-what-to-expect)
 13. [Option reference](#option-reference)
 
 ---
@@ -43,20 +44,22 @@ The panel can load a page two ways:
 - **Direct mode** — a plain browser iframe pointing straight at the target URL.
   Works for any site that *permits* being framed, and renders **inside the
   panel**. Needs no backend and no allowlist.
-- **Proxy mode** — the page is fetched and re-served by the plugin's backend so
-  that sites which block framing (via `X-Frame-Options` or a
-  `Content-Security-Policy` `frame-ancestors` directive) can still be embedded.
+- **Proxy mode** — the plugin's backend fetches the page, removes the headers
+  that block framing (`X-Frame-Options` or a `Content-Security-Policy`
+  `frame-ancestors` directive), and the panel shows it in an isolated, sandboxed
+  frame. It also renders **inside the panel**.
 
 **Proxy mode is fail-closed.** On a fresh install the backend proxies *nothing*
-until an administrator adds the target domain to the allowlist
-(`jsonData.allowedDomains`). If you intend to use proxy mode — or the
-[**Test URL**](#3-test-the-url-frameability-check) check returns a proxy
-recommendation — ask your Grafana administrator to allowlist the domain first.
-See [Administration → Allowlist management](./administration.md#2-allowlist-management).
+until an administrator adds the target domain to the allowlist on the app's
+**Configuration** page. The [**Test URL**](#3-test-the-url-frameability-check)
+check uses the same allowlist, so it fails for any domain that is not on the
+list, even a site that allows framing. Ask your Grafana administrator to
+allowlist the domain first. See
+[Administration → Allowlist management](./administration.md#2-allowlist-management).
 
-> See also the [known limitation](#known-limitation-in-panel-proxy-rendering)
-> about in-panel proxy rendering before relying on proxy mode for a production
-> dashboard.
+> Read [Proxy mode: what to expect](#proxy-mode-what-to-expect) before you rely
+> on proxy mode for a production dashboard. Some kinds of page do not work in
+> proxy mode.
 
 ---
 
@@ -75,9 +78,9 @@ etc.).
 
 ![The Web View panel editor: URL, Load mode, Auto-refresh, Show debug overlay and the viewport positioner](screenshots/configuration/panel-editor-full.png)
 
-> The panel is distributed **unsigned** during development, which is why the
-> picker shows an *Unsigned* badge. Your administrator must allow unsigned
-> plugins, or install a signed build — see [`signing.md`](./signing.md).
+> These screenshots come from the local development build, which is
+> **unsigned**, so the picker shows an *Unsigned* badge. A signed release build
+> does not show it — see [`signing.md`](./signing.md).
 
 ---
 
@@ -89,6 +92,13 @@ into the **URL** field.
 - Leave it blank and the panel shows *"No URL configured."* until you fill it in.
 - The live preview and the viewport positioner update as soon as a URL is
   entered.
+- Only absolute `http://` and `https://` URLs are loaded. Any other value — for
+  example a relative path, a `javascript:` or `data:` URL, a URL with a user
+  name or password (`user:password@host`), or a URL that contains tabs or line
+  breaks — shows *"This URL cannot be displayed"* with the reason, and no page
+  is loaded. This protects every viewer of the dashboard.
+
+![The editor preview refuses a javascript: URL](screenshots/issue-102/grafana-13.2.4-chromium-editor-unsafe-url.png)
 
 ---
 
@@ -105,14 +115,22 @@ The result appears as a coloured note beneath the button:
 | --- | --- | --- |
 | **Direct — frames without a proxy** (green) | The site permits framing. | Leave the load mode on **Auto** or set it to **Direct**. |
 | **Proxied — framing blocked, use the proxy** (blue) | The site blocks framing; the proxy is needed. | Make sure the domain is [allowlisted](./administration.md#2-allowlist-management), then use **Auto** or **Proxy**. |
-| **Error** (red) | The check could not complete (e.g. the domain is not allowlisted, the host is unreachable, or the request was denied). | Read the message; typically the administrator needs to allowlist the domain. |
+| **Error** (red) | The check could not complete (e.g. the domain is not allowlisted, your role is below Editor, or the request was denied). | Read the message. *"target host is not allowlisted"* means the administrator needs to allowlist the domain. *"The URL test requires the Editor or Admin role."* means your organisation role is Viewer. |
 
 The recommendation is saved with the panel (as `detectedMode`) so that
 **Auto** mode can apply it at view time *without re-checking*. The check is only
 ever run here, in the editor — view mode never re-detects.
 
-> **Test URL requires the plugin backend.** If the backend is unavailable the
-> button is disabled and a note explains that only direct iframing is possible.
+If the backend cannot reach the page (for example a timeout or a DNS failure),
+the check still returns a result: it recommends **Proxy**, because the proxy
+handles more cases than a plain iframe.
+
+> **Test URL requires the plugin backend, an allowlisted domain and the Editor
+> or Admin role.** If the backend is unavailable the button is disabled and a
+> note explains that only direct iframing is possible. The role check uses your
+> basic organisation role; a custom RBAC role that lets a Viewer edit dashboards
+> does not unlock **Test URL**. Without the check you can still choose **Direct**
+> or **Proxy** by hand.
 
 ---
 
@@ -124,7 +142,7 @@ The **Load mode** control decides how the saved URL is loaded:
 | --- | --- |
 | **Auto** (default) | Use the mode recorded by the last **Test URL** check (`detectedMode`). If no check has been run, it falls back to **Direct**. |
 | **Direct** | Always use a plain iframe — no backend. Best for sites that permit framing. Renders inside the panel. |
-| **Proxy** | Always route through the backend proxy. Use for sites that block framing. Requires the domain to be [allowlisted](./administration.md#2-allowlist-management). |
+| **Proxy** | Always route through the backend proxy. Use for sites that block framing. Renders inside the panel in an isolated frame. Requires the domain to be [allowlisted](./administration.md#2-allowlist-management). |
 
 **When to use each**
 
@@ -134,6 +152,11 @@ The **Load mode** control decides how the saved URL is loaded:
   dependency).
 - Use **Proxy** for framing-blocked sites, once an admin has allowlisted the
   domain.
+
+In proxy mode the editor preview shows the page through the proxy too, so you
+can position the viewport on the same content that viewers will see:
+
+![The panel editor with a proxy-mode preview of example.com](screenshots/issue-102/grafana-13.2.4-chromium-editor-proxy-preview.png)
 
 > **If the backend is unavailable**, Auto and Proxy are hidden and only
 > **Direct** can be selected; an info note explains why. An already-saved
@@ -195,6 +218,10 @@ laid out in.
 - `0` (default) disables auto-refresh.
 - Any positive value reloads the iframe every *N* seconds — useful for status
   pages, radar loops or dashboards that update on their own.
+- In proxy mode each reload fetches the page through the proxy again. Every
+  open dashboard makes one proxy request per panel per interval, and these
+  requests count against the proxy's rate limits. Keep the interval as long as
+  the content allows.
 
 Each panel keeps its own independent refresh cycle, so multiple Web View panels
 on one dashboard do not interfere with each other.
@@ -260,21 +287,41 @@ own URL, load mode, viewport and refresh interval. They are fully independent.
 
 ---
 
-## Known limitation: in-panel proxy rendering
+## Proxy mode: what to expect
 
-**Full in-panel rendering of proxied pages is deferred (FR5).**
+In proxy mode only the HTML page goes through Grafana. The panel shows it in a
+frame with an isolated origin, and the viewer's browser loads the page's images,
+scripts and stylesheets directly from the original site. This keeps the page
+away from the viewer's Grafana session, and it has these effects:
 
-- **Direct mode renders the page inside the panel** today, exactly as shown in
-  the screenshots above.
-- **Proxy mode** is intended for framing-blocked sites, but the complete in-panel
-  rendering path for proxied content is still being finalised. If a proxy-mode
-  panel does not render the page in-panel yet, that is expected and tracked — it
-  is not a misconfiguration on your part. For sites that permit framing, prefer
-  **Direct** mode. When the backend proxy is unavailable, a proxy-mode panel
-  shows a clear fallback message rather than a broken frame.
+- **The viewer's browser must be able to reach the site.** If only the Grafana
+  server can reach it, the page appears without styles or images.
+- **Grafana's Content Security Policy blocks proxied scripts.** If your Grafana
+  runs with `[security] content_security_policy = true`, proxied pages show
+  markup and images only.
+- **Cookies and storage are not kept.** The page gets in-memory cookies and
+  storage that are lost on every reload, so a page that needs a login or
+  remembers settings does not work.
+- **Single-page apps that call their own APIs do not work.** Those calls are
+  cross-origin from the isolated frame. Web fonts and module scripts load only if
+  the site allows cross-origin requests.
+- **Bot protection can block the page.** Sites protected by services such as
+  Akamai or reCAPTCHA may refuse the proxy or the viewer's browser.
+- **Example:** the new Bureau of Meteorology radar page is a single-page app
+  with bot protection and does not work in proxy mode. The legacy radar loop
+  `https://reg.bom.gov.au/products/IDR663.loop.shtml` works in proxy mode, and
+  in direct mode too, because it allows framing.
 
-If you only need to embed pages that allow framing, you can use Direct mode with
-no caveats.
+The panel shows a clear message instead of a broken frame when it cannot load a
+page: *"Checking backend availability…"* while it waits, a fallback message if
+the backend is unavailable, and *"The page could not be loaded through the
+backend proxy (HTTP …)"* with the reason when the proxy refuses the request.
+
+![Proxy-mode, direct-mode and error states on one dashboard](screenshots/issue-102/grafana-13.2.4-chromium-dashboard.png)
+
+For a site that allows framing, **Direct** mode avoids all of these limits. See
+[Troubleshooting](./troubleshooting.md#proxy-mode-page-shows-without-styles-images-or-scripts)
+for how to recognise each case.
 
 ---
 
@@ -284,7 +331,7 @@ All options live in the panel editor's **Web View** section unless noted.
 
 | Option (editor label) | JSON field | Type / values | Default | Notes |
 | --- | --- | --- | --- | --- |
-| URL | `url` | string | `""` | The page to embed. |
+| URL | `url` | string | `""` | The page to embed. Absolute `http://` or `https://` URL only. |
 | Load mode | `loadMode` | `auto` \| `direct` \| `proxy` | `auto` | How the URL is loaded. |
 | (set by Test URL) | `detectedMode` | `direct` \| `proxy` \| `null` | `null` | Recorded recommendation used by Auto mode. |
 | Position viewport → X | `viewportX` | number (px) | `0` | Horizontal offset of the framed region. |

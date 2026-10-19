@@ -10,8 +10,8 @@ manually from a released, privately-signed archive (or build it from source),
 place it in Grafana's plugins directory, and restart Grafana.
 
 > **Catalog install (Path 2) is out of scope for v1.** Submission to the Grafana
-> plugin catalog for Community signing requires Grafana Labs review and is
-> deferred per the project plan (see [`docs/signing.md`](./signing.md#community-signing--catalog-submission-path-2)).
+> plugin catalog for Community signing requires Grafana Labs review and has not
+> started (see [`docs/signing.md`](./signing.md#community-signing--catalog-submission-path-2)).
 > Until then, a public/community signature is rejected (HTTP 409) and only the
 > self-hosted install methods below apply.
 
@@ -35,7 +35,8 @@ see [`docs/signing.md`](./signing.md). For the architecture and threat model, se
 - [4. Required first-time step: allowlist at least one domain](#4-required-first-time-step-allowlist-at-least-one-domain)
 - [5. Verify the install](#5-verify-the-install)
 - [6. Restart requirements](#6-restart-requirements)
-- [7. Path 2 (Grafana Cloud catalog) — deferred](#7-path-2-grafana-cloud-catalog--deferred)
+- [7. Path 2 (Grafana Cloud catalog) — not yet available](#7-path-2-grafana-cloud-catalog--not-yet-available)
+- [8. Do not use the development setup in production](#8-do-not-use-the-development-setup-in-production)
 
 ---
 
@@ -43,7 +44,8 @@ see [`docs/signing.md`](./signing.md). For the architecture and threat model, se
 
 | Requirement | Detail |
 | --- | --- |
-| **Grafana** | **>= 12.4.0** (`grafanaDependency` in `src/plugin.json`). |
+| **Grafana** | **>= 12.4.0** (`grafanaDependency` in `src/plugin.json`). Tested on 12.4, 13.0, 13.1 and 13.2. Proxy mode needs no change to Grafana's `allow_embedding` or cookie settings. |
+| **Browsers** | Tested with Playwright Chromium, Firefox and WebKit builds. For proxy mode, viewers' browsers must be able to reach the proxied sites, because images, scripts and stylesheets load from the site directly. |
 | **Backend-plugin support** | This is an **app plugin with a Go backend** (`"backend": true`, executable `gpx_webview`). The Grafana host must be able to **run the plugin binary** as a subprocess. Hosted/managed Grafana that does not permit backend plugins can only use **Direct mode** (see below). |
 | **Platform binary** | The released archive bundles the backend executable. Install on a host whose OS/architecture matches the packaged binary, or build from source for your platform (see [§3.4](#34-build-from-source)). |
 | **Install permission** | Filesystem access to Grafana's plugins directory and the ability to restart Grafana (or your orchestration equivalent). |
@@ -71,10 +73,11 @@ for a self-hosted install:
 
 The release build is **privately signed** for specific Grafana instance URLs
 (`rootUrls`). The signature is produced by the release workflow
-(`.github/workflows/release.yml`), which signs for the deployment host
-(`GRAFANA_INSTANCE_URL`, provided by the `QA-Alintech` Actions environment)
-**plus** `http://localhost:3000` so the same build also loads during local
-testing. See [`docs/signing.md`](./signing.md) for the full mechanism.
+(`.github/workflows/release.yml`), which runs the `sign` script in
+`package.json`. That script signs for the project's deployment host
+(`https://graphs.alintech.com.au`) **plus** `http://localhost:3000`, so the same
+build also loads during local testing. See [`docs/signing.md`](./signing.md) for
+the full mechanism.
 
 > **A private signature is valid only for the Grafana base URL(s) it was signed
 > for.** If the `root_url` your Grafana actually serves from does not match one of
@@ -82,7 +85,7 @@ testing. See [`docs/signing.md`](./signing.md) for the full mechanism.
 > the most common private-signing failure. If your deployment URL differs from the
 > one the published release was signed for, you must **re-sign for your own
 > instance URL** — see [`docs/signing.md`](./signing.md#private-signing-for-specific-instances-path-1)
-> (`npm run sign -- --rootUrls https://grafana.example.com`). The signed
+> (`npx @grafana/sign-plugin@latest --rootUrls https://grafana.example.com`). The signed
 > `rootUrls` must match Grafana's configured `root_url` exactly (scheme + host +
 > any sub-path), so get `[server] root_url` right first.
 
@@ -90,8 +93,8 @@ testing. See [`docs/signing.md`](./signing.md) for the full mechanism.
 
 Alternatively, run the plugin **unsigned** by explicitly allow-listing its ids.
 This skips the `rootUrls` constraint but tells Grafana to load code it has not
-verified — acceptable for internal/controlled deployments, but prefer the signed
-path where you can. Set:
+verified. Use it only for testing on a trusted network; production installs
+should use a signed build. Set:
 
 ```ini
 # grafana.ini — [plugins]
@@ -218,7 +221,7 @@ For a platform the published release does not cover, or to run your own signed
 build:
 
 ```bash
-# Prerequisites: Node >= 22, Go (per go.mod), Mage, Docker — see the Developer guide.
+# Prerequisites: Node >= 22, Go 1.27.2 (per go.mod), Mage — see the Developer guide.
 git clone https://github.com/wilsonwaters/grafana-webview-app.git
 cd grafana-webview-app
 npm install
@@ -230,15 +233,16 @@ This produces a `dist/` directory containing the full plugin (frontend assets +
 `plugin.json` + backend binary). Then either:
 
 - **sign it** for your instance and install the resulting archive —
-  `npm run sign -- --rootUrls https://grafana.example.com` (see
+  `npx @grafana/sign-plugin@latest --rootUrls https://grafana.example.com` (see
   [`docs/signing.md`](./signing.md#private-signing-for-specific-instances-path-1)), or
 - copy `dist/` into the plugins directory as
   `.../plugins/wilsonwaters-webview-app/` and run **unsigned** with both ids
-  allow-listed.
+  allow-listed (testing on a trusted network only).
 
 Restart Grafana, enable the app, and complete [§4](#4-required-first-time-step-allowlist-at-least-one-domain).
 See the [Developer guide](./developer-guide.md) for the full local workflow (the
-`npm run server` Docker-Compose dev stack builds and loads the plugin for you).
+`npm run server` Docker-Compose dev stack builds and loads the plugin for you —
+for local development only, see [§8](#8-do-not-use-the-development-setup-in-production)).
 
 ---
 
@@ -250,30 +254,18 @@ allowlist **denies every proxy request with HTTP 403** by design (fail-closed
 SSRF/open-proxy containment). Direct mode is unaffected, but **proxy mode and
 "Test URL" will 403 until you add at least one domain.**
 
-Configure the allowlist via the **Grafana plugin-settings API** (the supported
-method today):
+As an organisation Admin, open **Administration → Plugins and data → Plugins →
+Webview → Configuration**, click **Add domain**, enter the host name, and click
+**Save settings**. The backend uses the new allowlist for the next request; you
+do not need to restart Grafana. The same page sets the six global limits. See the
+[Administration guide §2](./administration.md#2-allowlist-management) for the
+per-domain options, the settings API, and who can use the proxy.
 
-```
-POST /api/plugins/wilsonwaters-webview-app/settings
-```
-
-with a `jsonData` body containing the **complete** settings object (the API
-replaces `jsonData` wholesale). See the
-[Administration guide §2](./administration.md#2-allowlist-management) for the exact
-request shape, the per-domain options, and provisioning.
-
-> **Do not use the bundled Configuration page to manage the allowlist.** The app's
-> Configuration page is the scaffold default: it edits only `apiUrl`/`apiKey` and
-> **saving it overwrites `jsonData`, silently dropping any `allowedDomains`.** Use
-> the settings API (or provisioning, with the caveat below). See
-> [Administration guide §2](./administration.md#2-allowlist-management).
-
-> **Provisioned allowlists may not reach the backend in all setups (#113).**
-> Provisioning `jsonData.allowedDomains` via `provisioning/plugins/*.yaml` does not
-> reliably deliver the allowlist to the backend in every Grafana setup. Prefer the
-> settings API and **always verify** afterwards — see
-> [Administration guide §11](./administration.md#11-known-operational-caveats) and
-> [§5](#5-verify-the-install) below.
+> **Provisioning is for development and CI only.** The repository's
+> `provisioning/plugins/apps.yaml` allowlists `example.com` for the development
+> container and the tests. Do not copy it to a production Grafana: a production
+> install starts with an empty allowlist. A provisioning file is applied at every
+> Grafana start and replaces the settings saved on the Configuration page.
 
 ---
 
@@ -289,12 +281,13 @@ request shape, the per-domain options, and provisioning.
    `wilsonwaters-webview-panel`.)
 3. **Backend is up (for proxy mode).** The panel editor offers Proxy mode and
    "Test URL" (these are disabled when no backend is detected via `/health`).
-4. **Allowlist actually took effect.** Run the panel's **Test URL** against an
-   **allowlisted** host (or call `/check-frameable?url=…`) and confirm you get a
-   verdict (**HTTP 200**) rather than a **403** allowlist denial. This is the single
-   most reliable confirmation that your configuration reached the backend; a 403 on
-   a host you believe you allowlisted is the signature of the #113 caveat. See
+4. **Allowlist took effect.** As an Editor or Admin, run the panel's **Test URL**
+   against an **allowlisted** host and confirm you get a verdict (Direct or
+   Proxied) rather than a **403** allowlist denial. See
    [Administration guide §1 step 5](./administration.md#1-first-time-setup-checklist).
+5. **Proxy mode renders.** Set a panel to **Proxy** for an allowlisted page and
+   confirm the page appears in the panel. If it appears without styles or images,
+   see the [Troubleshooting guide](./troubleshooting.md#proxy-mode-page-shows-without-styles-images-or-scripts).
 
 ---
 
@@ -303,24 +296,43 @@ request shape, the per-domain options, and provisioning.
 - **Installing, upgrading, or changing `plugin.json` requires a Grafana server
   restart.** Backend app plugins are loaded at startup, and any change to the
   plugin manifest only takes effect after restarting Grafana.
-- **Settings changes require the plugin instance to reload.** The backend reads
-  its settings (including the allowlist and tuning) **once at instance start**, so
-  after editing configuration — especially via provisioning — restart Grafana (or
-  reload the plugin) and re-verify with a Test URL. See
+- **Settings changes do not need a restart.** Settings saved on the
+  Configuration page (or through the settings API) apply to the next request.
+  A provisioning file is the exception: Grafana reads it only at startup. See
   [Administration guide §2](./administration.md#2-allowlist-management) and
   [§10 (upgrade & rollback)](./administration.md#10-upgrade--rollback).
 
 ---
 
-## 7. Path 2 (Grafana Cloud catalog) — deferred
+## 7. Path 2 (Grafana Cloud catalog) — not yet available
 
 Installing from the Grafana plugin catalog (catalog browse / `grafana-cli plugins
 install`) requires the plugin to be **accepted into the catalog with a Community
-signature**, which needs Grafana Labs' review. That path (**Path 2**) is
-**deferred and out of scope for v1**. Until then:
+signature**, which needs Grafana Labs' review. That path (**Path 2**) is **out of
+scope for v1**. Until then:
 
 - Use the self-hosted methods in [§3](#3-install-methods).
 - A public/community signature is **rejected (HTTP 409)** until the plugin is in
   the catalog.
 - Catalog submission prep is tracked separately (see
   [`docs/signing.md`](./signing.md#community-signing--catalog-submission-path-2)).
+
+---
+
+## 8. Do not use the development setup in production
+
+The repository's `docker-compose.yaml` (`npm run server`) is for local
+development only. It:
+
+- signs every visitor in as an anonymous **Admin** (`GF_AUTH_ANONYMOUS_ENABLED`
+  with `GF_AUTH_ANONYMOUS_ORG_ROLE=Admin`);
+- runs Grafana in development mode;
+- loads the unsigned plugin (`GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS`);
+- provisions `example.com` into the allowlist.
+
+Never expose that container to an untrusted network, and never copy its
+environment variables or `provisioning/` files to a production Grafana. In
+production, install the signed release archive
+([§3.1](#31-bare-metal--vm-download-the-signed-release)), keep anonymous access
+off unless you accept that anonymous viewers can use the proxy for allowlisted
+sites, and start from an empty allowlist.
