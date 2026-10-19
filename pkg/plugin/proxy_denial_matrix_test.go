@@ -42,6 +42,7 @@ func TestReasonStatusTableExhaustiveAndConsistent(t *testing.T) {
 		denialReasonTimeout:     http.StatusGatewayTimeout,        // 504
 		denialReasonUpstream:    http.StatusBadGateway,            // 502
 		denialReasonRedirect:    http.StatusBadGateway,            // 502 (CR4 redirect depth cap)
+		denialReasonRole:        http.StatusForbidden,             // 403 (VR-3 /check-frameable role gate)
 	}
 	for reason, wantStatus := range want {
 		if got := statusForReason(reason); got != wantStatus {
@@ -279,9 +280,7 @@ func TestProxyErrorHandlerReasonMapping(t *testing.T) {
 			if want := statusForReason(gotReason); rec.Code != want {
 				t.Fatalf("status %d does not match reasonStatus[%q]=%d", rec.Code, gotReason, want)
 			}
-			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-				t.Fatalf("error response missing CORS: %q", got)
-			}
+			assertNoCORSHeaders(t, tc.name, rec.Header())
 		})
 	}
 }

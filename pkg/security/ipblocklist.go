@@ -106,10 +106,15 @@ var blockedRanges = func() []blockedRange {
 		{"198.51.100.0/24", ReasonReserved}, // TEST-NET-2 documentation
 		{"203.0.113.0/24", ReasonReserved},  // TEST-NET-3 documentation
 		{"240.0.0.0/4", ReasonReserved},     // former Class E / reserved
-		{"::/8", ReasonReserved},            // IPv6 reserved (includes ::)
-		{"2001:db8::/32", ReasonReserved},   // IPv6 documentation
-		{"100::/64", ReasonReserved},        // IPv6 discard-only (RFC 6666)
-		{"2001::/23", ReasonReserved},       // IETF protocol assignments
+		// NAT64 local-use prefix (RFC 8215). The operator chooses where the
+		// IPv4 address sits inside it, so it cannot be unwrapped and classified;
+		// block it outright. (::/8 below also covers it; the explicit entry
+		// keeps the block if that range ever changes.)
+		{"64:ff9b:1::/48", ReasonReserved},
+		{"::/8", ReasonReserved},          // IPv6 reserved (includes ::)
+		{"2001:db8::/32", ReasonReserved}, // IPv6 documentation
+		{"100::/64", ReasonReserved},      // IPv6 discard-only (RFC 6666)
+		{"2001::/23", ReasonReserved},     // IETF protocol assignments
 	}
 	ranges := make([]blockedRange, 0, len(specs))
 	for _, s := range specs {
@@ -137,6 +142,41 @@ func normalize(ip net.IP) net.IP {
 		return nil
 	}
 	return ip
+}
+
+// IPv6 prefixes that carry an IPv4 address in a fixed position (VR-11).
+var (
+	// nat64WellKnown is the NAT64 well-known prefix (RFC 6052). The last 32
+	// bits are the IPv4 address the translator connects to.
+	nat64WellKnown = mustCIDR("64:ff9b::/96")
+	// sixToFour is the 6to4 prefix (RFC 3056). Bits 16-47 are the IPv4 address
+	// of the 6to4 site the relay routes to.
+	sixToFour = mustCIDR("2002::/16")
+)
+
+// embeddedIPv4 returns the IPv4 address that a NAT64 well-known-prefix or 6to4
+// address embeds, or nil for any other address. ip must be a normalised
+// 16-byte IPv6 address.
+//
+// VR-11 design choice: unwrap and classify instead of blocking both prefixes.
+// The embedded IPv4 address is where the packets really go, so classifying it
+// blocks every internal target (for example 2002:a9fe:a9fe:: and
+// 64:ff9b::a9fe:a9fe both reach 169.254.169.254) while public targets keep
+// working. That matters for NAT64: on an IPv6-only host with DNS64, every
+// IPv4-only site resolves to 64:ff9b::/96, and blocking the whole prefix (as
+// the ::/8 reserved range did before) breaks the proxy for those sites.
+func embeddedIPv4(ip net.IP) net.IP {
+	if len(ip) != net.IPv6len {
+		return nil
+	}
+	switch {
+	case nat64WellKnown.Contains(ip):
+		return net.IPv4(ip[12], ip[13], ip[14], ip[15]).To4()
+	case sixToFour.Contains(ip):
+		return net.IPv4(ip[2], ip[3], ip[4], ip[5]).To4()
+	default:
+		return nil
+	}
 }
 
 // Policy carries the per-request relaxation decision for the IP blocklist. The
@@ -173,9 +213,11 @@ func isRelaxablePrivate(reason string) bool {
 //
 // IPv4-mapped IPv6 addresses are unwrapped to their IPv4 form before
 // classification, so a mapped address is subject to the same IPv4 ranges as the
-// equivalent bare IPv4 address. A nil or otherwise invalid IP is treated as
-// blocked with reason "reserved" (fail-closed): callers should never dial an
-// address they cannot classify.
+// equivalent bare IPv4 address. NAT64 well-known-prefix (64:ff9b::/96) and 6to4
+// (2002::/16) addresses are classified by the IPv4 address they embed (see
+// embeddedIPv4); the NAT64 local-use prefix 64:ff9b:1::/48 is always blocked. A
+// nil or otherwise invalid IP is treated as blocked with reason "reserved"
+// (fail-closed): callers should never dial an address they cannot classify.
 //
 // Public, globally routable addresses (for example 8.8.8.8, 1.1.1.1, or a
 // public IPv6 such as 2606:4700:4700::1111) are not blocked and return
@@ -197,6 +239,11 @@ func ClassifyIP(ip net.IP) (blocked bool, reason string) {
 // case the original (blocked, reason) result is returned UNCHANGED, so a strict
 // Policy{} relaxes nothing and the fail-closed nil sentinel (reason
 // ReasonReserved, not relaxable) is preserved.
+//
+// The opt-in never relaxes a NAT64 or 6to4 address that embeds an RFC 1918
+// address: the NAT64 well-known prefix must not carry non-global IPv4 (RFC 6052
+// section 3.1) and a 6to4 address embeds the public address of the 6to4 site,
+// so such an address is never a legitimate internal status board.
 func ClassifyIPPolicy(ip net.IP, p Policy) (blocked bool, reason string) {
 	n := normalize(ip)
 	if n == nil {
@@ -204,9 +251,14 @@ func ClassifyIPPolicy(ip net.IP, p Policy) (blocked bool, reason string) {
 		// is NOT relaxable, so the policy can never lift this sentinel.
 		return true, ReasonReserved
 	}
+	translated := false
+	if v4 := embeddedIPv4(n); v4 != nil {
+		n = v4
+		translated = true
+	}
 	for _, r := range blockedRanges {
 		if r.net.Contains(n) {
-			if p.AllowPrivate && isRelaxablePrivate(r.reason) {
+			if p.AllowPrivate && !translated && isRelaxablePrivate(r.reason) {
 				if p.OnPrivatePermit != nil {
 					p.OnPrivatePermit(n, r.reason)
 				}

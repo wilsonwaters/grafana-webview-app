@@ -48,10 +48,10 @@ const proxyPath = "/proxy"
 
 // wvRedirParam is the reserved, internal query parameter the proxy uses to carry
 // the redirect-hop depth across browser-driven re-entries (CR4). It lives ONLY on
-// the proxy URL (the /proxy?url=… or /proxy-resource?url=… link the browser
-// follows), NEVER on the upstream request: the outbound request is rebuilt purely
+// the proxy URL (the /proxy?url=… Location the panel's fetch follows), NEVER on
+// the upstream request: the outbound request is rebuilt purely
 // from the `url` target param (see serveProxy's Rewrite / buildTargetURL), so this
-// control param is never forwarded upstream. serve reads it inbound to learn the
+// control param is never forwarded upstream. ServeHTTP reads it inbound to learn the
 // current hop depth; ModifyResponse writes depth+1 onto the rewritten Location.
 //
 // CR4 deliberately does NOT follow redirects server-side. Instead a 3xx response
@@ -129,6 +129,12 @@ var strippedResponseHeaders = []string{
 	"Public-Key-Pins",             // HPKP: would pin cert keys against the Grafana origin
 	"Public-Key-Pins-Report-Only", // HPKP report-only sibling: same pinning policy, report mode
 	"Clear-Site-Data",             // could wipe the viewer's cookies/storage/cache for the Grafana origin
+
+	// Client-side navigation — a browser honours "Refresh: 0; url=..." like a
+	// redirect, but it bypasses the per-hop redirect re-validation (CR4) that
+	// only Location gets (VR-5). The <meta http-equiv=refresh> twin is removed
+	// by the rewriter.
+	"Refresh",
 }
 
 // xGrafanaHeaderPrefix is swept (case-insensitively) off every outgoing request:
@@ -137,6 +143,15 @@ var strippedResponseHeaders = []string{
 // — rather than an enumerated list — guarantees no current or future Grafana
 // identity header leaks to an arbitrary upstream.
 const xGrafanaHeaderPrefix = "x-grafana-"
+
+// corsHeaderPrefix is swept (case-insensitively) off every proxied response
+// (R1 D2). /proxy and /check-frameable are same-origin only: the panel calls
+// them from the Grafana page, so they send no Access-Control-* headers at all.
+// An upstream's own CORS headers must not pass through either: with
+// Access-Control-Allow-Origin set to another site and
+// Access-Control-Allow-Credentials: true, an allowlisted upstream could let
+// that site read proxy responses with the viewer's Grafana session.
+const corsHeaderPrefix = "access-control-"
 
 // defaultInstanceID is the rate-limiter instance key used when the plugin
 // request context does not carry an org/user we can key on. P1 keys the
@@ -404,13 +419,19 @@ func (r *privatePermitRecorder) snapshot() []permittedIP {
 	return out
 }
 
-// setCORSHeaders applies permissive CORS headers to every /proxy response. The
-// proxy is an unauthenticated, stateless fetcher, so a wildcard origin is
-// appropriate: it carries no credentials and sets no cookies.
-func setCORSHeaders(h http.Header) {
-	h.Set("Access-Control-Allow-Origin", "*")
-	h.Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	h.Set("Access-Control-Allow-Headers", "*")
+// deleteHeadersWithPrefix deletes every header whose lower-cased name starts
+// with prefix. It collects the keys first so the map is not mutated while it is
+// ranged over.
+func deleteHeadersWithPrefix(h http.Header, prefix string) {
+	var keys []string
+	for key := range h {
+		if strings.HasPrefix(strings.ToLower(key), prefix) {
+			keys = append(keys, key)
+		}
+	}
+	for _, key := range keys {
+		delete(h, key)
+	}
 }
 
 // writeDenial writes a denial response for the given reason: it looks up the
@@ -426,128 +447,109 @@ func writeDenial(w http.ResponseWriter, reason, message string) string {
 	return reason
 }
 
-// endpointTopLevel / endpointResource name the two endpoints that share the
-// security pipeline. The value is recorded on the audit log's `endpoint` field
-// so the two streams are distinguishable even though they share the metrics
-// collectors (sharing is acceptable — see newProxyMetrics). endpointTopLevel is
-// the HTML-rewriting /proxy endpoint; endpointResource is the non-rewriting,
-// Content-Type-preserving /proxy-resource subresource endpoint (CR3).
+// endpointTopLevel / endpointCheckFrameable name the endpoints that share the
+// security pipeline: the HTML-rewriting /proxy endpoint and /check-frameable
+// (FR1). The value is recorded on the audit log's `endpoint` field so the
+// streams are distinguishable even though they share the metrics collectors
+// (sharing is acceptable — see newProxyMetrics).
 const (
-	endpointTopLevel = "proxy"
-	endpointResource = "proxy-resource"
+	endpointTopLevel       = "proxy"
+	endpointCheckFrameable = "check-frameable"
 )
 
-// proxyResourceHandler adapts a proxyHandler to serve the /proxy-resource
-// subresource endpoint (CR3). It carries NO state of its own: it shares the SAME
-// pipeline, transport, rate limiter, audit logger and metrics as the owning
-// proxyHandler, and differs ONLY in the ModifyResponse step — no HTML rewriting,
-// so the upstream Content-Type and body (including a gzip Content-Encoding) are
-// passed through unchanged, subject to the P4 size limit. a.proxyResource is
-// constructed once alongside a.proxy and registered at proxyResourcePath.
-type proxyResourceHandler struct {
-	p *proxyHandler
+// requestAudit is the per-request audit and metrics state of one pipeline
+// request (P5 / AC 28, P6 / AC 29). beginAudit creates it and endAudit, which
+// the handler defers, emits it. That single deferred emission is the only place
+// an audit entry is written, so a new denial path cannot forget it. Handler
+// branches set url, denied and allowPrivate on their way out. The handler
+// goroutine owns the struct; permits is the only field the dial goroutine
+// writes, and it has its own lock.
+type requestAudit struct {
+	endpoint string
+	start    time.Time
+	rec      *auditResponseWriter
+	// url is the best-known target for the log line: a placeholder until the
+	// raw `url` param is read, then the validated, normalised target.
+	url string
+	// denied is the denial-reason token (empty for a served request).
+	denied string
+	// allowPrivate is the matched domain's AllowPrivateIP opt-in (false until
+	// the allowlist matches).
+	allowPrivate bool
+	// permits collects the private IPs the opt-in admitted at the SF4 gate.
+	permits *privatePermitRecorder
 }
 
-// ServeHTTP implements the /proxy-resource endpoint. It runs the IDENTICAL
-// security pipeline + header policy as /proxy via the shared serve method,
-// selecting the resource ModifyResponse (framing + response-header strip only —
-// NO HTML rewrite; Content-Type and body streamed through unchanged).
-func (h proxyResourceHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	h.p.serve(w, req, endpointResource)
+// beginAudit marks the request in flight and wraps w so the final status and
+// body size are recorded. The caller must defer endAudit and write through
+// a.rec.
+func (p *proxyHandler) beginAudit(w http.ResponseWriter, endpoint string) *requestAudit {
+	p.metrics.inFlight.Inc()
+	return &requestAudit{
+		endpoint: endpoint,
+		start:    time.Now(),
+		rec:      newAuditResponseWriter(w),
+		url:      auditMissingURL,
+		permits:  &privatePermitRecorder{},
+	}
 }
 
-// ServeHTTP implements the /proxy endpoint. It delegates to the shared serve
-// method, which runs the full security pipeline; the endpoint argument selects
-// the HTML-rewriting ModifyResponse for /proxy.
-func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	p.serve(w, req, endpointTopLevel)
+// endAudit emits the single audit entry and the per-request metrics:
+// requests_total{status} and the duration histogram always, denials_total only
+// when a.denied is set. It also emits one distinct Warn line (and the permit
+// metric) per private IP that an AllowPrivateIP opt-in admitted, because that
+// re-opened SSRF surface must be loud in the logs. It runs after the upstream
+// round-trip has returned, so the dial goroutine has finished writing permits.
+func (p *proxyHandler) endAudit(req *http.Request, a *requestAudit) {
+	duration := time.Since(a.start)
+	p.metrics.inFlight.Dec()
+	p.metrics.observeRequest(a.rec.status, duration.Seconds(), a.denied)
+	user := auditUser(req.Context())
+	p.logger.Info("proxy request",
+		"endpoint", a.endpoint,
+		"url", a.url,
+		"user", user,
+		"status", a.rec.status,
+		"bytes", a.rec.bytes,
+		"duration", duration,
+		"allowPrivateIP", a.allowPrivate,
+	)
+	for _, permit := range a.permits.snapshot() {
+		p.metrics.privateIPPermitted.WithLabelValues(permit.reason).Inc()
+		p.logger.Warn("proxy private-ip permitted by opt-in",
+			"endpoint", a.endpoint,
+			"url", a.url,
+			"user", user,
+			"permittedIP", permit.ip.String(),
+			"ipClass", permit.reason,
+		)
+	}
 }
 
-// serve runs the FULL security pipeline shared by /proxy and /proxy-resource —
-// BEFORE any upstream connection — because httputil's Director/Rewrite cannot
+// ServeHTTP implements the /proxy endpoint. It runs the FULL security pipeline
+// BEFORE any upstream connection, because httputil's Director/Rewrite cannot
 // return an error and must never be the place a denial is decided. Only once
 // every gate passes does it build and invoke a ReverseProxy whose Transport is
-// the SF4 secure dialer and whose ModifyResponse is selected by `endpoint`:
-// /proxy strips framing headers and HTML-rewrites the body; /proxy-resource
-// strips framing/response headers only and streams the body (and Content-Type)
-// through unchanged.
+// the SF4 secure dialer and whose ModifyResponse strips framing and dangerous
+// response headers and HTML-rewrites the body for the panel's srcdoc iframe.
 //
 // Pipeline order: parse url param → SF2 ValidateURL (scheme/userinfo/malformed) →
 // SF3 MatchHostname (empty allowlist ⇒ deny) → SF2 port re-check against the
 // matched domain's AllowedPorts → SF5 Allow (rate tiers) and Acquire
 // (concurrency). On any denial the handler writes the mapped status and returns
 // without contacting the upstream.
-//
-// Both endpoints share the audit log (P5) and metrics (P6); the `endpoint`
-// value distinguishes the two streams on the audit entry's `endpoint` field.
-func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint string) {
-	// P5 / AC 28: emit EXACTLY ONE structured audit entry per request, covering
-	// the success path AND every early-return denial below. The wrapper records
-	// the final status + body bytes; start/auditURL/auditUser feed the remaining
-	// fields. A single deferred Info call is the sole emission point — no
-	// per-branch logging — so it cannot be forgotten on a new denial path.
-	start := time.Now()
-	rec := newAuditResponseWriter(w)
-	w = rec
-	// auditURL holds the best-known target for the log line. It starts as the raw
-	// `url` query value (or a placeholder when missing/unparseable) and is
-	// upgraded to the validated, normalised target once the pipeline approves it.
-	auditURL := auditMissingURL
+func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// P5 / AC 28 + P6 / AC 29: exactly one audit entry and one metrics
+	// observation per request, emitted by the deferred endAudit on every path.
+	a := p.beginAudit(w, endpointTopLevel)
+	defer p.endAudit(req, a)
+	w = a.rec
 
-	// P6 / AC 29: count this request as in-flight for the whole handler, and emit
-	// the per-request metrics once in the SAME single deferred block as the audit
-	// log. denied carries the denial-reason token a branch sets on its way out
-	// (empty for the success/upstream-served path); observeRequest records the
-	// requests_total{status} counter + duration histogram always, and the
-	// denials_total{reason} counter only when denied is non-empty.
-	p.metrics.inFlight.Inc()
-	var denied string
-	// allowPrivate is the matched domain's AllowPrivateIP opt-in for THIS request
-	// (false until the allowlist matches). recorder collects any private IP the
-	// opt-in admitted at the SF4 gate so the deferred block can emit the distinct
-	// permit Warn + metric. Both are read in the deferred block AFTER the upstream
-	// round-trip has returned (so the dial goroutine has finished writing).
-	var allowPrivate bool
-	recorder := &privatePermitRecorder{}
-	defer func() {
-		p.metrics.inFlight.Dec()
-		p.metrics.observeRequest(rec.status, time.Since(start).Seconds(), denied)
-		p.logger.Info("proxy request",
-			"endpoint", endpoint,
-			"url", auditURL,
-			"user", auditUser(req.Context()),
-			"status", rec.status,
-			"bytes", rec.bytes,
-			"duration", time.Since(start),
-			"allowPrivateIP", allowPrivate,
-		)
-		// A DISTINCT, high-signal audit line per private IP that the opt-in
-		// admitted: this re-opened SSRF surface must be loud in the logs. It fires
-		// ONLY when the matched domain opted in AND a private IP was actually
-		// reached, so an opted-in domain resolving to a public IP produces nothing
-		// here. The permit metric is incremented in the same place.
-		for _, permit := range recorder.snapshot() {
-			p.metrics.privateIPPermitted.WithLabelValues(permit.reason).Inc()
-			p.logger.Warn("proxy private-ip permitted by opt-in",
-				"endpoint", endpoint,
-				"url", auditURL,
-				"user", auditUser(req.Context()),
-				"permittedIP", permit.ip.String(),
-				"ipClass", permit.reason,
-			)
-		}
-	}()
-
-	setCORSHeaders(w.Header())
-
-	// CORS preflight: answer and return without running the pipeline.
-	if req.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
+	// Same-origin only (R1 D2): no CORS headers, and a preflight OPTIONS is just
+	// another non-GET method.
 
 	if req.Method != http.MethodGet {
-		denied = writeDenial(w, denialReasonMethod, "method not allowed")
+		a.denied = writeDenial(w, denialReasonMethod, "method not allowed")
 		return
 	}
 
@@ -555,11 +557,11 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// req.URL.Query() decodes it for us.
 	rawTarget := req.URL.Query().Get("url")
 	if strings.TrimSpace(rawTarget) == "" {
-		denied = writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
+		a.denied = writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
 		return
 	}
 	// We now have a caller-supplied target; log it even on the denial paths below.
-	auditURL = rawTarget
+	a.url = rawTarget
 
 	// Derive the normalised hostname for the allowlist match BEFORE the full
 	// SF2 validation. We must match the allowlist first to learn the matched
@@ -568,10 +570,10 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// (declared per-domain) would be rejected before the allowlist is consulted.
 	hostname, herr := hostnameOf(rawTarget)
 	if herr != nil {
-		auditURL = auditInvalidURL
+		a.url = auditInvalidURL
 		// SF2 reasons (scheme/port/userinfo/hostname/malformed) are all client
 		// errors ⇒ denialReasonScheme ⇒ 400 via the authoritative table.
-		denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(herr))
+		a.denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(herr))
 		return
 	}
 
@@ -579,35 +581,35 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// denies everything (fail-closed default).
 	match := security.MatchHostname(hostname, p.allowlist)
 	if !match.Allowed {
-		denied = writeDenial(w, denialReasonAllowlist, "target host is not allowlisted")
+		a.denied = writeDenial(w, denialReasonAllowlist, "target host is not allowlisted")
 		return
 	}
 	// Capture the matched domain's per-request private-IP opt-in. This is the ONLY
 	// place AllowPrivateIP enters the dial path: it is read from the domain THIS
 	// request matched, so it is recomputed on every request (and, for redirects,
-	// on every hop, since each hop re-enters serve and re-matches). It is recorded
-	// on the audit line above and drives the security.Policy threaded below.
-	allowPrivate = match.Options.AllowPrivateIP
+	// on every hop, since each hop re-enters ServeHTTP and re-matches). It is recorded
+	// on the audit line and drives the security.Policy threaded below.
+	a.allowPrivate = match.Options.AllowPrivateIP
 
 	// SF2: full validation of scheme, userinfo, host, and port — now allowing
 	// the matched domain's extra ports. scheme/port/userinfo/hostname/malformed
 	// are all client errors and map to 400 via denialReasonScheme.
 	validated, err := security.ValidateURL(rawTarget, match.Options.AllowedPorts)
 	if err != nil {
-		denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(err))
+		a.denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(err))
 		return
 	}
 
 	// SF5: rate-limit tiers (per instance, per domain), then concurrency cap.
 	instanceID := instanceIDFromContext(req)
 	if allowed, reason := p.rateLimiter.Allow(instanceID, validated.Hostname); !allowed {
-		denied = writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
+		a.denied = writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
 		return
 	}
 
 	release, ok := p.rateLimiter.Acquire()
 	if !ok {
-		denied = writeDenial(w, denialReasonConcurrency, "too many concurrent proxy requests")
+		a.denied = writeDenial(w, denialReasonConcurrency, "too many concurrent proxy requests")
 		return
 	}
 	defer release()
@@ -621,11 +623,11 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	if perr != nil {
 		// Should not happen — rawTarget already parsed cleanly in ValidateURL —
 		// but fail closed.
-		denied = writeDenial(w, denialReasonBadRequest, "invalid target URL")
+		a.denied = writeDenial(w, denialReasonBadRequest, "invalid target URL")
 		return
 	}
 	// Log the validated, normalised target rather than the raw caller string.
-	auditURL = target.String()
+	a.url = target.String()
 
 	// CR4: read the current redirect-hop depth from the reserved control param.
 	// A missing/blank/bogus value parses to 0 (treated as the first hop); we clamp
@@ -634,10 +636,9 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	depth := redirectDepthOf(req)
 
 	// CR5: read the author hide-selectors from the repeated `hide` query params.
-	// These are applied ONLY to top-level proxied HTML (in prepareHTMLBody via
+	// These are applied ONLY to proxied HTML (in prepareHTMLBody via
 	// rewriteHTML); they are a PROXY-request-only control and are never forwarded
-	// upstream (the outbound URL is rebuilt from `url` alone). For /proxy-resource
-	// the values are read but unused — subresources are not HTML documents.
+	// upstream (the outbound URL is rebuilt from `url` alone).
 	hideSelectors := hideSelectorsOf(req)
 
 	// Build the per-request relaxation Policy from the matched domain's opt-in.
@@ -646,16 +647,14 @@ func (p *proxyHandler) serve(w http.ResponseWriter, req *http.Request, endpoint 
 	// the recorder so any admitted private IP is audited/metered in the deferred
 	// block. serveProxy sets this Policy onto the request context (before its
 	// timeout wrap) so the SF4 dialer reads it back via security.WithPolicy.
-	pol := security.Policy{AllowPrivate: allowPrivate, OnPrivatePermit: recorder.record}
+	pol := security.Policy{AllowPrivate: a.allowPrivate, OnPrivatePermit: a.permits.record}
 
 	// The pipeline approved the request; any further denial is decided by the
 	// ReverseProxy's ErrorHandler (a dial-time blocked IP/metadata host, an
 	// over-size response, an upstream timeout, or a gateway failure). serveProxy
 	// returns the denial-reason token for that outcome (empty when the upstream
-	// was served cleanly) so the deferred metrics emission records it. The
-	// endpoint selects the ModifyResponse: /proxy HTML-rewrites the body,
-	// /proxy-resource passes the body + Content-Type through unchanged.
-	denied = p.serveProxy(w, req, target, endpoint, depth, hideSelectors, pol)
+	// was served cleanly) so the deferred metrics emission records it.
+	a.denied = p.serveProxy(w, req, target, depth, hideSelectors, pol)
 }
 
 // hideSelectorsOf reads the repeated `hide` query params (CR5) from the inbound
@@ -743,20 +742,12 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 
 // serveProxy assembles a single-use httputil.ReverseProxy for the validated
 // target and serves the request through it. The Transport is the SF4
-// secure-dialer-backed transport, ModifyResponse strips framing headers and
-// re-applies CORS, and ErrorHandler maps transport/upstream failures to clean
+// secure-dialer-backed transport, ModifyResponse strips framing, CORS and other
+// dangerous response headers, and ErrorHandler maps transport/upstream failures to clean
 // status codes (403 for a blocked IP/metadata host caught at dial time, 502/504
-// otherwise).
-//
-// The endpoint argument selects the ModifyResponse body handling AFTER the
-// shared size guard (P4) and framing/response-header strip (P1/P3):
-//   - endpointTopLevel (/proxy): prepareHTMLBody detects HTML, gzip-decodes when
-//     present, and HTML-rewrites the body (CR2). Non-HTML passes through.
-//   - endpointResource (/proxy-resource): NO rewriting. The upstream Content-Type
-//     is PRESERVED and the body (including a gzip Content-Encoding) streams through
-//     unchanged so the browser interprets CSS/JS/images and decompresses gzip
-//     itself. CR3 deliberately does NOT decode subresources — there is nothing to
-//     rewrite, so the compressed bytes pass straight through.
+// otherwise). After the size guard (P4) and the framing/response-header strip
+// (P1/P3), prepareHTMLBody detects HTML, gzip-decodes when present, and
+// HTML-rewrites the body (CR2, FR5). Non-HTML passes through.
 //
 // It returns the denial-reason token for a request the ErrorHandler rejected
 // (size-limit / timeout / ip-blocklist / metadata / upstream) or the empty
@@ -764,7 +755,7 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 // metrics emission can record denials_total for the right reason. The ErrorHandler
 // runs synchronously inside rp.ServeHTTP, so capturing into a local here is
 // race-free for this single-goroutine-per-request handler.
-func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL, endpoint string, depth int, hideSelectors []string, pol security.Policy) string {
+func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL, depth int, hideSelectors []string, pol security.Policy) string {
 	maxBytes := p.cfg.MaxResponseBytes
 
 	var denied string
@@ -785,12 +776,12 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			stripRequestHeaders(r.Out.Header)
 		},
 		// P4: enforce the max-response-body size, then the P1/P3 framing/header
-		// strip, then the endpoint-specific body step. The size step runs FIRST
-		// so an over-Content-Length response short-circuits with errResponseTooLarge
-		// before any header rewriting; the framing/header strip (P1/P3) runs next on
-		// the headers (identical for both endpoints); finally the body is either
-		// HTML-rewritten (/proxy) or left untouched (/proxy-resource — Content-Type
-		// and body, incl. gzip, streamed through unchanged).
+		// strip, then the body step. The size step runs FIRST so an
+		// over-Content-Length response short-circuits with errResponseTooLarge
+		// before any header rewriting; the framing/header strip (P1/P3) runs next
+		// on the headers; finally the body is read in full (VR-6/VR-7) and an HTML
+		// body is rewritten. ModifyResponse runs before the ReverseProxy sends the
+		// status, so every size or decode failure becomes a clean error status.
 		ModifyResponse: func(resp *http.Response) error {
 			if err := enforceResponseSize(resp, maxBytes); err != nil {
 				return err
@@ -805,14 +796,14 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			// blocked at the redirect step). A non-redirect status falls through
 			// unchanged. handled==true means the redirect path fully decided the
 			// response, so the body steps below must be skipped.
-			if handled, rerr := p.handleRedirect(resp, target, endpoint, depth); handled || rerr != nil {
+			handled, rerr := p.handleRedirect(resp, target, depth)
+			if rerr != nil {
 				return rerr
 			}
-			if endpoint == endpointResource {
-				// CR3: subresource passthrough. No HTML rewrite, no gzip decode —
-				// the upstream Content-Type and (possibly gzip) body are preserved
-				// and streamed through, bounded only by the P4 limited body that
-				// enforceResponseSize already wrapped around resp.Body.
+			if handled {
+				// The browser follows the rewritten Location and never shows the
+				// redirect body, so it is dropped rather than streamed unbounded.
+				discardBody(resp)
 				return nil
 			}
 			return prepareHTMLBody(resp, maxBytes, target, p.logger, hideSelectors)
@@ -849,13 +840,11 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 // ModifyResponse runs before the ReverseProxy writes any status/header, so the
 // ErrorHandler can still emit a clean 413 with no bytes leaked.
 //
-// Defense-in-depth (chunked / missing / lying Content-Length, i.e. -1 or a
-// value that under-reports the real body): wrap resp.Body in a reader that
-// caps reads at maxBytes. CAVEAT: once the body starts streaming the
-// ReverseProxy has ALREADY written 200 + headers, so this path CANNOT retro-
-// actively become a 413 — it can only stop reading at the limit and surface an
-// error, truncating/failing the copy. That is acceptable belt-and-braces; the
-// guaranteed clean 413 is the Content-Length path above.
+// Undeclared or chunked length (Content-Length -1): wrap resp.Body in a reader
+// that fails with errResponseTooLarge once more than maxBytes are read.
+// prepareHTMLBody reads the whole body inside ModifyResponse, before the
+// ReverseProxy has written any status, so an oversize chunked body also ends as
+// a clean 413 and is never delivered as a truncated 200 (VR-7).
 func enforceResponseSize(resp *http.Response, maxBytes int64) error {
 	if maxBytes <= 0 {
 		return nil
@@ -922,9 +911,10 @@ func isRedirectStatus(status int) bool {
 
 // handleRedirect implements CR4 redirect handling for a proxied response, run in
 // ModifyResponse AFTER the size guard and framing/header strip but BEFORE the
-// endpoint body step. The proxy does NOT follow redirects server-side; instead it
-// rewrites the Location to a proxy URL so the BROWSER re-enters the proxy for the
-// next hop, where the FULL security pipeline re-validates that hop.
+// body step. The proxy does NOT follow redirects server-side; instead it
+// rewrites the Location to a /proxy URL so the browser (the panel's fetch)
+// re-enters the proxy for the next hop, where the FULL security pipeline
+// re-validates that hop.
 //
 // It returns (handled, err):
 //   - handled==false, err==nil: not a (followable) redirect — caller continues to
@@ -933,9 +923,9 @@ func isRedirectStatus(status int) bool {
 //     non-http(s) scheme (data:/mailto:/…), which is left as-is rather than
 //     rewritten into a non-fetchable proxy URL.
 //   - handled==true, err==nil: the redirect was rewritten in place. Location now
-//     points at a proxy URL (/proxy or /proxy-resource, matching endpoint) carrying
-//     the encoded absolute next-hop target and _wvredir=depth+1. The body step is
-//     skipped (a redirect body is an inert courtesy page).
+//     points at a /proxy URL carrying the encoded absolute next-hop target and
+//     _wvredir=depth+1. The body step is skipped (a redirect body is an inert
+//     courtesy page).
 //   - err!=nil: the redirect is REFUSED at the redirect step. err is
 //     errRedirectDepthExceeded (depth cap reached / MaxRedirects==0 ⇒ redirects
 //     disabled) or errRedirectBlocked (resolved Location host fails the SF2+SF3
@@ -950,7 +940,7 @@ func isRedirectStatus(status int) bool {
 // the browser only ever talks to the proxy — never the upstream directly — a
 // destination that fails allowlist (here) or IP-blocklist (on re-request) is
 // refused before the browser can contact it.
-func (p *proxyHandler) handleRedirect(resp *http.Response, target *url.URL, endpoint string, depth int) (bool, error) {
+func (p *proxyHandler) handleRedirect(resp *http.Response, target *url.URL, depth int) (bool, error) {
 	if resp == nil || !isRedirectStatus(resp.StatusCode) {
 		return false, nil
 	}
@@ -1003,25 +993,44 @@ func (p *proxyHandler) handleRedirect(resp *http.Response, target *url.URL, endp
 		return false, errRedirectBlocked
 	}
 
-	// Rewrite Location to a proxy URL the browser will re-enter, carrying the
-	// encoded absolute next-hop target and the incremented hop depth. The base path
-	// is the SAME endpoint the current request hit, so a redirected subresource
-	// stays on /proxy-resource and a redirected page stays on /proxy.
-	base := resourceBase + proxyPath
-	if endpoint == endpointResource {
-		base = resourceBase + proxyResourcePath
-	}
-	resp.Header.Set("Location", buildRedirectProxyURL(base, abs.String(), depth+1))
+	// Rewrite Location to a /proxy URL the panel's fetch will re-enter, carrying
+	// the encoded absolute next-hop target and the incremented hop depth.
+	resp.Header.Set("Location", buildRedirectProxyURL(resourceBase+proxyPath, abs.String(), depth+1))
 	return true, nil
 }
 
-// contentEncodingGzip is the Content-Encoding value CR1 decodes. Only gzip is
-// handled: it is the encoding the issue scopes (AC 14) and is by far the most
-// common on the web. deflate and br (Brotli) are intentionally NOT decoded here
-// — a response carrying one of those encodings is treated as non-decodable and
-// passed through with its body and headers untouched, exactly like a non-HTML
-// response, so the client (or, later, CR2) never receives a half-decoded body.
+// contentEncodingGzip is the only Content-Encoding the proxy accepts (CR1).
+// Outbound requests advertise only gzip (see stripRequestHeaders), and gzip is
+// the only coding whose decoded size the proxy checks. A response in any other
+// coding (deflate, br, zstd, or a list of codings) is refused with 502, because
+// its decoded size could not be held to MaxResponseBytes (VR-6).
 const contentEncodingGzip = "gzip"
+
+// errUnsupportedEncoding is returned for a response whose Content-Encoding is
+// not gzip or identity. proxyErrorHandler maps it to 502.
+var errUnsupportedEncoding = errors.New("proxy: upstream response uses an unsupported Content-Encoding")
+
+// responseEncoding returns "" for an unencoded (or identity) response and
+// contentEncodingGzip for gzip or x-gzip. Any other coding, or more than one
+// coding, returns errUnsupportedEncoding.
+func responseEncoding(h http.Header) (string, error) {
+	var codings []string
+	for _, v := range h.Values("Content-Encoding") {
+		for _, c := range strings.Split(v, ",") {
+			if c = strings.ToLower(strings.TrimSpace(c)); c != "" && c != "identity" {
+				codings = append(codings, c)
+			}
+		}
+	}
+	switch {
+	case len(codings) == 0:
+		return "", nil
+	case len(codings) == 1 && (codings[0] == contentEncodingGzip || codings[0] == "x-gzip"):
+		return contentEncodingGzip, nil
+	default:
+		return "", errUnsupportedEncoding
+	}
+}
 
 // isHTMLContentType reports whether a Content-Type header value names an HTML
 // document. Matching is case-insensitive and tolerates parameters such as a
@@ -1038,137 +1047,188 @@ func isHTMLContentType(contentType string) bool {
 	return strings.EqualFold(strings.TrimSpace(mediaType), "text/html")
 }
 
-// prepareHTMLBody detects HTML by Content-Type, obtains the plain HTML bytes
-// (gzip-decoding when needed, bounded), and rewrites them with goquery (CR2:
-// base-href, subresource/navigation URL rewriting, srcset, CSP/refresh-meta and
-// frame-buster removal). It runs AFTER the P4 size guard and the P1/P3
-// framing/header strip.
+// prepareHTMLBody reads the whole response body into memory, bounded, and
+// rewrites it when it is HTML. It runs in ModifyResponse AFTER the P4 size
+// guard, the P1/P3 framing/header strip and the CR4 redirect step, and BEFORE
+// the ReverseProxy sends the status. So every failure below reaches the client
+// as a clean error status, and no response is delivered truncated or with a
+// decoded size above maxBytes (VR-6/VR-7):
 //
-// Behaviour:
-//   - Non-HTML responses (any Content-Type that is not text/html) are passed
-//     through COMPLETELY UNCHANGED: no body read, no header touched. This keeps
-//     compressed JSON/images/etc. byte-identical to the upstream.
-//   - HTML responses are read into memory (decoding Content-Encoding: gzip when
-//     present; deflate/br are out of scope — see contentEncodingGzip — so a body
-//     carrying one of those is left untouched and not rewritten), then rewritten
-//     by rewriteHTML. CR2 rewrites ALL HTML, not just gzip HTML.
-//   - After rewriting, resp.Body is replaced with the rewritten bytes,
-//     Content-Length is set to the new length, and (if the body was gzip) the
-//     Content-Encoding header is removed so the client does not re-decode.
+//   - More than maxBytes on the wire (chunked or a lying Content-Length) ⇒
+//     errResponseTooLarge ⇒ 413.
+//   - A Content-Encoding other than gzip ⇒ errUnsupportedEncoding ⇒ 502.
+//   - Non-HTML: the body and headers pass through unchanged (a gzip body stays
+//     compressed, so JSON/images/etc. stay byte-identical), but a gzip body is
+//     first decoded to io.Discard to prove that its DECODED size is within
+//     maxBytes (gzip-bomb guard). Over ⇒ 413; malformed gzip ⇒ 502.
+//   - HTML: gzip is decoded (bounded), then rewriteHTMLLimited rewrites the
+//     document (CR2, FR5); the rewritten document must also fit in maxBytes,
+//     otherwise 413. Content-Encoding is dropped and the charset set to UTF-8.
+//   - Content-Length is set to the length actually delivered.
 //
-// SECURITY (gzip-bomb guard): decompression is a decompression-bomb DoS vector,
-// so the DECODED size is bounded by the same MaxResponseBytes limit P4 enforces
-// on the wire size. The gzip stream is read through an io.LimitReader capped at
-// maxBytes+1; if the decoded body would exceed maxBytes we return the
-// errResponseTooLarge sentinel (→ clean 413 via proxyErrorHandler) instead of
-// reading the stream unbounded into memory. A maxBytes <= 0 means "no limit".
-//
-// DEGRADATION: a gzip-DECODE failure (or over-size) returns an error so the
-// ReverseProxy's ErrorHandler emits a clean 413/502 before any body is written.
-// A rewriteHTML failure (parse quirk etc.) does NOT fail the gateway — the
-// security gates already ran — so the DECODED ORIGINAL HTML is served (200) and a
-// warning is logged. pageURL is the validated top-level target captured in the
-// ModifyResponse closure; it is the base for relative-URL resolution. hideSelectors
-// are the CR5 author hide-selectors threaded from the inbound request; rewriteHTML
-// validates and applies them (a nil/empty slice is a no-op).
+// DEGRADATION: a rewrite failure other than the size limit (a parse quirk etc.)
+// does NOT fail the gateway — the security gates already ran — so the DECODED
+// ORIGINAL HTML (within maxBytes) is served (200) and a warning is logged.
+// maxBytes <= 0 disables every bound. pageURL is the validated target of this
+// hop; it is the base for relative-URL resolution. hideSelectors are the CR5
+// author hide-selectors; rewriteHTMLLimited validates and applies them.
 func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logger log.Logger, hideSelectors []string) error {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
 
-	// Non-HTML ⇒ leave the response entirely alone.
-	if !isHTMLContentType(resp.Header.Get("Content-Type")) {
-		return nil
+	encoding, err := responseEncoding(resp.Header)
+	var raw []byte
+	if err == nil {
+		raw, err = readBounded(resp.Body, maxBytes)
 	}
-
-	gzipped := strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), contentEncodingGzip)
-	hasOtherEncoding := !gzipped && strings.TrimSpace(resp.Header.Get("Content-Encoding")) != ""
-	if hasOtherEncoding {
-		// HTML carrying a non-gzip encoding (deflate/br) is out of scope to decode;
-		// leave the body untouched rather than rewrite a still-encoded payload.
-		return nil
-	}
-
-	var decoded []byte
-	var err error
-	if gzipped {
-		decoded, err = decodeGzipBounded(resp.Body, maxBytes)
-	} else {
-		// Plain HTML: read the (already size-guarded) body into memory.
-		decoded, err = io.ReadAll(resp.Body)
-	}
-	// resp.Body is fully consumed (or errored) above; close the original reader
-	// regardless of outcome so the upstream connection can be reused/released.
+	// Close the upstream body whatever the outcome.
 	if cerr := resp.Body.Close(); cerr != nil && err == nil {
 		err = cerr
 	}
 	if err != nil {
-		// errResponseTooLarge propagates to proxyErrorHandler (→ 413); a malformed
-		// gzip stream surfaces as a generic error (→ 502). Either way ModifyResponse
-		// returning a non-nil error means the ReverseProxy invokes its ErrorHandler
-		// before writing any body, so the client never sees a half-decoded payload.
 		return err
 	}
+	gzipped := encoding == contentEncodingGzip
 
-	// CR2: rewrite the plain HTML with goquery. On failure, degrade to the decoded
-	// original (the security gates already ran — a parse quirk must not 502).
+	if !isHTMLContentType(resp.Header.Get("Content-Type")) {
+		if gzipped {
+			if err := gzipDecodedWithin(raw, maxBytes); err != nil {
+				return err
+			}
+		}
+		setBufferedBody(resp, raw)
+		return nil
+	}
+
+	decoded := raw
+	if gzipped {
+		if decoded, err = decodeGzipBounded(bytes.NewReader(raw), maxBytes); err != nil {
+			return err
+		}
+	}
+
+	// CR2/FR5: rewrite the HTML. On a failure other than the size limit, degrade
+	// to the decoded original (the security gates already ran — a parse quirk
+	// must not 502).
 	body := decoded
-	rewritten, rerr := htmlRewriter(decoded, pageURL, resp.Header.Get("Content-Type"), hideSelectors)
-	if rerr != nil {
+	rewritten, rerr := htmlRewriter(decoded, pageURL, resp.Header.Get("Content-Type"), hideSelectors, maxBytes)
+	switch {
+	case errors.Is(rerr, errResponseTooLarge):
+		return rerr
+	case rerr != nil:
 		if logger != nil {
 			logger.Warn("html rewrite failed; serving decoded original", "url", pageURL.String(), "error", rerr)
 		}
-	} else {
+	default:
 		body = rewritten
-		// rewriteHTML emits UTF-8; update the Content-Type charset so the client
+		// The rewriter emits UTF-8; update the Content-Type charset so the client
 		// decodes it correctly regardless of the upstream's declared charset.
 		resp.Header.Set("Content-Type", "text/html; charset=utf-8")
 	}
 
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	// The body is now plain (rewritten) HTML: drop the encoding header so the
-	// client does not attempt to re-decode, and set Content-Length to the new
-	// length so the framing is correct (no stale compressed length).
+	// The body is now plain HTML: drop the encoding header so the client does
+	// not try to decode it again.
 	if gzipped {
 		resp.Header.Del("Content-Encoding")
 	}
-	resp.ContentLength = int64(len(body))
-	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	setBufferedBody(resp, body)
 	return nil
+}
+
+// readBounded reads r to the end. More than maxBytes returns
+// errResponseTooLarge without reading further; maxBytes <= 0 means no limit.
+func readBounded(r io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return io.ReadAll(r)
+	}
+	b, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > maxBytes {
+		return nil, errResponseTooLarge
+	}
+	return b, nil
+}
+
+// setBufferedBody replaces the response body with body and sets the framing to
+// match: Content-Length is the buffered length and upstream trailers are
+// dropped (a buffered body is sent with a fixed length).
+func setBufferedBody(resp *http.Response, body []byte) {
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Trailer = nil
+	resp.Header.Del("Trailer")
+	if bodyAllowedForStatus(resp.StatusCode) {
+		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	}
+}
+
+// discardBody drops the body of a response whose body the client never sees
+// (a redirect the browser follows), without reading it.
+func discardBody(resp *http.Response) {
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	resp.Header.Del("Content-Encoding")
+	setBufferedBody(resp, nil)
+}
+
+// bodyAllowedForStatus reports whether a response with this status may carry a
+// body (RFC 9110: not 1xx, 204 or 304).
+func bodyAllowedForStatus(status int) bool {
+	switch {
+	case status >= 100 && status <= 199:
+		return false
+	case status == http.StatusNoContent, status == http.StatusNotModified:
+		return false
+	}
+	return true
 }
 
 // decodeGzipBounded gzip-decompresses r, reading at most maxBytes decoded bytes
 // (maxBytes <= 0 disables the bound). If the decoded stream would exceed
-// maxBytes it returns errResponseTooLarge WITHOUT buffering the whole stream,
-// which is the decompression-bomb guard: the underlying gzip reader is wrapped
-// in an io.LimitReader capped at maxBytes+1 so io.ReadAll can never allocate
-// more than one byte past the limit before we detect the overflow.
+// maxBytes it returns errResponseTooLarge without decoding further — the
+// decompression-bomb guard.
 func decodeGzipBounded(r io.Reader, maxBytes int64) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := copyGzipBounded(&buf, r, maxBytes); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// gzipDecodedWithin decodes raw to io.Discard and reports errResponseTooLarge
+// when the decoded size exceeds maxBytes, or the gzip error when raw is not a
+// valid gzip stream. It allocates no decoded buffer.
+func gzipDecodedWithin(raw []byte, maxBytes int64) error {
+	return copyGzipBounded(io.Discard, bytes.NewReader(raw), maxBytes)
+}
+
+// copyGzipBounded decodes the gzip stream r into dst. It reads one byte past
+// maxBytes so a body of exactly maxBytes is allowed while anything larger is
+// detected as an overflow (errResponseTooLarge).
+func copyGzipBounded(dst io.Writer, r io.Reader, maxBytes int64) error {
 	gr, err := gzip.NewReader(r)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer func() {
-		// Best-effort close of the gzip reader; the decoded bytes are already
-		// buffered and any read error is reported via ReadAll below.
-		_ = gr.Close()
-	}()
+	// Best-effort close; any read error is reported by io.Copy below.
+	defer func() { _ = gr.Close() }()
 
-	if maxBytes <= 0 {
-		return io.ReadAll(gr)
+	src := io.Reader(gr)
+	if maxBytes > 0 {
+		src = io.LimitReader(gr, maxBytes+1)
 	}
-
-	// Read one byte past the limit so a body of exactly maxBytes is allowed while
-	// anything larger is detected as an overflow.
-	limited := io.LimitReader(gr, maxBytes+1)
-	decoded, err := io.ReadAll(limited)
+	n, err := io.Copy(dst, src)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if int64(len(decoded)) > maxBytes {
-		return nil, errResponseTooLarge
+	if maxBytes > 0 && n > maxBytes {
+		return errResponseTooLarge
 	}
-	return decoded, nil
+	return nil
 }
 
 // stripRequestHeaders sanitises the OUTGOING proxied request: it deletes every
@@ -1182,17 +1242,8 @@ func stripRequestHeaders(h http.Header) {
 		h.Del(name)
 	}
 
-	// Sweep all X-Grafana-* headers by prefix (case-insensitive). Collect first,
-	// then delete, to avoid mutating the map while ranging over its keys.
-	var grafanaKeys []string
-	for key := range h {
-		if strings.HasPrefix(strings.ToLower(key), xGrafanaHeaderPrefix) {
-			grafanaKeys = append(grafanaKeys, key)
-		}
-	}
-	for _, key := range grafanaKeys {
-		h.Del(key)
-	}
+	// Sweep all X-Grafana-* headers by prefix (case-insensitive).
+	deleteHeadersWithPrefix(h, xGrafanaHeaderPrefix)
 
 	// Set conservative outgoing headers AFTER stripping so inbound values cannot
 	// survive: overwrite (Set) rather than add.
@@ -1222,7 +1273,8 @@ func stripRequestHeaders(h http.Header) {
 //   - SF4 blocked resolved/connect IP (*DialError, ReasonBlockedIP) ⇒ ip-blocklist ⇒ 403
 //   - SF4 cloud-metadata host (ReasonMetadataHost) ⇒ metadata ⇒ 403
 //   - SF4 resolve failure / no host (ReasonResolveFailed, ReasonNoHost) ⇒ upstream ⇒ 502
-//   - over-size response (P4) ⇒ size-limit ⇒ 413
+//   - over-size response (P4, VR-6, VR-7) ⇒ size-limit ⇒ 413
+//   - unsupported Content-Encoding (VR-6) ⇒ upstream ⇒ 502
 //   - CR4 redirect depth cap reached / redirects disabled ⇒ redirect-loop ⇒ 502
 //   - CR4 redirect into a non-allowlisted host (pre-block) ⇒ allowlist ⇒ 403
 //   - per-request-budget timeout / net.Error timeout (P4, Q10) ⇒ timeout ⇒ 504
@@ -1231,7 +1283,6 @@ func stripRequestHeaders(h http.Header) {
 // It returns the reason so the handler can increment denials_total{reason} for
 // the ErrorHandler-driven denial.
 func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) string {
-	setCORSHeaders(w.Header())
 	switch security.DialReasonOf(err) {
 	case security.ReasonBlockedIP:
 		return writeDenial(w, denialReasonIPBlocklist, "target resolves to a blocked address")
@@ -1250,10 +1301,14 @@ func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) string
 	if errors.Is(err, errRedirectBlocked) {
 		return writeDenial(w, denialReasonAllowlist, "redirect target host is not allowlisted")
 	}
-	// P4: response body exceeded the configured size limit (clean Content-Length
-	// path — no body bytes streamed yet) ⇒ 413.
+	// P4 / VR-6 / VR-7: the declared, read, decoded or rewritten size exceeded
+	// the configured limit (no body bytes sent yet) ⇒ 413.
 	if errors.Is(err, errResponseTooLarge) {
 		return writeDenial(w, denialReasonSizeLimit, "upstream response exceeds maximum allowed size")
+	}
+	// VR-6: a Content-Encoding whose decoded size the proxy cannot bound ⇒ 502.
+	if errors.Is(err, errUnsupportedEncoding) {
+		return writeDenial(w, denialReasonUpstream, "upstream response uses an unsupported content encoding")
 	}
 	// P4: the total per-request budget (Q10) expired ⇒ 504. The transport
 	// surfaces the context deadline as context.DeadlineExceeded; a stalled
@@ -1276,9 +1331,9 @@ const frameAncestorsDirective = "frame-ancestors"
 // CSP directives intact — P1) AND deletes the dangerous incoming response headers
 // in strippedResponseHeaders (Set-Cookie, HSTS, HPKP, Clear-Site-Data — P3) so the
 // upstream cannot set cookies on, or pin origin-level security policy onto, the
-// Grafana origin the response is served from. It also re-applies CORS (ReverseProxy
-// may have copied upstream CORS headers over ours). Body/base-tag/frame-buster
-// rewriting is OUT OF SCOPE here — that is content-rewriting (see TODO(CR) above).
+// Grafana origin the response is served from. It also removes every upstream
+// Access-Control-* header (R1 D2). Body/base-tag/frame-buster rewriting is OUT OF
+// SCOPE here — that is content-rewriting (see rewriteHTML).
 func stripFramingHeaders(resp *http.Response) error {
 	// P3: drop dangerous incoming response headers (state-setting + origin-level
 	// security policy). Header.Del canonicalises the key and removes every value,
@@ -1310,8 +1365,8 @@ func stripFramingHeaders(resp *http.Response) error {
 		}
 	}
 
-	// Re-assert permissive CORS on the final response.
-	setCORSHeaders(resp.Header)
+	// R1 D2: no Access-Control-* header of any kind leaves the proxy.
+	deleteHeadersWithPrefix(resp.Header, corsHeaderPrefix)
 	return nil
 }
 

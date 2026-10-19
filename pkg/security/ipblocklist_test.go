@@ -151,3 +151,71 @@ func TestMappedAndBareAgree(t *testing.T) {
 		}
 	}
 }
+
+// TestClassifyIPTranslationPrefixes covers VR-11: 6to4 (2002::/16) and NAT64
+// well-known-prefix (64:ff9b::/96) addresses are classified by the IPv4 address
+// they embed, so internal targets are blocked and public ones are not; the
+// NAT64 local-use prefix (64:ff9b:1::/48) is always blocked.
+func TestClassifyIPTranslationPrefixes(t *testing.T) {
+	tests := []struct {
+		name        string
+		ip          string
+		wantBlocked bool
+		wantReason  string
+	}{
+		// 6to4: bits 16-47 carry the IPv4 address.
+		{"6to4 metadata", "2002:a9fe:a9fe::", true, ReasonLinkLocal},
+		{"6to4 metadata with host bits", "2002:a9fe:a9fe:1:2:3:4:5", true, ReasonLinkLocal},
+		{"6to4 rfc1918 10/8", "2002:0a00:0001::1", true, ReasonPrivate},
+		{"6to4 rfc1918 192.168/16", "2002:c0a8:0101::", true, ReasonPrivate},
+		{"6to4 loopback", "2002:7f00:0001::", true, ReasonLoopback},
+		{"6to4 cgnat", "2002:6440:0001::", true, ReasonCGNAT},
+		{"6to4 unspecified", "2002::", true, ReasonUnspecified},
+		{"6to4 public allowed", "2002:0808:0808::1", false, ""},
+
+		// NAT64 well-known prefix: the last 32 bits carry the IPv4 address.
+		{"nat64 metadata", "64:ff9b::a9fe:a9fe", true, ReasonLinkLocal},
+		{"nat64 metadata dotted", "64:ff9b::169.254.169.254", true, ReasonLinkLocal},
+		{"nat64 rfc1918", "64:ff9b::10.1.2.3", true, ReasonPrivate},
+		{"nat64 loopback", "64:ff9b::127.0.0.1", true, ReasonLoopback},
+		{"nat64 multicast", "64:ff9b::224.0.0.1", true, ReasonMulticast},
+		{"nat64 public allowed", "64:ff9b::8.8.8.8", false, ""},
+		{"nat64 public allowed hex", "64:ff9b::5db8:d822", false, ""},
+		// Outside the /96 (non-zero bits 64-95): not a WKP address, still
+		// caught by the ::/8 reserved range.
+		{"64:ff9b outside the /96", "64:ff9b::1:0:808:808", true, ReasonReserved},
+
+		// NAT64 local-use prefix: embedding is operator-defined, always blocked.
+		{"nat64 local-use metadata", "64:ff9b:1::a9fe:a9fe", true, ReasonReserved},
+		{"nat64 local-use public", "64:ff9b:1:abcd::808:808", true, ReasonReserved},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotBlocked, gotReason := ClassifyIP(mustIP(t, tt.ip))
+			if gotBlocked != tt.wantBlocked || gotReason != tt.wantReason {
+				t.Errorf("ClassifyIP(%s) = (%v, %q), want (%v, %q)", tt.ip, gotBlocked, gotReason, tt.wantBlocked, tt.wantReason)
+			}
+		})
+	}
+}
+
+// TestClassifyIPPolicyTranslatedPrivateNotRelaxed covers VR-11 with the
+// AllowPrivateIP opt-in: the opt-in relaxes a bare RFC 1918 address but never
+// one wrapped in a 6to4 or NAT64 address.
+func TestClassifyIPPolicyTranslatedPrivateNotRelaxed(t *testing.T) {
+	permits := 0
+	pol := Policy{AllowPrivate: true, OnPrivatePermit: func(net.IP, string) { permits++ }}
+
+	if blocked, _ := ClassifyIPPolicy(mustIP(t, "10.0.0.1"), pol); blocked {
+		t.Fatal("control: bare 10.0.0.1 should be relaxed by the opt-in")
+	}
+	for _, ip := range []string{"2002:0a00:0001::", "64:ff9b::10.0.0.1", "64:ff9b::192.168.1.1"} {
+		blocked, reason := ClassifyIPPolicy(mustIP(t, ip), pol)
+		if !blocked || reason != ReasonPrivate {
+			t.Errorf("ClassifyIPPolicy(%s, opt-in) = (%v, %q), want (true, %q)", ip, blocked, reason, ReasonPrivate)
+		}
+	}
+	if permits != 1 {
+		t.Errorf("OnPrivatePermit called %d times, want 1 (only the bare control address)", permits)
+	}
+}

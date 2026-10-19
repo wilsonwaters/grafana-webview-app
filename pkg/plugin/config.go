@@ -53,7 +53,11 @@ type DomainOptions struct {
 	AllowSubdomains bool `json:"allowSubdomains"`
 
 	// AllowPrivateIP is an explicit opt-in that permits the resolved IP address
-	// of this domain to fall within RFC 1918 / link-local / loopback ranges.
+	// of this domain to fall within the RFC 1918 IPv4 ranges (10.0.0.0/8,
+	// 172.16.0.0/12, 192.168.0.0/16) only. Loopback, link-local (including the
+	// 169.254.169.254 metadata address), CGNAT, IPv6 ULA, multicast, reserved
+	// ranges, and RFC 1918 addresses wrapped in 6to4 or NAT64 addresses stay
+	// blocked even when it is set (see security.isRelaxablePrivate).
 	// This MUST remain false in almost all deployments; it exists only for
 	// internal-status-board use cases where the admin has accepted the risk.
 	// Default: false.

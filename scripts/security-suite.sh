@@ -40,7 +40,7 @@ cd "${REPO_ROOT}"
 REQUIRED_TESTS=(
   # TC1 - SSRF / allowlist / blocklist / schemes (AC 17-22)
   "AC17:TestTC1AC17FreshInstallEmptyAllowlistFailsClosed"
-  "AC18:TestTC1AC18AllowlistEnforcedOnAllThreeEndpoints"
+  "AC18:TestTC1AC18AllowlistEnforcedOnAllEndpoints"
   "AC19:TestTC1AC19AllowlistedHostResolvingToPrivateIsBlocked"
   "AC20:TestTC1AC20MetadataAndLinkLocalBlockedRegardlessOfAllowlist"
   "AC21:TestTC1AC21DNSRebindingPrevented"
