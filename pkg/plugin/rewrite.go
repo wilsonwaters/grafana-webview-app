@@ -20,7 +20,7 @@ import (
 const resourceBase = "/api/plugins/wilsonwaters-webview-app/resources"
 
 // buildRedirectProxyURL assembles basePath?url=<enc(target)>&_wvredir=<depth> via
-// url.Values (CR4). When the browser follows a rewritten Location, serve reads
+// url.Values (CR4). When the browser follows a rewritten Location, ServeHTTP reads
 // _wvredir back to learn the hop depth and enforce the MaxRedirects cap. Both
 // params are url.Values-encoded so the upstream target cannot inject into the
 // query string, and a fragment on target is dropped.
@@ -103,7 +103,7 @@ var htmlRewriter = rewriteHTMLLimited
 // hide-selectors (CR5). It is REPEATED — one CSS selector per value — rather than
 // a single comma-joined value, because a CSS selector group can itself contain
 // commas and significant whitespace (e.g. `a, b` or `div > .x`), so comma-joining
-// would be ambiguous. serve reads every `hide` value and threads them through to
+// would be ambiguous. ServeHTTP reads every `hide` value and threads them through to
 // rewriteHTML, which applies them to the proxied HTML document.
 const hideParam = "hide"
 

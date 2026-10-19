@@ -51,7 +51,7 @@ const proxyPath = "/proxy"
 // the proxy URL (the /proxy?url=… Location the panel's fetch follows), NEVER on
 // the upstream request: the outbound request is rebuilt purely
 // from the `url` target param (see serveProxy's Rewrite / buildTargetURL), so this
-// control param is never forwarded upstream. serve reads it inbound to learn the
+// control param is never forwarded upstream. ServeHTTP reads it inbound to learn the
 // current hop depth; ModifyResponse writes depth+1 onto the rewritten Location.
 //
 // CR4 deliberately does NOT follow redirects server-side. Instead a 3xx response
@@ -587,7 +587,7 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Capture the matched domain's per-request private-IP opt-in. This is the ONLY
 	// place AllowPrivateIP enters the dial path: it is read from the domain THIS
 	// request matched, so it is recomputed on every request (and, for redirects,
-	// on every hop, since each hop re-enters serve and re-matches). It is recorded
+	// on every hop, since each hop re-enters ServeHTTP and re-matches). It is recorded
 	// on the audit line and drives the security.Policy threaded below.
 	a.allowPrivate = match.Options.AllowPrivateIP
 
