@@ -1055,6 +1055,8 @@ func isHTMLContentType(contentType string) bool {
 // as a clean error status, and no response is delivered truncated or with a
 // decoded size above maxBytes (VR-6/VR-7):
 //
+//   - A bodiless status (1xx, 204, 304) or an empty body passes through
+//     without a Content-Encoding, whatever the upstream declared.
 //   - More than maxBytes on the wire (chunked or a lying Content-Length) ⇒
 //     errResponseTooLarge ⇒ 413.
 //   - A Content-Encoding other than gzip ⇒ errUnsupportedEncoding ⇒ 502.
@@ -1077,16 +1079,32 @@ func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logg
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
-
-	encoding, err := responseEncoding(resp.Header)
-	var raw []byte
-	if err == nil {
-		raw, err = readBounded(resp.Body, maxBytes)
+	// A status that has no body (1xx, 204, 304) has nothing to decode or
+	// rewrite. Its Content-Encoding is dropped: on a 304 it would update the
+	// browser's cached copy, which for HTML is the decoded, rewritten page.
+	if !bodyAllowedForStatus(resp.StatusCode) {
+		discardBody(resp)
+		return nil
 	}
+
+	raw, err := readBounded(resp.Body, maxBytes)
 	// Close the upstream body whatever the outcome.
 	if cerr := resp.Body.Close(); cerr != nil && err == nil {
 		err = cerr
 	}
+	if err != nil {
+		return err
+	}
+	// An empty body has nothing to decode or rewrite either. A gzip decode of
+	// zero bytes would fail, so the Content-Encoding is dropped and the empty
+	// response passes through.
+	if len(raw) == 0 {
+		resp.Header.Del("Content-Encoding")
+		setBufferedBody(resp, nil)
+		return nil
+	}
+
+	encoding, err := responseEncoding(resp.Header)
 	if err != nil {
 		return err
 	}
