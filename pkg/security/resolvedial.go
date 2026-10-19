@@ -11,8 +11,8 @@
 //  3. Classify EVERY resolved IP through the SF1 blocklist (ClassifyIP). If any
 //     single record is blocked the whole request is rejected (fail closed —
 //     see DialContext for the rationale).
-//  4. Dial the exact validated IP, not the hostname, so a later DNS answer
-//     cannot redirect the connection. A net.Dialer.Control hook independently
+//  4. Dial the exact validated IPs (in resolver order, until one connects),
+//     not the hostname, so a later DNS answer cannot redirect the connection. A net.Dialer.Control hook independently
 //     re-validates the concrete IP the OS is about to connect to, catching a
 //     rebind that slips between resolution and connect. It is the authoritative
 //     gate for any IP that reaches the dial path.
@@ -40,6 +40,7 @@ import (
 	"net"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // Reason tokens returned by the resolve-then-dial helper. These are short,
@@ -315,8 +316,9 @@ func NewDialer(resolver Resolver, base *net.Dialer) *Dialer {
 }
 
 // DialContext resolves host (taken from addr, which is "host:port"), validates
-// every resolved IP via SF1, then dials the FIRST validated IP directly using a
-// net.Dialer whose Control hook re-validates the concrete connect IP. Because
+// every resolved IP via SF1, then dials the validated IPs directly, in order
+// until one connects (see dialInOrder), using a net.Dialer whose Control hook
+// re-validates the concrete connect IP of every attempt. Because
 // the connection targets a literal IP rather than the hostname, the OS does no
 // second DNS lookup, so the validated address is exactly the address connected
 // to — defeating DNS rebinding. The original hostname is never sent to the
@@ -363,9 +365,64 @@ func (d *Dialer) DialContext(ctx context.Context, network, addr string) (net.Con
 	dialer := *d.base
 	dialer.Control = NewControlPolicy(pol)
 
-	// Dial the first validated IP directly. Every IP in the slice has already
-	// been validated, so the choice of the first is purely for determinism; the
-	// Control hook re-validates whichever address is actually used.
-	target := net.JoinHostPort(ips[0].String(), port)
-	return dialer.DialContext(ctx, network, target)
+	// Dial the validated IPs in resolver order until one connects, like a
+	// normal dialer does for a dual-stack host whose first address is
+	// unreachable. Every IP has already been validated, and the Control hook
+	// re-validates each address actually dialled.
+	return dialInOrder(ctx, ips, port, func(ctx context.Context, address string) (net.Conn, error) {
+		return dialer.DialContext(ctx, network, address)
+	})
+}
+
+// minDialAttempt is the shortest time dialInOrder gives one address when it
+// splits the remaining deadline across the addresses left to try (the same
+// floor as net.Dialer).
+const minDialAttempt = 2 * time.Second
+
+// dialInOrder dials ips (all validated) in order and returns the first
+// connection. A failure moves on to the next address, except a refusal by the
+// connect-time guard (a *DialError), which is a security decision and stops
+// the loop, as does the end of ctx. When ctx has a deadline, each attempt gets
+// an equal share of the time left (at least minDialAttempt), so one
+// unresponsive address cannot use up the whole deadline. It returns the first
+// error when no address connects.
+func dialInOrder(ctx context.Context, ips []net.IP, port string, dial func(context.Context, string) (net.Conn, error)) (net.Conn, error) {
+	var firstErr error
+	for i, ip := range ips {
+		conn, err := dialAttempt(ctx, len(ips)-i, func(ctx context.Context) (net.Conn, error) {
+			return dial(ctx, net.JoinHostPort(ip.String(), port))
+		})
+		if err == nil {
+			return conn, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		if DialReasonOf(err) != "" || ctx.Err() != nil {
+			return nil, err
+		}
+	}
+	if firstErr == nil {
+		firstErr = newDialError(ReasonResolveFailed, "no addresses to dial")
+	}
+	return nil, firstErr
+}
+
+// dialAttempt runs one dial with its share of ctx's deadline, when left
+// addresses (this one included) remain to be tried.
+func dialAttempt(ctx context.Context, left int, dial func(context.Context) (net.Conn, error)) (net.Conn, error) {
+	if deadline, ok := ctx.Deadline(); ok && left > 1 {
+		remaining := time.Until(deadline)
+		if share := remaining / time.Duration(left); share < remaining {
+			if share < minDialAttempt {
+				share = minDialAttempt
+			}
+			if share < remaining {
+				attemptCtx, cancel := context.WithTimeout(ctx, share)
+				defer cancel()
+				return dial(attemptCtx)
+			}
+		}
+	}
+	return dial(ctx)
 }

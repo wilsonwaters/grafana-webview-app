@@ -151,8 +151,9 @@ func (d *tc1RecordingDialer) addrs() []string {
 // dialer's Control hook with NewControl() and then performs a real net.Dial to
 // the validated IP — which would (a) hit the network and (b) hide the validated
 // address from us. Reconstructing it keeps the suite hermetic while still driving
-// the genuine validation functions, and asserting the SAME first-IP-direct dial
-// the production helper performs (it dials ips[0] with the Control re-check).
+// the genuine validation functions, and asserting the validated-IP direct dial
+// the production helper performs (its first attempt is ips[0], with the
+// Control re-check).
 func tc1AllowlistedTransport(resolver security.Resolver, rec *tc1RecordingDialer) *http.Transport {
 	control := security.NewControl()
 	return &http.Transport{

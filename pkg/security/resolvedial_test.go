@@ -7,6 +7,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // stubResolver is a unit-test Resolver that returns canned addresses (or a
@@ -422,5 +423,106 @@ func TestDialReasonOf_NonDialError(t *testing.T) {
 	}
 	if DialReasonOf(errors.New("plain")) != "" {
 		t.Fatal("non-DialError should yield empty reason")
+	}
+}
+
+// --- dialInOrder (RV1-20) -----------------------------------------------------
+
+// fakeDial records the addresses dialled and answers each with the next result.
+type fakeDial struct {
+	addrs     []string
+	deadlines []time.Duration
+	results   []error // nil means connect
+}
+
+func (f *fakeDial) dial(ctx context.Context, address string) (net.Conn, error) {
+	f.addrs = append(f.addrs, address)
+	if dl, ok := ctx.Deadline(); ok {
+		f.deadlines = append(f.deadlines, time.Until(dl))
+	}
+	err := f.results[len(f.addrs)-1]
+	if err != nil {
+		return nil, err
+	}
+	c, other := net.Pipe()
+	_ = other.Close()
+	return c, nil
+}
+
+func validatedIPs(t *testing.T, ips ...string) []net.IP {
+	t.Helper()
+	out := make([]net.IP, 0, len(ips))
+	for _, a := range ipAddrs(t, ips...) {
+		out = append(out, a.IP)
+	}
+	return out
+}
+
+// RV1-20: an unreachable first address (for example IPv6 inside Docker) falls
+// back to the next validated address.
+func TestDialInOrder_FallsBackToNextAddress(t *testing.T) {
+	unreachable := &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ENETUNREACH}
+	f := &fakeDial{results: []error{unreachable, nil}}
+	conn, err := dialInOrder(context.Background(), validatedIPs(t, "2606:2800:220:1::1", "93.184.216.34"), "443", f.dial)
+	if err != nil || conn == nil {
+		t.Fatalf("dialInOrder = %v, %v; want a connection from the second address", conn, err)
+	}
+	_ = conn.Close()
+	want := []string{"[2606:2800:220:1::1]:443", "93.184.216.34:443"}
+	if strings.Join(f.addrs, ",") != strings.Join(want, ",") {
+		t.Fatalf("dialled %v, want %v", f.addrs, want)
+	}
+}
+
+// A refusal by the connect-time guard is a security decision: no further
+// address is tried.
+func TestDialInOrder_GuardRefusalStops(t *testing.T) {
+	refused := &net.OpError{Op: "dial", Net: "tcp", Err: &DialError{Reason: ReasonBlockedIP, Message: "connect IP blocked"}}
+	f := &fakeDial{results: []error{refused, nil}}
+	if _, err := dialInOrder(context.Background(), validatedIPs(t, "93.184.216.34", "93.184.216.35"), "80", f.dial); DialReasonOf(err) != ReasonBlockedIP {
+		t.Fatalf("err = %v, want the guard's refusal", err)
+	}
+	if len(f.addrs) != 1 {
+		t.Fatalf("dialled %v, want only the first address", f.addrs)
+	}
+}
+
+// When no address connects, the first error is returned; an ended context
+// stops the loop.
+func TestDialInOrder_AllFailAndContextEnd(t *testing.T) {
+	first := errors.New("first failure")
+	f := &fakeDial{results: []error{first, errors.New("second failure")}}
+	if _, err := dialInOrder(context.Background(), validatedIPs(t, "93.184.216.34", "93.184.216.35"), "80", f.dial); !errors.Is(err, first) {
+		t.Fatalf("err = %v, want the first error", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	f = &fakeDial{results: []error{context.Canceled, nil}}
+	if _, err := dialInOrder(ctx, validatedIPs(t, "93.184.216.34", "93.184.216.35"), "80", f.dial); err == nil || len(f.addrs) != 1 {
+		t.Fatalf("cancelled context: err %v after %v, want a stop after one attempt", err, f.addrs)
+	}
+}
+
+// Each attempt gets a share of the deadline, so one unresponsive address
+// cannot use all of it; the last address gets what is left.
+func TestDialInOrder_SplitsDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 9*time.Second)
+	defer cancel()
+	timeout := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("i/o timeout")}
+	f := &fakeDial{results: []error{timeout, timeout, nil}}
+	conn, err := dialInOrder(ctx, validatedIPs(t, "93.184.216.34", "93.184.216.35", "93.184.216.36"), "80", f.dial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if len(f.deadlines) != 3 {
+		t.Fatalf("deadlines %v, want one per attempt", f.deadlines)
+	}
+	if f.deadlines[0] > 3100*time.Millisecond || f.deadlines[0] < minDialAttempt {
+		t.Errorf("first attempt had %v, want about a third of 9s", f.deadlines[0])
+	}
+	if f.deadlines[2] < 8*time.Second {
+		t.Errorf("last attempt had %v, want the rest of the deadline", f.deadlines[2])
 	}
 }
