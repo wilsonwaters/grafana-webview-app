@@ -37,6 +37,8 @@
     { "selector": ".a, .b, .c", "allowed": true },
     { "selector": ".a\\:b", "allowed": true },
     { "selector": "#\\31 23", "allowed": true },
+    { "selector": ".a\\  b", "allowed": true },
+    { "selector": "*|* p", "allowed": true },
     { "selector": "div/* a comment */ > p", "allowed": true },
     { "selector": "div:has(p)", "allowed": false, "reason": ":has()" },
     { "selector": "body:has(p) p", "allowed": false, "reason": ":has()" },

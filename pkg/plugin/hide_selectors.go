@@ -23,12 +23,16 @@ package plugin
 //     with cascadia and resolves the combinators in one pass over the tree,
 //     keeping one bit per compound selector for the ancestors, the parent and
 //     the earlier siblings.
-//   - The structural pseudo-classes (:nth-child() and the like) count
-//     siblings, which can be quadratic on a long list. The matcher charges
-//     each compound selector test an upper bound of its cost (for a
-//     structural pseudo-class, the number of siblings cascadia's loop visits)
-//     and stops at hideMatchBudget, so the work on one document is bounded
-//     whatever the page.
+//   - One compound selector test can be long: a :not() list can hold over a
+//     hundred simple selectors, and the structural pseudo-classes
+//     (:nth-child() and the like) count siblings, which can be quadratic on a
+//     long list. The matcher charges each compound selector test an upper
+//     bound of its cost (one unit per simple selector, plus the attributes it
+//     reads and, for a structural pseudo-class, the siblings cascadia's loop
+//     visits) and stops at hideMatchBudget, so the work on one document is
+//     bounded whatever the page.
+//   - An element that several selectors match is hidden once, so the style
+//     attributes do not grow with the number of selectors.
 
 import (
 	"errors"
@@ -54,11 +58,15 @@ const maxHideSelectorLen = 256
 const maxHideCompounds = 32
 
 // hideMatchBudget is the matching work allowed on one document, for all its
-// hide selectors together, in units of about one node, sibling or attribute
-// byte visited. An ordinary page uses a few million, and the whole budget
-// takes well under a second. A hide selector that needs more on a very large
-// page (for example :nth-child(2n+1) over a list of more than about 10,000
-// items) fails the request (errHideMatchBudget).
+// hide selectors together, in units of about one node, simple selector test,
+// sibling or attribute byte visited. An ordinary page uses a few million. The
+// whole budget takes 0.05 to 0.8 s on a desktop CPU, depending on the units
+// the selectors use (expect up to 10 times that on a Raspberry Pi): the
+// slowest are siblings in a list too long for the CPU cache, for example
+// :nth-last-child(2n) over 150,000 items. A hide selector that needs more on a
+// very large page (for example :nth-child(2n+1) over a list of more than about
+// 10,000 items, or 20 :not() lists of over a hundred type selectors over
+// 390,000 elements) fails the request (errHideMatchBudget).
 const hideMatchBudget int64 = 1 << 26
 
 // errHideMatchBudget: the hide selectors need more than hideMatchBudget work
@@ -116,6 +124,10 @@ type hidePart struct {
 // hideCost describes what one test of a compound selector against an element
 // reads, so the matcher can charge an upper bound of its cost.
 type hideCost struct {
+	// simple is the number of nodes in the parsed compound selector: its
+	// simple selectors (type selectors and * included), the :not() arguments
+	// and the lists that hold them. A test visits each at most once.
+	simple int
 	// attrKeys has one entry per attribute test (attribute, class and id
 	// selectors, :link, :checked). Each test reads every attribute key and
 	// the values of the attributes with that key.
@@ -176,7 +188,14 @@ func compileHideSelector(raw string) ([]hidePart, error) {
 	for _, cx := range complexes {
 		var b strings.Builder
 		for k, raw := range cx {
-			compound, err := cascadia.Parse(raw.text)
+			text := raw.text
+			if text == "*|*" {
+				// cascadia reads *|* as * only when more text follows it, so
+				// on its own it is a syntax error. ParseGroup has read this
+				// part of the whole selector as *.
+				text = "*"
+			}
+			compound, err := cascadia.Parse(text)
 			if err != nil {
 				return nil, fmt.Errorf("%w: %w", errHideSelectorSyntax, err)
 			}
@@ -211,7 +230,8 @@ const (
 const cascadiaPkg = "github.com/andybalholm/cascadia"
 
 // inspectHideSel walks a parsed cascadia selector and refuses the parts the
-// proxy does not support. It adds the cost of each test to cost.
+// proxy does not support. It adds the cost of each test to cost: one simple
+// unit for every node it visits, and the attribute, sibling and child reads.
 //
 // cascadia does not export its selector types, so the walk reads the type
 // names and fields with reflection (read only: no unexported value is used as
@@ -228,6 +248,7 @@ func inspectHideSel(v reflect.Value, ctx hideSelContext, cost *hideCost) error {
 	if v.Type().PkgPath() != cascadiaPkg {
 		return errHideSelectorSyntax
 	}
+	cost.simple++
 	switch v.Type().Name() {
 	case "SelectorGroup":
 		for i := 0; i < v.Len(); i++ {
@@ -339,17 +360,25 @@ type rawHidePart struct {
 // attribute value or an argument is not a split point. It returns nil when a
 // part is empty. compileHideSelector checks the result against cascadia's own
 // parse.
+//
+// A part ends after its last character that is not top-level whitespace or a
+// comment. Whitespace inside an escape (`.a\ ` is the class "a ") is part of
+// the selector, so the text is not trimmed.
 func splitSelectorGroup(s string) [][]rawHidePart {
 	var (
 		complexes [][]rawHidePart
 		current   []rawHidePart
 		op        byte
-		start     int
+		start     int // where the current part starts
+		end       int // the index after the current part's last character
 		depth     int
 		empty     bool
 	)
-	flush := func(end int) {
-		text := strings.TrimSpace(s[start:end])
+	flush := func() {
+		text := ""
+		if end > start {
+			text = s[start:end]
+		}
 		if text == "" {
 			empty = true
 		}
@@ -362,13 +391,19 @@ func splitSelectorGroup(s string) [][]rawHidePart {
 		switch {
 		case c == '\\':
 			i = skipSelectorEscape(s, i)
-		case isSelectorComment(s, i):
-			// A comment is whitespace (below), also inside brackets.
-			if depth > 0 {
-				i = skipSelectorSpace(s, i)
-				continue
+		case isSelectorComment(s, i) && depth > 0:
+			// A comment is whitespace, also inside brackets.
+			i = skipSelectorSpace(s, i)
+		case isSelectorComment(s, i) || depth == 0 && isSelectorSpace(c):
+			// Top-level whitespace: before a comma, a combinator or the end it
+			// is ignored, otherwise it is a descendant combinator.
+			i = skipSelectorSpace(s, i)
+			if i < len(s) && !strings.ContainsRune(",>+~", rune(s[i])) {
+				flush()
+				op = ' '
+				start = i
 			}
-			i = splitAtSpace(s, i, &op, &start, flush)
+			continue
 		case c == '"' || c == '\'':
 			i = skipSelectorString(s, i)
 		case c == '(' || c == '[':
@@ -380,48 +415,30 @@ func splitSelectorGroup(s string) [][]rawHidePart {
 		case depth > 0:
 			i++
 		case c == ',':
-			flush(i)
+			flush()
 			complexes = append(complexes, current)
 			current = nil
 			op = 0
 			i = skipSelectorSpace(s, i+1)
 			start = i
-		case isSelectorSpace(c):
-			i = splitAtSpace(s, i, &op, &start, flush)
+			continue
 		case c == '>' || c == '+' || c == '~':
-			flush(i)
+			flush()
 			op = c
 			i = skipSelectorSpace(s, i+1)
 			start = i
+			continue
 		default:
 			i++
 		}
+		end = i
 	}
-	flush(len(s))
+	flush()
 	complexes = append(complexes, current)
 	if empty || depth != 0 {
 		return nil
 	}
 	return complexes
-}
-
-// splitAtSpace handles top-level whitespace at s[i]: before a comma, a
-// combinator or the end it is ignored, otherwise it is a descendant
-// combinator. It returns the next index.
-func splitAtSpace(s string, i int, op *byte, start *int, flush func(int)) int {
-	end := i
-	j := skipSelectorSpace(s, i)
-	if j >= len(s) {
-		return j
-	}
-	switch s[j] {
-	case ',', '>', '+', '~':
-		return j
-	}
-	flush(end)
-	*op = ' '
-	*start = j
-	return j
 }
 
 // isSelectorSpace reports whether c is whitespace to cascadia.
@@ -499,9 +516,9 @@ func skipSelectorString(s string, i int) int {
 
 // applyHideSelectors applies the author hide selectors (CR5) to the proxied
 // document: every element a valid selector matches gets
-// `display:none!important` appended to its inline style. An empty or nil
-// hideSelectors is a no-op, so the output is byte-identical to a rewrite
-// without hide selectors.
+// `display:none!important` appended to its inline style, once however many
+// selectors match it. An empty or nil hideSelectors is a no-op, so the output
+// is byte-identical to a rewrite without hide selectors.
 //
 // /proxy refuses a request with a selector that is refused here (see
 // checkHideSelectors), so the skipping below is a second line of defence for
@@ -523,10 +540,15 @@ func skipSelectorString(s string, i int) int {
 // server-rendered HTML are hidden. Elements the page's scripts add later are
 // not, because the proxy does not run scripts.
 func applyHideSelectors(root *html.Node, hideSelectors []string) error {
+	return (&hideMatcher{budget: hideMatchBudget}).apply(root, hideSelectors)
+}
+
+// apply is applyHideSelectors with the matcher's budget. The matcher keeps the
+// work charged and the tests run.
+func (m *hideMatcher) apply(root *html.Node, hideSelectors []string) error {
 	if len(hideSelectors) == 0 {
 		return nil
 	}
-	m := &hideMatcher{budget: hideMatchBudget}
 	applied := 0
 	for _, raw := range hideSelectors {
 		if applied >= maxHideSelectors {
@@ -561,11 +583,14 @@ type hideMatcher struct {
 	parts   []hidePart
 	final   uint64 // the bits of the parts with last set
 	matched []*html.Node
-	work    int64
+	work    int64 // the work charged so far
 	budget  int64
+	tests   int64 // the compound selector tests run so far
 }
 
 // match returns the elements below root that parts match, in document order.
+// The next call reuses the returned slice, so that 20 selectors that each
+// match most of a large page do not leave 20 slices of garbage.
 func (m *hideMatcher) match(root *html.Node, parts []hidePart) ([]*html.Node, error) {
 	m.parts = parts
 	m.final = 0
@@ -574,7 +599,7 @@ func (m *hideMatcher) match(root *html.Node, parts []hidePart) ([]*html.Node, er
 			m.final |= uint64(1) << b
 		}
 	}
-	m.matched = nil
+	m.matched = m.matched[:0]
 	if err := m.visitChildren(root, 0, 0); err != nil {
 		return nil, err
 	}
@@ -668,6 +693,7 @@ func (m *hideMatcher) evaluate(n *html.Node, pos int, siblings *siblingStops, re
 		if err := m.charge(m.testCost(n, pos, siblings, &p.cost)); err != nil {
 			return 0, err
 		}
+		m.tests++
 		if p.sel.Match(n) {
 			mask |= uint64(1) << b
 		}
@@ -677,11 +703,13 @@ func (m *hideMatcher) evaluate(n *html.Node, pos int, siblings *siblingStops, re
 
 // testCost is an upper bound of the work of testing a compound selector with
 // the given cost against n, the child at position pos of siblings.parent: one
-// unit, plus every attribute key and the values with the tested key for each
-// attribute test, plus the siblings each structural pseudo-class visits, plus
-// the children (and their text) :empty reads.
+// unit, plus one for each node of the parsed compound selector (each simple
+// selector, :not() argument and list), plus every attribute key and the values
+// with the tested key for each attribute test, plus the siblings each
+// structural pseudo-class visits, plus the children (and their text) :empty
+// reads.
 func (m *hideMatcher) testCost(n *html.Node, pos int, siblings *siblingStops, cost *hideCost) int64 {
-	units := int64(1)
+	units := 1 + int64(cost.simple)
 	for _, key := range cost.attrKeys {
 		units += int64(len(n.Attr))
 		for _, a := range n.Attr {
@@ -806,6 +834,11 @@ func (m *hideMatcher) stop(siblings *siblingStops, k int64, tag string, fromEnd 
 // before the appended declaration (added only when it does not already end in
 // one) so the two declarations stay distinct. The renderer escapes the value
 // on output; no selector text or HTML is ever concatenated into the markup.
+//
+// An element whose style already ends with the declaration (it was hidden by
+// an earlier selector) is left as it is. Appending again would add nothing,
+// and with 20 selectors that all match a large page the copies of the growing
+// style values would take hundreds of MiB.
 func hideElement(n *html.Node) {
 	for i := range n.Attr {
 		if n.Attr[i].Key != "style" {
@@ -815,6 +848,8 @@ func hideElement(n *html.Node) {
 		switch {
 		case existing == "":
 			n.Attr[i].Val = hideStyleDecl
+		case existing == hideStyleDecl || strings.HasSuffix(existing, ";"+hideStyleDecl):
+			// Already hidden.
 		case strings.HasSuffix(existing, ";"):
 			n.Attr[i].Val = existing + hideStyleDecl
 		default:
