@@ -333,49 +333,65 @@ describe('panels/webview/FrameabilityEditor', () => {
   // where an in-flight request settles after the component is gone.
   // ---------------------------------------------------------------------------
 
-  test('does not throw or persist when a request resolves after unmount', async () => {
+  test('does not persist or log when a request resolves after unmount', async () => {
     let resolveGet: (value: unknown) => void = () => undefined;
     mockGet(
       jest.fn().mockImplementation(() => new Promise((resolve) => {
         resolveGet = resolve;
       }))
     );
-    const { props, onChange } = buildProps();
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { props, options, onChange } = buildProps();
     const { unmount } = render(<FrameabilityEditor {...props} />);
 
     fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
     // Unmount while the request is still in flight.
     unmount();
 
-    // Settling now hits the `!mountedRef.current` guard: no setState, no
-    // onChange, and crucially no act()/state-update-on-unmounted warning.
     await act(async () => {
       resolveGet({ frameable: true, reason: 'ok', recommendedMode: 'direct' });
     });
 
-    // detectedMode must NOT be persisted from a stale post-unmount resolution.
+    // Neither the verdict nor the tested URL is persisted from a stale response.
     expect(onChange).not.toHaveBeenCalled();
+    expect(options.detectedMode).toBeNull();
+    expect(options.detectedForUrl).toBeNull();
+    expect(consoleError).not.toHaveBeenCalled();
+    consoleError.mockRestore();
   });
 
-  test('does not throw when a request rejects after unmount', async () => {
+  test('does not show, persist or log anything when a request rejects after unmount', async () => {
     let rejectGet: (reason: unknown) => void = () => undefined;
     mockGet(
       jest.fn().mockImplementation(() => new Promise((_resolve, reject) => {
         rejectGet = reject;
       }))
     );
-    const { props } = buildProps();
+    const consoleError = jest.spyOn(console, 'error').mockImplementation(() => undefined);
+    const { props, onChange } = buildProps();
     const { unmount } = render(<FrameabilityEditor {...props} />);
 
     fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
     unmount();
 
-    // Rejecting post-unmount hits the catch-branch `!mountedRef.current` guard.
+    // The rejection settles after unmount and hits the request-id guard, which
+    // drops it before the error is read.
+    let errorRead = false;
     await act(async () => {
-      rejectGet({ status: 500, statusText: 'Server Error' });
+      rejectGet({
+        status: 500,
+        get data() {
+          errorRead = true;
+          return { message: 'Server Error' };
+        },
+      });
     });
-    // Reaching here without a thrown act warning is the assertion.
-    expect(true).toBe(true);
+
+    expect(errorRead).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(screen.queryByTestId(frameabilityEditorTestIds.result)).not.toBeInTheDocument();
+    consoleError.mockRestore();
   });
 
   // ---------------------------------------------------------------------------

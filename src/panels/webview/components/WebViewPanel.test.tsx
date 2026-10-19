@@ -363,30 +363,39 @@ describe('panels/webview/WebViewPanel', () => {
       setIntervalSpy.mockRestore();
     });
 
-    test('iframe is remounted (key changes) after one interval tick', () => {
-      const { rerender } = render(
-        <WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: 10 })} />
-      );
+    test('direct mode: each interval tick mounts a NEW iframe element (a fresh page load)', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: 10 })} />);
+      const first = screen.getByTestId(webViewPanelTestIds.iframe);
 
-      const iframeBefore = screen.getByTestId(webViewPanelTestIds.iframe);
-      const keyBefore = iframeBefore.getAttribute('key');
+      // Just before the interval: same element.
+      act(() => {
+        jest.advanceTimersByTime(9999);
+      });
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toBe(first);
 
-      // Advance the clock by 10 s — the interval callback should fire
+      act(() => {
+        jest.advanceTimersByTime(1);
+      });
+      const second = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(second).not.toBe(first);
+      expect(first.isConnected).toBe(false);
+      expect(second).toHaveAttribute('src', 'https://example.com');
+
       act(() => {
         jest.advanceTimersByTime(10000);
       });
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).not.toBe(second);
+    });
 
-      // Re-render is triggered by state update; rerender ensures React flushes
-      rerender(<WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: 10 })} />);
+    test('direct mode with refresh disabled never remounts the iframe', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: 0 })} />);
+      const first = screen.getByTestId(webViewPanelTestIds.iframe);
 
-      const iframeAfter = screen.getByTestId(webViewPanelTestIds.iframe);
-      // The `key` prop itself is not reflected as an attribute, but the element is
-      // remounted (same DOM structure, so we verify via the data attribute being present
-      // and the component not crashing). We instead check an indirect signal: the
-      // refreshKey counter should have advanced — validated by the fact that the
-      // iframe is still present and still pointing to the correct URL.
-      expect(iframeAfter).toHaveAttribute('src', 'https://example.com');
-      void keyBefore; // suppress unused variable
+      act(() => {
+        jest.advanceTimersByTime(60 * 60 * 1000);
+      });
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toBe(first);
     });
 
     test('interval fires multiple times on subsequent ticks', () => {
