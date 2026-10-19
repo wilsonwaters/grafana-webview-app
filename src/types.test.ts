@@ -14,6 +14,10 @@ describe('DEFAULT_PANEL_OPTIONS', () => {
     expect(DEFAULT_PANEL_OPTIONS.detectedMode).toBeNull();
   });
 
+  test('detectedForUrl defaults to null', () => {
+    expect(DEFAULT_PANEL_OPTIONS.detectedForUrl).toBeNull();
+  });
+
   test('viewportX defaults to 0', () => {
     expect(DEFAULT_PANEL_OPTIONS.viewportX).toBe(0);
   });
@@ -285,6 +289,7 @@ describe('normalizeOptions', () => {
         url: 'https://grafana.com',
         loadMode: 'proxy',
         detectedMode: 'proxy',
+        detectedForUrl: 'https://grafana.com',
         viewportX: 100,
         viewportY: 200,
         viewportZoom: 2.0,

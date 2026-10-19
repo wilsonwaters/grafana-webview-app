@@ -1,4 +1,4 @@
-import type { PanelOptionsEditorBuilder, StandardEditorContext } from '@grafana/data';
+import type { PanelModel, PanelOptionsEditorBuilder, StandardEditorContext } from '@grafana/data';
 import type { PanelOptions } from '../../types';
 import { plugin } from './module';
 
@@ -40,6 +40,18 @@ function optionItems(): Map<string, RecordedOption> {
 }
 
 describe('panels/webview/module', () => {
+  test('registers the detectedForUrl migration, also for panels whose version already matches', () => {
+    const legacyPanel = { options: { url: 'https://a.example', detectedMode: 'proxy' } } as unknown as PanelModel;
+
+    expect(plugin.shouldMigrate?.(legacyPanel)).toBe(true);
+    expect(plugin.onPanelMigration?.(legacyPanel)).toEqual({
+      url: 'https://a.example',
+      detectedMode: 'proxy',
+      detectedForUrl: 'https://a.example',
+    });
+    expect(plugin.shouldMigrate?.({ options: { detectedMode: null } } as unknown as PanelModel)).toBe(false);
+  });
+
   test('the auto-refresh interval is whole seconds and its description states the 5 s minimum (RV1-12)', () => {
     const item = optionItems().get('refreshIntervalSec');
 

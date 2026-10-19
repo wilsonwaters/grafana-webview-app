@@ -4,6 +4,7 @@ import { WebViewPanel } from './components/WebViewPanel';
 import { ViewportEditor } from './components/ViewportEditor';
 import { FrameabilityEditor } from './components/FrameabilityEditor';
 import { LoadModeEditor } from './components/LoadModeEditor';
+import { migratePanelOptions, needsDetectedForUrl } from './migrations';
 
 /**
  * Registration for the nested Web View panel plugin.
@@ -72,7 +73,8 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
     // FR3: "Test URL" frameability check. Bound to `detectedMode` (Grafana wires
     // a custom editor's onChange to this single path); the editor reads the
     // current `url` from `context.options`, calls `/check-frameable`, and on a
-    // successful response persists the recommended mode into `detectedMode`.
+    // successful response persists the recommended mode into `detectedMode` and
+    // the tested URL into `detectedForUrl`.
     .addCustomEditor({
       id: 'frameabilityTester',
       path: 'detectedMode',
@@ -81,4 +83,10 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
       editor: FrameabilityEditor,
       defaultValue: DEFAULT_PANEL_OPTIONS.detectedMode,
     });
-});
+})
+  // Runs when the saved plugin version differs, and for any panel that still
+  // needs a migration (on Grafana versions that support `shouldMigrate`).
+  .setMigrationHandler(
+    (panel) => migratePanelOptions(panel.options),
+    (panel) => needsDetectedForUrl(panel.options)
+  );

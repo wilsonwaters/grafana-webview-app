@@ -185,6 +185,37 @@ describe('panels/webview/WebViewPanel', () => {
       expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://example.com');
     });
 
+    test('auto mode + a proxy verdict measured for ANOTHER URL → direct (not tested), no proxy fetch', () => {
+      render(
+        <WebViewPanel
+          {...buildProps({
+            url: 'https://new.example.com',
+            loadMode: 'auto',
+            detectedMode: 'proxy',
+            detectedForUrl: 'https://old.example.com',
+          })}
+        />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://new.example.com');
+      expect(proxyFetch.fetch).not.toHaveBeenCalled();
+    });
+
+    test('auto mode + a proxy verdict measured for THIS URL → proxy fetch', () => {
+      render(
+        <WebViewPanel
+          {...buildProps({
+            url: 'https://example.com',
+            loadMode: 'auto',
+            detectedMode: 'proxy',
+            detectedForUrl: 'https://example.com',
+          })}
+        />
+      );
+
+      expect(proxyFetch.fetch).toHaveBeenCalledTimes(1);
+    });
+
     test('auto mode + detectedMode=null → raw URL src (defaults to direct)', () => {
       render(
         <WebViewPanel

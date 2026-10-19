@@ -1,5 +1,5 @@
 import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../types';
-import { buildProxyFetchUrl, PROXY_RESOURCE_BASE, resolveLoadMode } from './loadMode';
+import { buildProxyFetchUrl, detectedModeForUrl, PROXY_RESOURCE_BASE, resolveLoadMode } from './loadMode';
 
 function opts(overrides: Partial<PanelOptions> = {}): PanelOptions {
   return { ...DEFAULT_PANEL_OPTIONS, ...overrides };
@@ -29,6 +29,56 @@ describe('panels/webview/loadMode', () => {
 
     test('auto + detectedMode=null → direct (default when nothing detected)', () => {
       expect(resolveLoadMode(opts({ loadMode: 'auto', detectedMode: null }))).toBe('direct');
+    });
+
+    test('auto + a verdict measured for this URL → that verdict', () => {
+      expect(
+        resolveLoadMode(
+          opts({ loadMode: 'auto', url: 'https://a.example', detectedMode: 'proxy', detectedForUrl: 'https://a.example' })
+        )
+      ).toBe('proxy');
+    });
+
+    test('auto + a verdict measured for another URL → not tested → direct (RV1-6)', () => {
+      expect(
+        resolveLoadMode(
+          opts({ loadMode: 'auto', url: 'https://b.example', detectedMode: 'proxy', detectedForUrl: 'https://a.example' })
+        )
+      ).toBe('direct');
+    });
+
+    test('the URL comparison ignores surrounding whitespace', () => {
+      expect(
+        resolveLoadMode(
+          opts({ loadMode: 'auto', url: '  https://a.example ', detectedMode: 'proxy', detectedForUrl: 'https://a.example' })
+        )
+      ).toBe('proxy');
+    });
+
+    test('auto + a verdict saved before detectedForUrl existed (null) → the verdict is kept', () => {
+      expect(
+        resolveLoadMode(opts({ loadMode: 'auto', url: 'https://a.example', detectedMode: 'proxy', detectedForUrl: null }))
+      ).toBe('proxy');
+    });
+
+    test('manual proxy ignores a stale verdict', () => {
+      expect(
+        resolveLoadMode(
+          opts({ loadMode: 'proxy', url: 'https://b.example', detectedMode: 'direct', detectedForUrl: 'https://a.example' })
+        )
+      ).toBe('proxy');
+    });
+  });
+
+  describe('detectedModeForUrl', () => {
+    test('null when nothing was detected', () => {
+      expect(detectedModeForUrl(opts({ detectedMode: null, detectedForUrl: 'https://a.example' }))).toBeNull();
+    });
+
+    test('the verdict when it matches the URL, null when it does not', () => {
+      const base = opts({ detectedMode: 'direct', detectedForUrl: 'https://a.example' });
+      expect(detectedModeForUrl({ ...base, url: 'https://a.example' })).toBe('direct');
+      expect(detectedModeForUrl({ ...base, url: 'https://a.example/other' })).toBeNull();
     });
   });
 

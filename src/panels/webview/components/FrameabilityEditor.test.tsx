@@ -340,6 +340,127 @@ describe('panels/webview/FrameabilityEditor', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // RV1-5: a response is applied only to the URL and request it belongs to
+  // ---------------------------------------------------------------------------
+
+  /** A `get` mock whose calls each return a promise that the test settles. */
+  function deferredGet() {
+    const pending: Array<{ resolve: (v: unknown) => void; reject: (e: unknown) => void }> = [];
+    const get = mockGet(
+      jest.fn().mockImplementation(
+        () =>
+          new Promise((resolve, reject) => {
+            pending.push({ resolve, reject });
+          })
+      )
+    );
+    return { get, pending };
+  }
+
+  test('a response for the old URL that settles after the URL changed is dropped (not shown, not persisted)', async () => {
+    const { pending } = deferredGet();
+    const { props, options, onChange } = buildProps({ url: 'https://a.example.com' });
+    const { rerender } = render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+    options.url = 'https://b.example.com';
+    rerender(<FrameabilityEditor {...props} />);
+
+    await act(async () => {
+      pending[0].resolve({ frameable: false, reason: 'XFO', recommendedMode: 'proxy' });
+    });
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(options.detectedMode).toBeNull();
+    expect(options.detectedForUrl).toBeNull();
+    expect(screen.queryByTestId(frameabilityEditorTestIds.result)).not.toBeInTheDocument();
+  });
+
+  test('a failure for the old URL that settles after the URL changed shows no error', async () => {
+    const { pending } = deferredGet();
+    const { props, options } = buildProps({ url: 'https://a.example.com' });
+    const { rerender } = render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+    options.url = 'https://b.example.com';
+    rerender(<FrameabilityEditor {...props} />);
+
+    await act(async () => {
+      pending[0].reject({ status: 403, data: { message: 'denied' } });
+    });
+
+    expect(screen.queryByTestId(frameabilityEditorTestIds.result)).not.toBeInTheDocument();
+  });
+
+  test('an older slow response never overwrites the verdict of a newer request', async () => {
+    const { pending } = deferredGet();
+    const { props, options, onChange } = buildProps({ url: 'https://a.example.com' });
+    const { rerender } = render(<FrameabilityEditor {...props} />);
+
+    // Request 1 for A stays in flight; the author moves on to B and tests it.
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+    options.url = 'https://b.example.com';
+    rerender(<FrameabilityEditor {...props} />);
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+
+    await act(async () => {
+      pending[1].resolve({ frameable: false, reason: 'blocked', recommendedMode: 'proxy' });
+    });
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(options.detectedMode).toBe('proxy');
+    expect(options.detectedForUrl).toBe('https://b.example.com');
+
+    // The author goes back to A before request 1 settles: request 1 is still
+    // not the latest request, so its verdict is dropped.
+    options.url = 'https://a.example.com';
+    rerender(<FrameabilityEditor {...props} />);
+    await act(async () => {
+      pending[0].resolve({ frameable: true, reason: 'ok', recommendedMode: 'direct' });
+    });
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    expect(options.detectedMode).toBe('proxy');
+    expect(options.detectedForUrl).toBe('https://b.example.com');
+  });
+
+  test('a successful test persists the tested URL with the verdict (RV1-6)', async () => {
+    mockGet(jest.fn().mockResolvedValue({ frameable: false, reason: 'XFO', recommendedMode: 'proxy' }));
+    const { props, options } = buildProps({ url: 'https://example.com/page' });
+    render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+    await screen.findByTestId(frameabilityEditorTestIds.result);
+
+    expect(options.detectedMode).toBe('proxy');
+    expect(options.detectedForUrl).toBe('https://example.com/page');
+  });
+
+  test('Auto mode shows a hint when the saved verdict is for another URL', () => {
+    mockGet(jest.fn());
+    const { props } = buildProps({
+      url: 'https://new.example.com',
+      loadMode: 'auto',
+      detectedMode: 'proxy',
+      detectedForUrl: 'https://old.example.com',
+    });
+    render(<FrameabilityEditor {...props} />);
+
+    expect(screen.getByTestId(frameabilityEditorTestIds.untestedNote)).toHaveTextContent(/different URL/);
+  });
+
+  test.each([
+    ['the verdict matches the URL', { detectedForUrl: 'https://example.com' }],
+    ['the panel predates detectedForUrl', { detectedForUrl: null }],
+    ['the load mode is manual', { loadMode: 'proxy' as const, detectedForUrl: 'https://old.example.com' }],
+  ])('no stale-verdict hint when %s', (_label, overrides) => {
+    mockGet(jest.fn());
+    const { props } = buildProps({ url: 'https://example.com', loadMode: 'auto', detectedMode: 'proxy', ...overrides });
+    render(<FrameabilityEditor {...props} />);
+
+    expect(screen.queryByTestId(frameabilityEditorTestIds.untestedNote)).not.toBeInTheDocument();
+  });
+
+  // ---------------------------------------------------------------------------
   // CC: stale-result hygiene — result resets to idle when the URL changes
   // ---------------------------------------------------------------------------
 

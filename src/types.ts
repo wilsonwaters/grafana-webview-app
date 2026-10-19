@@ -37,6 +37,17 @@ export interface PanelOptions {
   detectedMode: 'direct' | 'proxy' | null;
 
   /**
+   * The URL (trimmed) that `detectedMode` was measured for. Auto mode uses
+   * `detectedMode` only while `url` is still this URL; after the URL changes,
+   * the URL counts as not tested (see `detectedModeForUrl` in loadMode.ts).
+   *
+   * Null on panels saved before this field existed. Their verdict is kept (see
+   * `migratePanelOptions`, which records the saved URL on load).
+   * @default null
+   */
+  detectedForUrl: string | null;
+
+  /**
    * Horizontal scroll offset (in virtual iframe pixels) of the saved viewport.
    * The CSS transform translates by this amount so the viewer sees the
    * intended region of the page. A negative value moves the page right.
@@ -106,6 +117,7 @@ export const DEFAULT_PANEL_OPTIONS: Readonly<PanelOptions> = {
   url: '',
   loadMode: 'auto',
   detectedMode: null,
+  detectedForUrl: null,
   viewportX: 0,
   viewportY: 0,
   viewportZoom: 1.0,
@@ -170,7 +182,7 @@ function toDimension(value: unknown, fallback: number): number {
  * Saved, provisioned or hand-edited dashboard JSON can hold any value, so each
  * field is coerced on its own and falls back to its default when the value is
  * missing or has the wrong type:
- * - `url` and `hideSelectors`: strings.
+ * - `url`, `detectedForUrl` and `hideSelectors`: strings (`detectedForUrl` may be null).
  * - `loadMode` and `detectedMode`: one of their allowed values.
  * - `viewportX` and `viewportY`: finite numbers. Negative values are valid:
  *   they move the page right or down inside the panel, and the preview can pan
@@ -193,6 +205,7 @@ export function normalizeOptions(partial: Partial<PanelOptions> | null | undefin
     url: typeof raw.url === 'string' ? raw.url : d.url,
     loadMode: oneOf(raw.loadMode, LOAD_MODES) ?? d.loadMode,
     detectedMode: oneOf(raw.detectedMode, DETECTED_MODES) ?? d.detectedMode,
+    detectedForUrl: typeof raw.detectedForUrl === 'string' ? raw.detectedForUrl : d.detectedForUrl,
     viewportX: toFiniteNumber(raw.viewportX) ?? d.viewportX,
     viewportY: toFiniteNumber(raw.viewportY) ?? d.viewportY,
     viewportZoom: zoom === undefined ? d.viewportZoom : clampZoom(zoom),

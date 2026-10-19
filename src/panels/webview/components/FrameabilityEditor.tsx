@@ -4,6 +4,7 @@ import { GrafanaTheme2, StandardEditorProps } from '@grafana/data';
 import { getBackendSrv } from '@grafana/runtime';
 import { Alert, Button, Tooltip, useStyles2 } from '@grafana/ui';
 import { normalizeOptions, type PanelOptions } from '../../../types';
+import { detectedModeForUrl } from '../loadMode';
 import { useBackendAvailable } from '../useBackendAvailable';
 import { frameabilityEditorTestIds } from './frameabilityEditorTestIds';
 
@@ -87,13 +88,16 @@ function extractErrorMessage(err: unknown): string {
  * - 200 `recommendedMode:'direct'` → "Direct" success; `'proxy'` → "Proxied"
  *   info with the reason; rejection → "Error" with the server reason/message.
  * - On a SUCCESSFUL response, `recommendedMode` is persisted into
- *   `options.detectedMode` through the bound `onChange`. `detectedMode` is NOT
- *   written on error.
+ *   `options.detectedMode` through the bound `onChange`, and the tested URL
+ *   into `options.detectedForUrl`. Auto mode uses the verdict only while the
+ *   URL is still the tested one. Nothing is written on error.
  * - The button is disabled (and a click is a no-op) when the URL is empty.
  *
- * Stale-result hygiene: each click bumps a request id; a resolved/rejected
- * request only updates state if it is still the latest one and the component is
- * still mounted.
+ * Stale-result hygiene: each click takes a new request id, and unmounting
+ * invalidates every id. A response is applied (shown AND persisted) only when
+ * its request is still the latest one and the URL is still the URL it tested;
+ * otherwise it is dropped. So a verdict for one URL is never saved against
+ * another, and a slow older response never overwrites a newer one.
  */
 export function FrameabilityEditor({
   onChange,
@@ -103,6 +107,9 @@ export function FrameabilityEditor({
   const opts = normalizeOptions(context.options ?? {});
   const url = opts.url.trim();
   const hasUrl = url.length > 0;
+  // A saved verdict that was measured for another URL. Auto mode ignores it.
+  const verdictIsForOtherUrl =
+    opts.loadMode === 'auto' && opts.detectedMode !== null && detectedModeForUrl(opts) === null;
 
   // DF2: the frameability check is a backend resource (/check-frameable). When
   // the plugin backend is unavailable the check cannot run, so the Test URL
@@ -121,46 +128,60 @@ export function FrameabilityEditor({
   const [stored, setStored] = useState<{ url: string; state: CheckState }>({ url, state: { status: 'idle' } });
   const state: CheckState = stored.url === url ? stored.state : { status: 'idle' };
 
-  // Guards against setting state after unmount.
-  const mountedRef = useRef(true);
+  // The id of the latest request. Unmounting bumps it, which invalidates every
+  // request that is still in flight.
+  const requestIdRef = useRef(0);
   useEffect(() => {
-    mountedRef.current = true;
     return () => {
-      mountedRef.current = false;
+      requestIdRef.current += 1;
     };
   }, []);
 
-  // onChange is bound to the `detectedMode` path; keep the latest reference so
-  // the async handler always commits through the current callback.
+  // onChange is bound to the `detectedMode` path, and `context.options` is the
+  // live options object. Keep the latest references so the async handler
+  // commits through the current callback and compares with the current URL.
   const onChangeRef = useRef(onChange);
+  const optionsRef = useRef(context.options);
   useEffect(() => {
     onChangeRef.current = onChange;
+    optionsRef.current = context.options;
   });
 
   const handleTest = useCallback(async () => {
     if (!hasUrl || backendDown) {
       return;
     }
-    // Capture the URL this request is for; if the URL changes (or the component
-    // unmounts) before it settles, the result is stale and must be discarded.
+    const requestId = ++requestIdRef.current;
     const requestUrl = url;
+    // True while this request is the latest one and the URL has not changed.
+    const isCurrent = () =>
+      requestId === requestIdRef.current && normalizeOptions(optionsRef.current ?? {}).url.trim() === requestUrl;
+
     setStored({ url: requestUrl, state: { status: 'loading' } });
 
+    let data: CheckFrameableResponse;
     try {
-      const data = await getBackendSrv().get<CheckFrameableResponse>(CHECK_FRAMEABLE_PATH, { url: requestUrl });
-      if (!mountedRef.current) {
-        return;
-      }
-      setStored({ url: requestUrl, state: { status: 'result', data } });
-      // Persist the recommended mode so the auto-mode path doesn't re-detect.
-      onChangeRef.current(data.recommendedMode);
+      data = await getBackendSrv().get<CheckFrameableResponse>(CHECK_FRAMEABLE_PATH, { url: requestUrl });
     } catch (err) {
-      if (!mountedRef.current) {
-        return;
+      if (isCurrent()) {
+        // Nothing is persisted on error: a denial or failure has no useful mode.
+        setStored({ url: requestUrl, state: { status: 'error', message: extractErrorMessage(err) } });
       }
-      // Do NOT write detectedMode on error — a denial/error has no useful mode.
-      setStored({ url: requestUrl, state: { status: 'error', message: extractErrorMessage(err) } });
+      return;
     }
+    if (!isCurrent()) {
+      return;
+    }
+    setStored({ url: requestUrl, state: { status: 'result', data } });
+    // Persist the verdict and the URL it is for, so view mode never re-detects.
+    // The bound onChange can write only `detectedMode`. Grafana copies the live
+    // options object when it applies the change, so `detectedForUrl` is set on
+    // that object first and is saved in the same update.
+    const options = optionsRef.current;
+    if (options) {
+      options.detectedForUrl = requestUrl;
+    }
+    onChangeRef.current(data.recommendedMode);
   }, [hasUrl, url, backendDown]);
 
   const buttonDisabled = !hasUrl || backendDown || state.status === 'loading';
@@ -200,6 +221,12 @@ export function FrameabilityEditor({
         >
           The proxy and URL test require the plugin backend.
         </Alert>
+      )}
+
+      {verdictIsForOtherUrl && state.status === 'idle' && (
+        <div className={styles.hint} data-testid={frameabilityEditorTestIds.untestedNote}>
+          The saved test result is for a different URL. Auto mode loads this URL directly until you test it.
+        </div>
       )}
 
       {!hasUrl && !backendDown && (
