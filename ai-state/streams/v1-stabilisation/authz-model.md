@@ -42,3 +42,8 @@ URL through it. Admins must allowlist only hosts that every user of the org may 
 - `docs/administration.md` audit table: `endpoint` is `proxy` or `check-frameable` (`proxy-resource` no
   longer exists). Add the `role` denial reason (403).
 - `docs/architecture.md`: remove `/proxy-resource`, `/ping` and `/echo`.
+- Other S2/FR5 backend changes to document: `/proxy` and `/check-frameable` send no CORS headers and
+  strip upstream `Access-Control-*` headers; `/proxy` reads the whole body before replying, so any
+  response (including a gzip body after decoding, and the rewritten HTML) over `maxResponseBytes` is a
+  413, never a truncated 200; a `Content-Encoding` other than gzip is a 502; the `Refresh` header is
+  stripped; 6to4 and NAT64 addresses are classified by their embedded IPv4 address.
