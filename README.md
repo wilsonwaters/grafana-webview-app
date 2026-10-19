@@ -1,7 +1,7 @@
-# Webview — Grafana App Plugin
+# Web View — Grafana App Plugin
 
-> **Status: approaching the first stable release (v1.0.0).** Interfaces and panel
-> options are stabilising but may still change ahead of the tagged release.
+> **Status: v1.0.0, the first stable release.** Before you rely on proxy mode,
+> check [Which sites work](#which-sites-work).
 
 [![CI](https://github.com/wilsonwaters/grafana-webview-app/actions/workflows/ci.yml/badge.svg)](https://github.com/wilsonwaters/grafana-webview-app/actions/workflows/ci.yml)
 [![License](https://img.shields.io/github/license/wilsonwaters/grafana-webview-app)](LICENSE)
@@ -41,7 +41,7 @@ author capture and save exactly the region of a page that a viewer should see.
    **[Installation guide](docs/installation.md)** for signing and install steps.
 2. **Allowlist the domains you need.** The proxy allowlist is **empty by default
    (deny-all)**. An administrator adds domains on the app's **Configuration**
-   page (**Administration → Plugins and data → Plugins → Webview →
+   page (**Administration → Plugins and data → Plugins → Web View →
    Configuration**). Changes apply to the next request; no restart is needed.
    The proxy and the **Test URL** check work only for allowlisted domains. See
    the **[Administration guide](docs/administration.md#2-allowlist-management)**.
@@ -69,6 +69,48 @@ The plugin has a hard split between two modes, matching the two audiences:
   URL at the saved viewport. There is no re-detection and no interactive
   pan/zoom; the iframe is non-interactive (`pointer-events: none`) and the viewer
   sees exactly the region the author captured.
+
+## Which sites work
+
+Whether a page works depends on the kind of site and the load mode.
+
+- **Direct mode** shows the site exactly as the site serves it, in the site's own
+  origin. It gives the best results, but only for sites that allow framing.
+- **Proxy mode** is for sites that block framing. Grafana fetches the HTML page,
+  and the panel shows it in an isolated sandbox with an opaque (`null`) origin.
+  Only the HTML goes through Grafana. Images, scripts and stylesheets load
+  directly from the site in the viewer's browser. Some kinds of site do not work
+  in that sandbox.
+
+| Kind of site | Direct mode | Proxy mode | Why |
+|---|---|---|---|
+| Allows framing (no `X-Frame-Options`, no CSP `frame-ancestors`) | **Works** | Usually works | Prefer Direct mode. The site keeps its own origin, so its logins, cookies and API calls keep working. |
+| Blocks framing, with classic server-rendered pages: HTML plus images, CSS and scripts (radar loops, status pages, articles) | Blocked by the browser | **Works** | This is what proxy mode is for. Example: the BOM legacy radar loop. |
+| Single-page apps that load their content from their own APIs (most modern React, Angular or Vue apps, live dashboards, the new BOM radar app) | Works only if the site allows framing | **Does not work** | In the sandbox the page has a `null` origin. Its API calls are cross-origin and the browser blocks them, unless the site allows every origin (`Access-Control-Allow-Origin: *`). |
+| Needs a login or a session | Works only if the site allows framing and the viewer is signed in to it | **Does not work** | The proxy sends no credentials. Cookies and storage inside the sandbox are kept in memory only and are lost on every reload. |
+| Protected by bot detection (Cloudflare challenge, Akamai, reCAPTCHA) | Works only if the site allows framing | **Often blocked** | The server-side fetch looks like a bot, and a challenge cannot be solved inside a display-only panel. |
+| Uses web fonts, ES module scripts or other resources that need CORS | Works | **Partly** | These load only if the site sends `Access-Control-Allow-Origin: *`. Otherwise fonts fall back and module scripts do not run. |
+| Live updates over WebSockets or Server-Sent Events | Works only if the site allows framing | **Often fails** | The site sees a `null` origin and can refuse the connection. Use the panel's auto-refresh instead. |
+| Internal site that only the Grafana server can reach | Does not work | **HTML only** | The proxy fetches the HTML, but the viewer's browser cannot load the images, scripts and stylesheets. |
+| Pages you need to click, scroll or type into | Display only | Display only | Panels are deliberately non-interactive (`pointer-events: none`). Position the view in the editor instead. |
+| Any page, when Grafana runs with `[security] content_security_policy = true` | Not affected | **Markup and images only** | The sandboxed page inherits Grafana's Content Security Policy, which blocks its scripts and external stylesheets. |
+
+Rules of thumb:
+
+1. Click **Test URL** first. If it recommends Direct, use Direct mode.
+2. If the site blocks framing, try Proxy mode and check the editor preview. A
+   page that renders in the preview renders the same way for viewers.
+3. If a proxied page is blank, unstyled or missing data, the site is probably one
+   of the kinds above that proxy mode cannot handle. Look for a simpler version of
+   the same page: a legacy, print, "lite" or official embed URL. The BOM legacy
+   radar loop (`https://reg.bom.gov.au/products/IDR663.loop.shtml`) is an example:
+   it works in both modes, while the new BOM radar app works in neither.
+
+Other things to know: in proxy mode the site sees the viewer's IP address (but no
+`Referer`) because the browser loads the site's resources directly, and the domain
+must be on the allowlist (direct mode does not use the allowlist). The
+[Troubleshooting guide](docs/troubleshooting.md#proxy-mode-page-shows-without-styles-images-or-scripts)
+explains how to recognise each case.
 
 ## Features
 
@@ -254,25 +296,10 @@ workflow and the project layout.
 
 ## Known limitations
 
-Proxy mode sends only the HTML page through Grafana. Keep these limits in mind:
+For which kinds of site work in each mode (single-page apps, logins, bot
+protection, internal sites, Grafana's own CSP), see
+**[Which sites work](#which-sites-work)**. Other limits:
 
-- **Grafana's own Content Security Policy blocks proxied scripts.** If Grafana
-  runs with `[security] content_security_policy = true`, a proxied page shows
-  its markup and images only. Its scripts and external stylesheets do not load.
-- **The viewer's browser must reach the original site.** Images, scripts and
-  stylesheets load directly from that site, which sees the viewer's IP address
-  (but no `Referer`). If only the Grafana server can reach the site, the page
-  shows without styles or images.
-- **The page runs in an isolated origin.** Its cookies and storage are kept in
-  memory only and are lost on every reload. Requests back to its own server are
-  cross-origin, so single-page apps that call their own APIs do not work. Web
-  fonts and module scripts load only if the site allows cross-origin requests.
-- **Bot protection can block the page.** Sites that use services such as Akamai
-  or reCAPTCHA can block the server-side fetch or the browser's requests.
-- **Example: the Bureau of Meteorology radar.** The new BOM radar page is a
-  single-page app with bot protection; it does not work in proxy mode. The
-  legacy radar loop (`https://reg.bom.gov.au/products/IDR663.loop.shtml`) works
-  in proxy mode, and also in direct mode because it sends no framing headers.
 - **Proxy mode is deny-all until a domain is allowlisted.** The proxy domain
   allowlist is **empty by default**, so on a fresh install the backend proxies
   nothing. An administrator must allowlist each target domain before proxy
@@ -284,12 +311,9 @@ Proxy mode sends only the HTML page through Grafana. Keep these limits in mind:
 - **`hideSelectors` applies to proxied pages only.** Hiding elements requires
   rewriting the page HTML, which only happens in proxy mode; it cannot be applied
   to a cross-origin direct iframe.
-- **Proxy mode does not transfer authenticated sessions.** The proxy sends no
-  credentials to the upstream site, so pages that require a logged-in session,
-  service workers or WebSockets/SSE do not render fully.
-
-The [Troubleshooting guide](docs/troubleshooting.md#proxy-mode-page-shows-without-styles-images-or-scripts)
-explains how to recognise each case.
+- **Not yet tested on** real Safari (macOS and iOS), Grafana Cloud or Grafana
+  Enterprise. Proxy mode was tested on Grafana 12.4 and 13.2 in Chromium,
+  Firefox and WebKit (the engine behind Safari).
 
 ## Contributing
 

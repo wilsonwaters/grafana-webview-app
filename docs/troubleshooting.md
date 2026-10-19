@@ -163,7 +163,7 @@ containment, not a bug. **Test URL** uses the same allowlist, so it also returns
 403 for a site that is not on the list, even one that allows framing.
 
 **Fix:** an administrator adds the host on the app's **Configuration** page
-(**Administration → Plugins and data → Plugins → Webview → Configuration**) and
+(**Administration → Plugins and data → Plugins → Web View → Configuration**) and
 clicks **Save settings**. The change applies to the next request. Note:
 
 - **Domain** is a **bare hostname** (no scheme, port, or path).

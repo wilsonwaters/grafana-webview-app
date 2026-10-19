@@ -30,7 +30,7 @@ uid is already taken in your instance.
 Proxy mode is **fail-closed**. The proxy domain allowlist is **empty by default
 (deny-all)**, so the proxy panel will not fetch anything until an administrator
 adds its target domain (`example.org`) on the app's **Configuration** page
-(**Administration → Plugins and data → Plugins → Webview → Configuration**). The
+(**Administration → Plugins and data → Plugins → Web View → Configuration**). The
 change applies to the next request; reload the dashboard to see the page. See
 [Administration → Allowlist management](../administration.md#2-allowlist-management).
 

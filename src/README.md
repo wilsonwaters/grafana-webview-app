@@ -39,7 +39,7 @@ the mode for you.
 
 1. Install the plugin and restart Grafana. See the
    [Installation guide](https://github.com/wilsonwaters/grafana-webview-app/blob/main/docs/installation.md).
-2. Enable the app in **Administration → Plugins and data → Plugins → Webview**.
+2. Enable the app in **Administration → Plugins and data → Plugins → Web View**.
 3. **Add the domains you want to proxy.** Open the app's **Configuration** tab,
    click **Add domain**, enter the host name (for example `status.example.com`)
    and click **Save settings**. The change applies to the next request; no
@@ -73,9 +73,18 @@ Proxy mode sends only the HTML page through Grafana. Because of this:
 - Sites with bot protection (for example Akamai or reCAPTCHA) can block the
   page.
 - Pages that need a login do not work; the proxy sends no credentials.
+- The viewer's browser loads the page's images, scripts and stylesheets directly
+  from the site, so it must be able to reach the site. An internal site that only
+  the Grafana server can reach shows without styles or images.
+- Live updates over WebSockets or Server-Sent Events often fail; use the panel's
+  auto-refresh instead.
 
-The [Troubleshooting guide](https://github.com/wilsonwaters/grafana-webview-app/blob/main/docs/troubleshooting.md)
-explains how to recognise each case.
+Direct mode has none of these limits, but works only for sites that allow
+framing. See
+[Which sites work](https://github.com/wilsonwaters/grafana-webview-app#which-sites-work)
+for a table of site types and modes, and the
+[Troubleshooting guide](https://github.com/wilsonwaters/grafana-webview-app/blob/main/docs/troubleshooting.md)
+to recognise each case.
 
 ## Documentation
 

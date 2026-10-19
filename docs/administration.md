@@ -55,7 +55,7 @@ are operational settings, not secrets, so they intentionally live in `jsonData`
 ### Where configuration lives
 
 Manage the allowlist and the limits on the app's **Configuration** page:
-**Administration → Plugins and data → Plugins → Webview → Configuration**. Only
+**Administration → Plugins and data → Plugins → Web View → Configuration**. Only
 organisation Admins see this page.
 
 ![The Configuration page: one allowlist entry and the six global limits](screenshots/issue-129/config-13.2.4-light.png)
@@ -250,8 +250,27 @@ keep it low enough that stalled fetches do not pile up against
 prefer a per-domain `rateLimitPerMin` override to a global bump when only one busy
 domain needs headroom.
 
-**Memory:** rewriting large HTML pages is memory-intensive; see the sizing note.
-<!-- TODO(orchestrator): add the sizing note (memory per rewrite and the rewrite concurrency cap) here. -->
+**Memory:** rewriting an HTML page builds a parse tree that is several times the
+size of the page, so the plugin bounds it:
+
+- At most **2** HTML pages per plugin process are parsed and rewritten at once,
+  whatever `maxConcurrentRequests` is. Other requests wait for a slot until their
+  timeout (then **504**).
+- The parser stops at fixed limits: one tag or text run at most 2 MiB, an
+  estimated tree of at most 48 MiB. A page over a limit gets **413**. Ordinary
+  pages up to about 6.5 MiB fit.
+- A page the parser cannot read (for example, more than 512 nested elements) gets
+  **502**. The unrewritten page is never served.
+- The plugin process sets a Go soft memory limit of 256 MiB. To change it, set
+  `GOMEMLIMIT` (for example `512MiB`, or `off`) in Grafana's environment and add
+  `wilsonwaters-webview-app` to `[plugins] forward_host_env_vars`, so Grafana
+  passes it to the plugin process.
+
+Worst-case plugin memory is roughly
+`2 × maxConcurrentRequests × maxResponseBytes + 220 MiB`. With the defaults
+(10 × 5 MiB) it measured about 225 MiB under hostile pages. On a small host such
+as a 1 GB Raspberry Pi, keep the defaults or lower `maxResponseBytes` or
+`maxConcurrentRequests`.
 
 
 ---
@@ -369,7 +388,7 @@ If you suspect abuse or an SSRF attempt:
 4. **Throttle.** Lower `rateLimitPerInstancePerMin` / `rateLimitPerDomainPerMin`
    and `maxConcurrentRequests` to contain volume while you investigate.
 5. **Contain hard if needed.** Disable the app (Administration → Plugins and
-   data → Plugins → Webview) to stop all proxying, or remove every allowlist
+   data → Plugins → Web View) to stop all proxying, or remove every allowlist
    entry to fall back to deny-all.
 6. **Apply and verify** — **Save settings** on the Configuration page. The next
    request uses the new settings; no restart is needed. If a provisioning file
