@@ -91,11 +91,15 @@ export interface PanelOptions {
   refreshIntervalSec: number;
 
   /**
-   * Comma-separated CSS selectors identifying elements to hide inside the
-   * iframe via injected CSS. Empty string means nothing is hidden.
+   * CSS selectors of elements to hide, one per line (newline-separated; blank
+   * lines are ignored). Empty string means nothing is hidden.
    *
-   * Warning: selectors are validated before injection to prevent markup
-   * injection (handled by the rendering layer — see panel-core stream).
+   * Proxy mode only: each selector is sent as a `hide` parameter, and the
+   * backend hides the matching elements of the server-rendered HTML with an
+   * inline `display:none`. The selector text is never written into the page,
+   * so it cannot inject markup. The backend skips an invalid selector and
+   * uses at most 50 selectors. Direct mode cannot change a cross-origin page
+   * and ignores this option.
    * @default ''
    */
   hideSelectors: string;

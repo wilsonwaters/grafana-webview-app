@@ -52,6 +52,14 @@ describe('panels/webview/module', () => {
     expect(plugin.shouldMigrate?.({ options: { detectedMode: null } } as unknown as PanelModel)).toBe(false);
   });
 
+  test('hideSelectors has a multi-line text editor that asks for one selector per line (RV1-17)', () => {
+    const item = optionItems().get('hideSelectors');
+
+    expect(item).toMatchObject({ method: 'addTextInput', defaultValue: '', settings: { useTextarea: true } });
+    expect(item?.description).toMatch(/one per line/);
+    expect(item?.description).toMatch(/proxy mode only/i);
+  });
+
   test('the auto-refresh interval is whole seconds and its description states the 5 s minimum (RV1-12)', () => {
     const item = optionItems().get('refreshIntervalSec');
 

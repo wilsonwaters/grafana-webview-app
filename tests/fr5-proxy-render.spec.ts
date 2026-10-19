@@ -96,6 +96,28 @@ test.describe('FR5 proxy render (fetch then srcdoc)', () => {
     await expectProxiedExampleDomain(previewFrame);
   });
 
+  test('the Hide elements option hides matching elements of the proxied page (RV1-17)', async ({
+    panelEditPage,
+    page,
+  }) => {
+    test.setTimeout(180000);
+    await setWebViewVisualization(panelEditPage, page);
+
+    await page.getByRole('textbox', { name: 'URL' }).fill(FRAMABLE_URL);
+    await page.keyboard.press('Tab');
+    await selectProxyMode(page);
+
+    // The example.com page is one <p> paragraph. One selector per line.
+    const hide = page.getByRole('textbox', { name: 'Hide elements (proxy mode)' });
+    await hide.scrollIntoViewIfNeeded();
+    await hide.fill('p\n#not-on-the-page');
+    await hide.blur();
+
+    const panelFrame = await waitForProxyFrame(panelEditPage.panel.locator, webViewPanelTestIds);
+    await expect(panelFrame).toHaveAttribute('srcdoc', /<p[^>]*style="[^"]*display:\s*none/);
+    await expect(panelFrame.contentFrame().locator('p').first()).toBeHidden();
+  });
+
   test('a non-allowlisted host shows the proxy error state and no iframe', async ({ panelEditPage, page }) => {
     test.setTimeout(180000);
     await setWebViewVisualization(panelEditPage, page);
