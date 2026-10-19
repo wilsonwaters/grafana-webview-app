@@ -32,6 +32,8 @@ Take the v0.0.1 alpha to a stable v1.0.0:
 | D2 | `@grafana/*` packages move to the latest 13.2.x with React 19 and React 19 types. The code must stay compatible with React 18. | Follows the Grafana 13.1→13.2 migration guide for plugins that still support versions older than 13.2. The e2e matrix covers 12.4 (React 18) and 13.2 (React 19). |
 | D3 | Keep the auto-resolved e2e matrix (`grafana/plugin-actions/e2e-version`). | Q13b decision stands. With D1 it resolves to 12.4.x, 13.0.x, 13.1.x, 13.2.x and nightly. |
 | D4 | Revert the temporary Levitate advisory (#124) once the deps are current. | The advisory was a stop-gap until the 13.x bump (#131). |
+| D5 | FR5 design (from R1): panel fetches `/proxy` as text and renders `<iframe srcdoc sandbox="allow-scripts" referrerPolicy="no-referrer">`. The rewriter emits absolute upstream URLs for subresources and links, and injects `<meta name="referrer" content="no-referrer">` plus an in-memory cookie/storage shim. No `X-Allow-Embedding`. `/proxy-resource` is removed. Duplicate CORS headers removed. | Sandboxed frames do not send the session cookie (Chromium, Firefox), so `/proxy-resource` cannot work from the frame; it was also broken by the `<base href>` bug (R1 D1). Removing it reduces attack surface. An optional "inline subresources via Grafana" mode is a possible post-v1 feature. |
+| D6 | Task merges into `release/v1.0.0` may happen before the independent review finishes; review findings are fixed forward on the branch. | Saves wall-clock; nothing reaches `main` until the maintainer merges #146 after all reviews and CI pass. |
 
 ## Key research finding (orchestrator, 2026-10-18) — source of the blocking headers
 
@@ -56,22 +58,21 @@ Checked against Grafana `main` source:
 
 Sizes follow the methodology (S/M/L). Issue numbers are in `ai-state/board-map.md`.
 
-| ID | Task | Size | Depends on | Status |
-|----|------|------|------------|--------|
-| R1 | Research spike: proxy render on unpatched Grafana (browser × approach × Grafana version matrix) | L | — | in progress |
-| M1 | Scaffold + dependency + CI update (create-plugin update, @grafana 13.2 / React 19, Go SDK, plugin-e2e, e2e matrix, revert #124, `grafanaDependency >=12.4.0`) | L | — | in progress |
-| RV1 | Standards review of `src/`, `pkg/`, tests and docs (read-only, findings list) | M | — | in progress |
-| S1 | Frontend security: VR-1 URL scheme validation, VR-2 per-mode iframe sandbox | M | M1 | ready |
-| S2 | Backend security: VR-3 authz model, VR-5, VR-6, VR-7, VR-8, VR-11 | M | M1 | ready |
-| S3 | Config and supply chain: VR-4, VR-9, VR-13 (with AU1), VR-14, VR-10 tracking | S | M1 | ready |
-| FR5 | In-panel proxy render, using the approach R1 selects | L | R1, S1 | blocked on R1 |
-| AU1 | Allowlist settings UI (#129), remove scaffold `apiKey`/`apiUrl`, investigate #113 | L | M1, R1 | blocked on R1 |
-| RV2 | Fix the relevant RV1 findings | M | RV1, M1 | blocked |
-| GH1 | Repository hygiene: close stale PRs, delete stale branches (record SHAs) | S | M1 (dependabot PRs superseded) | ready |
-| DEV1 | Dev server: upgrade Grafana via apt on pi1, install the plugin build | M | M1 (build) | ready |
-| DOC1 | Docs refresh for v1.0.0 (README, configuration, administration, troubleshooting, SECURITY, CHANGELOG) | M | all feature tasks | blocked |
-| REL1 | v1.0.0 release prep (version, CHANGELOG, release notes, known issues) | S | DOC1 | blocked |
-| SYS1 | System verification on integrated branch (local Docker matrix + pi1) | M | all | blocked |
+| ID | Task | Size | Issue | Depends on | Status |
+|----|------|------|-------|------------|--------|
+| R1 | Research spike: proxy render on unpatched Grafana | L | #138 | — | done (findings merged) |
+| M1 | Scaffold + dependency + CI update | L | #139 | — | merged; review in progress |
+| RV1 | Standards review (read-only findings list) | M | #140 | — | in progress |
+| S1 | Frontend security: VR-1, VR-2 | M | #141 | M1 | merged; review in progress |
+| FR5-fe | Proxy render in panel (fetch + srcdoc) | L | #102 | R1, S1 | merged with S1; review in progress |
+| S2 + FR5-be | Backend security VR-3/5/6/7/8/11, #133; rewriter absolute URLs, meta + shim, remove `/proxy-resource`, CORS fix | L | #142, #102 | M1, R1 | in progress |
+| AU1 | Settings page (#129), #113, VR-4, VR-13 | L | #129 | M1 | merged; review in progress |
+| RV2 | Fix the relevant RV1 findings | M | #140 | RV1 | blocked on RV1 |
+| GH1 | Repository hygiene | S | #143 | — | done |
+| DEV1 | pi1: Grafana 13.2.4 via apt; install plugin | M | #144 | build | Grafana done; plugin install pending |
+| DOC1 | Docs refresh (incl. VR-9, VR-12) | M | #145 | features | blocked |
+| REL1 | v1.0.0 release prep | S | #56 | DOC1 | blocked |
+| SYS1 | System verification on the integrated branch | M | — | all | blocked |
 
 ## Integration points
 
@@ -83,3 +84,4 @@ Sizes follow the methodology (S/M/L). Issue numbers are in `ai-state/board-map.m
 ## Changelog
 
 - 2026-10-18: plan created at kickoff.
+- 2026-10-19: S3 folded into AU1 (provisioning) and M1 (VR-10, VR-14); S1 + FR5-fe and S2 + FR5-be paired to avoid file conflicts; D5, D6 added.

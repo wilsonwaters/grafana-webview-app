@@ -2,7 +2,45 @@
 
 Narrative log of project status, maintained primarily by the orchestrator agent.
 
-## Status summary
+## v1.0.0 stabilisation (started 2026-10-18) — CURRENT
+
+**Resume here.** Plan, decisions and task table: `ai-state/streams/v1-stabilisation/master-plan.md`.
+All work is on branch `release/v1.0.0`, draft PR **#146** into `main` (the maintainer merges it).
+Task branches are sub-agent worktrees merged into `release/v1.0.0` after review.
+
+**Headline:** in-panel proxy mode works on stock Grafana (no patch). R1 (#138) proved it in Chromium,
+Firefox and WebKit on 12.4.13 and 13.2.4: the panel fetches `/proxy` as text and renders it in
+`<iframe srcdoc sandbox="allow-scripts">`. Subresources load directly from the upstream site, because
+sandboxed (opaque-origin) frames do not send the Grafana session cookie in Chromium and Firefox.
+Findings: `streams/v1-stabilisation/R1-proxy-render-findings.md`.
+
+Done so far:
+- M1 (#139) merged: create-plugin 7.13.0, `@grafana/*` 13.2.4 + React 19, Go 1.27.2, SDK v0.297.0,
+  `grafanaDependency >=12.4.0`, every action SHA-pinned, Levitate gate back on, e2e fixed on 13.2+,
+  osv-scanner clean (one `basic-ftp` override). Independent review in progress.
+- R1 (#138) findings merged.
+- S1 (#141) + FR5 frontend (#102) merged: URL scheme validation, one sandbox helper (proxy never gets
+  `allow-same-origin`), shared `WebViewFrame` renderer, `useProxyDocument` fetch hook. Review in progress.
+- AU1 (#129, #113) merged: Configuration page manages the allowlist and all six limits; saving merges
+  `jsonData` (the clobber bug is gone); provisioning is DEV/CI ONLY with no secret. #113 root cause was
+  the clobber bug in the old page, not the backend. Review in progress.
+- GH1 (#143) done: 11 dependabot PRs closed (superseded), 53 merged branches deleted (SHAs in
+  `streams/v1-stabilisation/deleted-branches.md`), `delete_branch_on_merge` on. The branch
+  `claude/grafana-security-review-etruqm` is kept until #146 merges (its report is now
+  `reference/security-review-2026-06-10.md`).
+- DEV1 (#144) Grafana part done (2026-10-19): pi1 upgraded 9.5.1 → 13.2.4 via apt (Grafana source only),
+  after refreshing Grafana's expired apt key (`/usr/share/keyrings/grafana.key`; old key in
+  `/var/backups/grafana.key.expired-20261018`). Zabbix app 4.1.2 → 6.9.1, Clock panel 1.3.1 → 3.2.4.
+  Backup: `/var/backups/grafana-9.5.1-backup-20261018.tgz` (`/etc/grafana`, `/var/lib/grafana`).
+  Rollback: stop, `apt-get install grafana=9.5.1`, restore the tarball. Zabbix server is 4.2.8 (old;
+  untested upstream with plugin 6.x) — maintainer asked to confirm Zabbix dashboards show data.
+  pi1 rules: touch only Grafana; confirm every state-changing command with the maintainer first.
+
+In flight: backend S2 + FR5 rewriter (absolute upstream URLs, referrer meta + storage shim,
+`/proxy-resource` removed); RV1 standards review; M1 review; FE/AU1 review.
+Next: RV2 fixes, integrated runtime verification (local Docker + pi1 plugin install), DOC1, REL1.
+
+## Status summary (v0.0.1 era — historical)
 
 Setup complete and the **execution loop is running** (task branch → PR → review → CI-green →
 squash-merge into `main`). **foundation (F1–F4), panel-core (PC1–PC5), security-foundation (SF1–SF5),
