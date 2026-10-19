@@ -335,20 +335,55 @@ func TestCheckFrameableNoCORS(t *testing.T) {
 // TestXFrameOptionsBlocks covers the X-Frame-Options classification directly.
 func TestXFrameOptionsBlocks(t *testing.T) {
 	cases := []struct {
-		value   string
+		lines   []string
 		blocked bool
 	}{
-		{"DENY", true},
-		{" deny ", true},
-		{"SAMEORIGIN", true},
-		{"sameorigin", true},
-		{"", false},
-		{"ALLOW-FROM https://x", false},
+		{[]string{"DENY"}, true},
+		{[]string{" deny "}, true},
+		{[]string{"SAMEORIGIN"}, true},
+		{[]string{"sameorigin"}, true},
+		{nil, false},
+		{[]string{""}, false},
+		{[]string{"ALLOW-FROM https://x"}, false},
+		{[]string{"ALLOWALL"}, false},
+		// RV1-21: every value of every line counts.
+		{[]string{"SAMEORIGIN, SAMEORIGIN"}, true},
+		{[]string{"sameorigin,SAMEORIGIN "}, true},
+		{[]string{"ALLOW-FROM https://x", "DENY"}, true},
+		{[]string{"", "DENY"}, true},
+		{[]string{"DENY", "DENY"}, true},
+		{[]string{"ALLOWALL, SAMEORIGIN"}, true},
+		{[]string{"ALLOWALL", "foo"}, true},
+		{[]string{"foo, bar"}, false},
 	}
 	for _, c := range cases {
-		if blocked, _ := xFrameOptionsBlocks(c.value); blocked != c.blocked {
-			t.Errorf("xFrameOptionsBlocks(%q) = %v, want %v", c.value, blocked, c.blocked)
+		if blocked, _ := xFrameOptionsBlocks(c.lines); blocked != c.blocked {
+			t.Errorf("xFrameOptionsBlocks(%q) = %v, want %v", c.lines, blocked, c.blocked)
 		}
+	}
+}
+
+// TestCheckFrameableXFrameOptionsEveryLine covers RV1-21 through the endpoint:
+// a second X-Frame-Options line, or a repeated value on one line, still blocks.
+func TestCheckFrameableXFrameOptionsEveryLine(t *testing.T) {
+	for name, lines := range map[string][]string{
+		"repeated value":   {"SAMEORIGIN, SAMEORIGIN"},
+		"second DENY line": {"ALLOW-FROM https://grafana.example", "DENY"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				for _, l := range lines {
+					w.Header().Add("X-Frame-Options", l)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+			h := frameableHandler(t, settingsWith(allowExample(DomainOptions{})), upstream)
+			got := decodeFrameable(t, doCheckFrameable(h, "http://example.com/page"))
+			if got.Frameable || got.RecommendedMode != recommendedModeProxy {
+				t.Fatalf("verdict = %+v, want blocked (proxy)", got)
+			}
+		})
 	}
 }
 

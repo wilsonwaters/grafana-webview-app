@@ -279,8 +279,9 @@ func fetchFailureReason(err error) string {
 // frameingVerdictFromHeaders inspects the framing-relevant response headers and
 // returns the Q7 verdict.
 //
-// X-Frame-Options: a value of DENY or SAMEORIGIN (case-insensitive) blocks
-// framing in a third-party (Grafana) origin.
+// X-Frame-Options: every value of every X-Frame-Options line is read (see
+// xFrameOptionsBlocks); DENY or SAMEORIGIN blocks framing in a third-party
+// (Grafana) origin.
 //
 // CSP frame-ancestors (conservative rule): the backend does NOT know the
 // Grafana origin, so it cannot prove a source list permits it. Therefore a
@@ -288,7 +289,7 @@ func fetchFailureReason(err error) string {
 // wildcard `*` (which allows any origin). 'none' blocks outright. An ABSENT
 // frame-ancestors directive does not block via CSP.
 func frameingVerdictFromHeaders(h http.Header) frameableResponse {
-	if blocked, reason := xFrameOptionsBlocks(h.Get("X-Frame-Options")); blocked {
+	if blocked, reason := xFrameOptionsBlocks(h.Values("X-Frame-Options")); blocked {
 		return frameableResponse{Frameable: false, Reason: reason, RecommendedMode: recommendedModeProxy}
 	}
 
@@ -306,16 +307,38 @@ func frameingVerdictFromHeaders(h http.Header) frameableResponse {
 	}
 }
 
-// xFrameOptionsBlocks reports whether an X-Frame-Options header value blocks
-// framing in a third-party origin. DENY and SAMEORIGIN both block (we are not
-// same-origin with the upstream). Matching is case-insensitive and tolerant of
-// surrounding whitespace. An empty or unrecognised value (e.g. a legacy
-// ALLOW-FROM, which modern browsers ignore) does not block here.
-func xFrameOptionsBlocks(value string) (bool, string) {
-	switch strings.ToUpper(strings.TrimSpace(value)) {
-	case "DENY":
+// xFrameOptionsBlocks reports whether the X-Frame-Options header lines block
+// framing in a third-party origin, following the HTML standard's processing:
+// the values of all lines are split on commas, trimmed and lowercased into a
+// set. One distinct value blocks when it is "deny" or "sameorigin" (the
+// Grafana page is not same-origin with the upstream). More than one distinct
+// value blocks when any of them is "deny", "sameorigin" or "allowall", so
+// "SAMEORIGIN, SAMEORIGIN" and a second DENY line both block. No header, or a
+// single unrecognised value (a legacy ALLOW-FROM, which browsers ignore), does
+// not block.
+func xFrameOptionsBlocks(lines []string) (bool, string) {
+	values := map[string]bool{}
+	var order []string
+	for _, line := range lines {
+		for _, v := range strings.Split(line, ",") {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if !values[v] {
+				values[v] = true
+				order = append(order, v)
+			}
+		}
+	}
+	switch {
+	case len(order) == 0:
+		return false, ""
+	case len(order) > 1:
+		if values["deny"] || values["sameorigin"] || values["allowall"] {
+			return true, "X-Frame-Options: " + strings.ToUpper(strings.Join(order, ", "))
+		}
+		return false, ""
+	case order[0] == "deny":
 		return true, "X-Frame-Options: DENY"
-	case "SAMEORIGIN":
+	case order[0] == "sameorigin":
 		return true, "X-Frame-Options: SAMEORIGIN"
 	default:
 		return false, ""
