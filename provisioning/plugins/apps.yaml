@@ -1,3 +1,18 @@
+# ---------------------------------------------------------------------------
+# DEV/CI ONLY — production installs start with an empty allowlist.
+# ---------------------------------------------------------------------------
+# This file provisions the Web View app for the local development container
+# (docker compose mounts ./provisioning) and for the CI end-to-end tests.
+# Do not copy it to a production Grafana. On a new install the allowlist is
+# empty, so the proxy denies every request until an administrator adds domains
+# on the app's Configuration page.
+#
+# Grafana applies this file at every start. It replaces the jsonData that was
+# saved on the Configuration page, so local changes do not survive a restart.
+#
+# The e2e suite needs example.com in the allowlist (the TC4 "Test URL" success
+# path and the panel specs). The denied-path spec uses a host that is NOT in
+# this list. This plugin stores no secrets: do not add secureJsonData here.
 apiVersion: 1
 
 apps:
@@ -6,17 +21,7 @@ apps:
     org_name: 'wilsonwaters'
     disabled: false
     jsonData:
-      apiUrl: http://default-url.com
-      # E2E (TC4): allowlist a single canonical host so the FR3 "Test URL"
-      # SUCCESS path (HTTP 200 verdict, not a 403 allowlist-denial) is
-      # exercisable end-to-end in CI. The allowlist is otherwise fail-closed
-      # (empty => deny all), which only covers the denied/error path. The
-      # tc4-config-flow denied-path spec uses a DIFFERENT, deliberately
-      # non-allowlisted host to assert the 403 -> Error UI state, so adding this
-      # entry does not weaken that assertion.
       allowedDomains:
         - domain: example.com
           options:
             allowSubdomains: false
-    secureJsonData:
-      apiKey: secret-key
