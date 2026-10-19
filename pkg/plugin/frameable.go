@@ -311,6 +311,10 @@ func framingVerdictFromHeaders(h http.Header) frameableResponse {
 	}
 }
 
+// xFrameOptionsMultipleReason is the verdict reason when the X-Frame-Options
+// lines hold more than one distinct value and one of them blocks.
+const xFrameOptionsMultipleReason = "X-Frame-Options: multiple values"
+
 // xFrameOptionsBlocks reports whether the X-Frame-Options header lines block
 // framing in a third-party origin, following the HTML standard's processing:
 // the values of all lines are split on commas, trimmed and lowercased into a
@@ -319,7 +323,9 @@ func framingVerdictFromHeaders(h http.Header) frameableResponse {
 // value blocks when any of them is "deny", "sameorigin" or "allowall", so
 // "SAMEORIGIN, SAMEORIGIN" and a second DENY line both block. No header, or a
 // single unrecognised value (a legacy ALLOW-FROM, which browsers ignore), does
-// not block.
+// not block. The reason for more than one value is fixed text
+// (xFrameOptionsMultipleReason), so the verdict never repeats an upstream's
+// header values.
 func xFrameOptionsBlocks(lines []string) (bool, string) {
 	values := map[string]bool{}
 	var order []string
@@ -337,7 +343,7 @@ func xFrameOptionsBlocks(lines []string) (bool, string) {
 		return false, ""
 	case len(order) > 1:
 		if values["deny"] || values["sameorigin"] || values["allowall"] {
-			return true, "X-Frame-Options: " + strings.ToUpper(strings.Join(order, ", "))
+			return true, xFrameOptionsMultipleReason
 		}
 		return false, ""
 	case order[0] == "deny":

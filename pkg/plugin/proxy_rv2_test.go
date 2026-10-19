@@ -27,6 +27,7 @@ import (
 // The memory side is measured in rewrite_memory_test.go.
 func TestProxyHostileParseRefused413(t *testing.T) {
 	pages := adversarialPages(1 << 20)
+	large := adversarialPages(4 << 20)
 	bigTag := "<p" + strings.Repeat(" a=1", 1) + func() string {
 		var b strings.Builder
 		for i := 0; b.Len() < htmlParseLimits.MaxTokenBytes+1024; i++ {
@@ -36,8 +37,10 @@ func TestProxyHostileParseRefused413(t *testing.T) {
 	}() + ">"
 	cases := map[string]string{
 		"formatting reconstruction": string(pages["reconstruction"]),
-		"quadratic text appends":    string(adversarialPages(4 << 20)["text-appends"]),
+		"quadratic text appends":    string(large["text-appends"]),
 		"tag over the token limit":  bigTag,
+		"implied table elements":    string(large["implied-tables"]),
+		"repeated body attributes":  string(pages["attribute-merge"]),
 	}
 	for name, page := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -256,10 +259,13 @@ func TestTargetURLTrimmedAndEncodedPathKept(t *testing.T) {
 }
 
 // TestRedactURL covers RV1-23: logged URLs keep the scheme, host, path and
-// query keys, but not query values, fragments or user information.
+// query keys, but not query values, fragments or user information. A query
+// part without "=" is redacted whole, because it can be a secret itself.
 func TestRedactURL(t *testing.T) {
 	cases := map[string]string{
-		"http://tiles.example/z/1?apikey=SECRET&z=3&flag#token=abc": "http://tiles.example/z/1?apikey=redacted&z=redacted&flag",
+		"http://tiles.example/z/1?apikey=SECRET&z=3&flag#token=abc": "http://tiles.example/z/1?apikey=redacted&z=redacted&redacted",
+		"http://tiles.example/z/1?SECRETKEY":                        "http://tiles.example/z/1?redacted",
+		"http://tiles.example/?a=1&&SECRETKEY&b=":                   "http://tiles.example/?a=redacted&&redacted&b=redacted",
 		"https://u:p@example.com/x":                                 "https://redacted@example.com/x",
 		"http://example.com/page":                                   "http://example.com/page",
 		"http://example.com/a%2Fb?q=%2F":                            "http://example.com/a%2Fb?q=redacted",

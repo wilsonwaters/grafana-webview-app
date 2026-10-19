@@ -40,12 +40,17 @@ type Limits struct {
 	// tokenizer keeps per-attribute state for a tag, so this also bounds the
 	// tokenizer's memory for a tag with very many attributes.
 	MaxTokenBytes int
-	// MaxTreeBytes caps the estimated heap size of the tree: its nodes,
-	// attributes and text, including cloned formatting elements.
+	// MaxTreeBytes caps the estimated heap size of the tree: every node it
+	// holds (including cloned formatting elements and the elements the tree
+	// builder creates without a tag of their own), their attributes and their
+	// text. The estimate is an upper bound on the heap the tree holds: 1.0 to
+	// 1.8 times it for the documents in the tests, 1.1 to 1.2 times for real
+	// pages.
 	MaxTreeBytes int64
-	// MaxWork caps the bytes copied to append text to an existing text node
-	// plus the attributes compared or merged for formatting elements and
-	// repeated <html> and <body> tags. These grow faster than the input.
+	// MaxWork caps the bytes copied to append text to an existing text node,
+	// plus the attributes compared for formatting elements, plus 32 units for
+	// each attribute merged for a repeated <html> or <body> tag (a merge is
+	// far slower than a byte copy). These grow faster than the input.
 	MaxWork int64
 }
 
@@ -58,6 +63,13 @@ var ErrLimitExceeded = errors.New("htmlparse: document exceeds the parse limits"
 // ErrLimitExceeded when the document goes over lim. The input is assumed to be
 // UTF-8 encoded.
 func ParseDocument(r io.Reader, lim Limits) (*html.Node, error) {
+	doc, _, err := parseDocument(r, lim)
+	return doc, err
+}
+
+// parseDocument is ParseDocument that also returns the budget totals of the
+// parse.
+func parseDocument(r io.Reader, lim Limits) (*html.Node, budget, error) {
 	z := html.NewTokenizer(r)
 	if lim.MaxTokenBytes > 0 {
 		z.SetMaxBuf(lim.MaxTokenBytes)
@@ -74,9 +86,9 @@ func ParseDocument(r io.Reader, lim Limits) (*html.Node, error) {
 	}
 	if err := p.parse(); err != nil {
 		if errors.Is(err, html.ErrBufferExceeded) {
-			return nil, fmt.Errorf("%w: a token is longer than %d bytes", ErrLimitExceeded, lim.MaxTokenBytes)
+			return nil, p.budget, fmt.Errorf("%w: a token is longer than %d bytes", ErrLimitExceeded, lim.MaxTokenBytes)
 		}
-		return nil, err
+		return nil, p.budget, err
 	}
-	return p.doc, nil
+	return p.doc, p.budget, nil
 }

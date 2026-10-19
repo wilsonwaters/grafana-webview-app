@@ -27,12 +27,18 @@ that serves user content is enough to deliver such a page, and any signed-in use
    The proxy's limits (`htmlParseLimits` in `pkg/plugin/rewrite.go`) are fixed and do not change
    with `maxResponseBytes`:
    - one token (a tag, a text run, a comment, an inline script or style) at most **2 MiB**;
-   - estimated tree size at most **48 MiB** (112 bytes per node, 48 bytes per attribute, plus
-     text; cloned formatting elements count). Real pages use 2x to 7.3x their size (measured on
-     Wikipedia, BBC, the Guardian, the WHATWG spec and the BOM radar page), so an ordinary page of
-     up to about 6.5 MiB fits;
-   - **16 MiB** of quadratic work (text appended to a text node, attribute comparisons). Real
-     pages use almost none (at most 40 bytes measured).
+   - estimated tree size at most **48 MiB**: 112 bytes for every node the tree builder inserts
+     (cloned formatting elements and implied elements, such as the `<tbody>` that `<tr>` makes,
+     count), 48 bytes per attribute slot, and the strings of every token rounded up to the
+     allocator's size classes. The estimate is an upper bound on the heap the tree holds: 1.0 to
+     1.8 times the measured tree for the hostile pages (1.10 for `<tr><table>`), 1.1 to 1.2 times
+     for real pages (`TestTreeEstimateIsUpperBound`). Real pages need 2x to 6.9x their size (measured on
+     Wikipedia, BBC, the Guardian, the WHATWG spec and the BOM radar page; the 33 KiB Hacker News
+     front page needs 7.9x), so an ordinary page of up to about 7 MiB fits;
+   - **16 MiB** of quadratic work: bytes of text appended to a text node, attribute comparisons,
+     and 32 units for each attribute merged for a repeated `<html>` or `<body>` tag (a merge takes
+     about 40 ns, a byte appended well under 1 ns). Real pages use almost none (at most 40 units
+     measured).
    A page over a limit is refused with **413** (`size-limit`), like a page over `maxResponseBytes`.
 2. **Rewrite slots.** At most **2** HTML documents per plugin process are decoded, parsed,
    rewritten and rendered at once (`maxConcurrentHTMLRewrites`), whatever `maxConcurrentRequests`
@@ -52,23 +58,35 @@ that serves user content is enough to deliver such a page, and any signed-in use
 
 Heap growth above the idle baseline, sampled every 0.2 ms (`TestRewriteMemoryReport`,
 `WEBVIEW_MEMREPORT=1 go test ./pkg/plugin -run TestRewriteMemoryReport -v`), default settings,
-pages of 5 MiB (the big tag: 2 MiB), with the 256 MiB soft limit:
+pages of 5 MiB (the big tag: 2 MiB), with the 256 MiB soft limit. Highest of three runs on a
+desktop (2026-10-19, after the review fixes below):
 
 | Page | One request | 10 concurrent `/proxy` requests | Result |
 |---|---|---|---|
-| `<p>x` repeated | 48 MiB, 40 ms | 186 MiB | 413 |
-| `<br>` repeated | 48 MiB | 193 MiB | 413 |
-| 26 attributes per tag | 93 MiB | 225 MiB | 413 |
-| `<img src=x>` repeated | 51 MiB | 191 MiB | 413 |
-| formatting-element clones | 47 MiB, 17 ms | 182 MiB | 413 |
-| `x</q>` repeated | 16 MiB, 17 ms | 163 MiB | 413 |
-| one 2 MiB tag, 300,000 attributes | 109 MiB | 198 MiB | 200 |
+| `<p>x` repeated | 43 MiB, 42 ms | 180 MiB | 413 |
+| `<br>` repeated | 44 MiB, 42 ms | 188 MiB | 413 |
+| 26 attributes per tag | 59 MiB, 63 ms | 182 MiB | 413 |
+| `<img src=x>` repeated | 46 MiB, 67 ms | 182 MiB | 413 |
+| formatting-element clones | 47 MiB, 26 ms | 191 MiB | 413 |
+| `x</q>` repeated | 16 MiB, 10 ms | 176 MiB | 413 |
+| `<tr><table>` repeated (implied elements) | 44 MiB, 50 ms | 184 MiB | 413 |
+| `<body aN>` repeated (attribute merging) | 42 MiB, 34 ms | 174 MiB | 413 |
+| one 2 MiB tag, 300,000 attributes | 120 MiB, 98 ms | 203 MiB | 200 |
 
-Worst case with defaults: **about 225 MiB** for 10 concurrent hostile requests (the target was
-300 MiB). Without the soft limit (GOMEMLIMIT=off) the same runs peak at 210 to 380 MiB, most of it
+Worst case with defaults: **about 205 MiB** for 10 concurrent hostile requests (the target was
+300 MiB). Without the soft limit (GOMEMLIMIT=off) the same runs peak at 180 to 375 MiB, most of it
 uncollected garbage. `TestRewriteMemoryBounded` (one request at most 160 MiB) and
 `TestProxyConcurrentHostilePagesMemoryBounded` (10 requests at most 300 MiB) check these bounds on
 every test run without `-race` or `-short`.
+
+Review fixes (2026-10-19). The tree estimate first charged each token, not each node, so nodes
+that the tree builder creates without a token were not counted: the `<tr><table>` page's tree was
+1.45 times its estimate, and with 26 attributes per tag (attribute arrays grow in steps) 1.37
+times. Merging the attributes of a repeated `<body>` tag counted 1 unit of work per attribute
+although it is about 250 times slower than appending a byte. Measured on the same desktop before
+the fixes: `<tr><table>` 71 MiB for one request and 242 MiB for 10; 26 attributes per tag 93 MiB
+and 244 MiB; `<body aN>` 0.8 s of CPU for one request and 4.4 s for 10. The 2 MiB tag measured
+120 MiB before and after the fixes (it was 109 MiB on the machine of the first RV2 measurement).
 
 ## Sizing guidance (for DOC1)
 
@@ -76,10 +94,10 @@ Worst-case heap of the plugin process is roughly:
 
     maxConcurrentRequests x maxResponseBytes        (bodies read, waiting for a rewrite slot)
   + maxConcurrentRequests x maxResponseBytes        (rewritten pages being sent)
-  + 2 x about 110 MiB                               (the two rewrite slots, at the parse limits)
+  + 2 x about 120 MiB                               (the two rewrite slots, at the parse limits)
 
-With the defaults (10 x 5 MiB) that is about 320 MiB before the soft limit trims garbage, and about
-225 MiB measured with it.
+With the defaults (10 x 5 MiB) that is about 340 MiB before the soft limit trims garbage, and about
+205 MiB measured with it.
 
 - Small hosts (1 GB Raspberry Pi): keep the defaults. Lower `maxResponseBytes` or
   `maxConcurrentRequests` to reduce the first two terms.
@@ -99,6 +117,9 @@ With the defaults (10 x 5 MiB) that is about 320 MiB before the soft limit trims
   tree size, and any signed-in user can pass `hide` parameters to `/proxy`. The parse limits bound
   the tree, so this is CPU time inside one rewrite slot, not memory. Follow-up: reject `:has(` and
   the other cascadia extensions in hide selectors.
-- A parse cannot be cancelled. The work and tree budgets stop every hostile page measured within
-  about 120 ms on a desktop CPU (expect up to 10x on a Raspberry Pi), during which it holds a
-  rewrite slot.
+- A parse cannot be cancelled. The work and tree budgets refuse every hostile page measured within
+  about 70 ms of rewrite time on a desktop CPU, and the largest allowed tag takes about 100 ms
+  (expect up to 10x on a Raspberry Pi); during that time it holds a rewrite slot. The work limit
+  stops a page within about 25 ms of merging or appending: a merged `<html>` or `<body>` attribute
+  (about 40 ns) counts 32 units, so 16 Mi units are about 20 ms of merges, and 16 MiB of appended
+  text is a few ms. Before merges were weighted, 5,700 `<body aN>` tags took 0.7 s.

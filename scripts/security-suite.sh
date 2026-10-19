@@ -84,13 +84,14 @@ REQUIRED_TESTS=(
   "RV2:TestProxyParseFailureFailsClosed"
   "RV2:TestProxyHostileParseRefused413"
   "RV2:TestRewriteSlotsBoundConcurrency"
+  "RV2:TestParseMatchesUpstream"
   "RV1-8:TestUpstreamFailureDetailOnlyInServerLog"
   "RV1-9:TestDomainRateLimitKeyedOnAllowlistEntry"
   "RV1-23:TestAuditRedactsQueryAndUsesContextLogger"
 )
 
 # Packages that contain (or may contain) the mandatory security tests.
-SECURITY_PACKAGES="./pkg/plugin/... ./pkg/security/..."
+SECURITY_PACKAGES="./pkg/plugin/... ./pkg/security/... ./pkg/internal/htmlparse/..."
 
 # --- Gap 1: the backend must exist -------------------------------------------
 if [ ! -f "Magefile.go" ]; then
