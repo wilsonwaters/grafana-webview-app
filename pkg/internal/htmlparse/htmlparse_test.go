@@ -2,6 +2,7 @@ package htmlparse
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -28,7 +29,7 @@ func dumpTree(b *strings.Builder, n *html.Node, depth int) {
 	}
 }
 
-func parseBoth(t *testing.T, input string) (upstream, ours string) {
+func parseBoth(t *testing.T, input string, lim Limits) (upstream, ours string) {
 	t.Helper()
 	var ub, ob strings.Builder
 	if doc, err := html.Parse(strings.NewReader(input)); err != nil {
@@ -36,7 +37,7 @@ func parseBoth(t *testing.T, input string) (upstream, ours string) {
 	} else {
 		dumpTree(&ub, doc, 0)
 	}
-	if doc, err := ParseDocument(strings.NewReader(input)); err != nil {
+	if doc, err := ParseDocument(strings.NewReader(input), lim); err != nil {
 		ob.WriteString("error: " + err.Error())
 	} else {
 		dumpTree(&ob, doc, 0)
@@ -133,17 +134,93 @@ func TestParseMatchesUpstream(t *testing.T) {
 	if len(docs) < 1000 {
 		t.Fatalf("found only %d documents; the html5lib corpus did not load", len(docs))
 	}
-	mismatches := 0
-	for name, in := range docs {
-		up, ours := parseBoth(t, in)
-		if up != ours {
-			mismatches++
-			if mismatches <= 5 {
-				t.Errorf("%s: trees differ for %q\nupstream:\n%s\nours:\n%s", name, in, up, ours)
+	t.Logf("comparing %d documents", len(docs))
+	// The same trees with no limits and with limits that every test document
+	// fits in: the budget hooks must not change the tree.
+	for name, lim := range map[string]Limits{
+		"no limits":   {},
+		"with limits": {MaxTokenBytes: 1 << 20, MaxTreeBytes: 8 << 20, MaxWork: 8 << 20},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mismatches := 0
+			for doc, in := range docs {
+				up, ours := parseBoth(t, in, lim)
+				if up != ours {
+					mismatches++
+					if mismatches <= 5 {
+						t.Errorf("%s: trees differ for %q\nupstream:\n%s\nours:\n%s", doc, in, up, ours)
+					}
+				}
 			}
+			if mismatches > 0 {
+				t.Fatalf("%d of %d documents differ", mismatches, len(docs))
+			}
+		})
+	}
+}
+
+// reconstructionBomb returns a page of about size bytes that makes the tree
+// builder clone 42 formatting elements, each with attrs attributes, for every
+// "<p>x": 14 formatting tag names, three of each with distinct attributes.
+func reconstructionBomb(size, attrs int) string {
+	var b strings.Builder
+	b.WriteString("<!doctype html><body><p>")
+	for _, tag := range []string{"a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u"} {
+		for k := 0; k < 3; k++ {
+			b.WriteString("<" + tag)
+			for i := 0; i < attrs; i++ {
+				fmt.Fprintf(&b, " x%d=%d", i, k)
+			}
+			b.WriteString(">")
 		}
 	}
-	if mismatches > 0 {
-		t.Fatalf("%d of %d documents differ", mismatches, len(docs))
+	for b.Len() < size {
+		b.WriteString("<p>x")
+	}
+	return b.String()
+}
+
+// TestParseDocumentStopsAtLimits checks that each kind of runaway parse stops
+// with ErrLimitExceeded, and that an ordinary document within the same limits
+// parses.
+func TestParseDocumentStopsAtLimits(t *testing.T) {
+	lim := Limits{MaxTokenBytes: 64 << 10, MaxTreeBytes: 4 << 20, MaxWork: 4 << 20}
+	cases := map[string]string{
+		// About 300 bytes of input per 42 cloned elements: the tree budget.
+		"formatting reconstruction": reconstructionBomb(256<<10, 4),
+		// Each "x" is appended to one text node: quadratic copying, the work
+		// budget.
+		"text appends": "<body>" + strings.Repeat("x</q>", 20000),
+		// One tag of more than MaxTokenBytes: the token limit.
+		"huge tag": "<p " + strings.Repeat("a=1 ", 20000) + ">",
+		// Many small elements: the tree budget.
+		"dense elements": "<body>" + strings.Repeat("<br>", 100000),
+		// Repeated <body> tags whose attributes are merged: the work budget.
+		"body attribute merging": func() string {
+			var b strings.Builder
+			for i := 0; i < 3000; i++ {
+				fmt.Fprintf(&b, "<body a%d>", i)
+			}
+			return b.String()
+		}(),
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ParseDocument(strings.NewReader(in), lim)
+			if !errors.Is(err, ErrLimitExceeded) {
+				t.Fatalf("err = %v, want ErrLimitExceeded", err)
+			}
+		})
+	}
+
+	ordinary := "<!doctype html><html><head><title>t</title></head><body>" +
+		strings.Repeat(`<div class="row"><a href="/x"><b>bold</b> text</a><p>para</p></div>`, 500) + "</body></html>"
+	if _, err := ParseDocument(strings.NewReader(ordinary), lim); err != nil {
+		t.Fatalf("ordinary document: %v", err)
+	}
+
+	// A parse error that is not a limit keeps its own error.
+	if _, err := ParseDocument(strings.NewReader(strings.Repeat("<div>", 600)), lim); err == nil || errors.Is(err, ErrLimitExceeded) {
+		t.Fatalf("deep nesting err = %v, want the parser's own error", err)
 	}
 }

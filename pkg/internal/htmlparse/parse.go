@@ -6,6 +6,7 @@ package htmlparse
 
 import (
 	"cmp"
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -51,6 +52,8 @@ type parser struct {
 	// context is the context element when parsing an HTML fragment
 	// (section 12.4).
 	context *Node
+	// htmlparse: budget. The limits and the running totals of this parse.
+	budget budget
 }
 
 func (p *parser) top() *Node {
@@ -292,6 +295,7 @@ func (p *parser) fosterParent(n *Node) {
 		prev = parent.LastChild
 	}
 	if prev != nil && prev.Type == TextNode && n.Type == TextNode {
+		p.budget.chargeWork(len(prev.Data) + len(n.Data)) // htmlparse: budget
 		prev.Data += n.Data
 		return
 	}
@@ -316,6 +320,7 @@ func (p *parser) addText(text string) {
 
 	t := p.top()
 	if n := t.LastChild; n != nil && n.Type == TextNode {
+		p.budget.chargeWork(len(n.Data) + len(text)) // htmlparse: budget
 		n.Data += text
 		return
 	}
@@ -369,6 +374,7 @@ findIdenticalElements:
 		if n.DataAtom != tagAtom {
 			continue
 		}
+		p.budget.chargeWork(len(attr)) // htmlparse: budget
 		if !slices.Equal(n.Attr, attr) {
 			continue findIdenticalElements
 		}
@@ -415,7 +421,7 @@ func (p *parser) reconstructActiveFormattingElements() {
 	}
 	for {
 		i++
-		clone := cloneNode(p.afe[i])
+		clone := p.cloneNode(p.afe[i]) // htmlparse: budget
 		p.addChild(clone)
 		p.afe[i] = clone
 		if i == len(p.afe)-1 {
@@ -890,6 +896,7 @@ func inBodyIM(p *parser) bool {
 			if p.oe.contains(a.Template) {
 				return true
 			}
+			p.budget.chargeWork(len(p.oe[0].Attr) + len(p.tok.Attr)) // htmlparse: budget
 			copyAttributes(p.oe[0], p.tok)
 		case a.Base, a.Basefont, a.Bgsound, a.Link, a.Meta, a.Noframes, a.Script, a.Style, a.Template, a.Title:
 			return inHeadIM(p)
@@ -901,6 +908,7 @@ func inBodyIM(p *parser) bool {
 				body := p.oe[1]
 				if body.Type == ElementNode && body.DataAtom == a.Body {
 					p.framesetOK = false
+					p.budget.chargeWork(len(body.Attr) + len(p.tok.Attr)) // htmlparse: budget
 					copyAttributes(body, p.tok)
 				}
 			}
@@ -1350,7 +1358,7 @@ func (p *parser) inBodyEndTagFormatting(tagAtom a.Atom, tagName string) {
 				continue
 			}
 			// Step 14.7.
-			clone := cloneNode(node)
+			clone := p.cloneNode(node) // htmlparse: budget
 			p.afe[p.afe.index(node)] = clone
 			p.oe[p.oe.index(node)] = clone
 			node = clone
@@ -1381,7 +1389,7 @@ func (p *parser) inBodyEndTagFormatting(tagAtom a.Atom, tagName string) {
 
 		// Steps 16-18. Reparent nodes from the furthest block's children
 		// to a clone of the formatting element.
-		clone := cloneNode(formattingElement)
+		clone := p.cloneNode(formattingElement) // htmlparse: budget
 		reparentChildren(clone, furthestBlock)
 		furthestBlock.AppendChild(clone)
 
@@ -2223,6 +2231,11 @@ func (p *parser) parseCurrentToken() {
 func (p *parser) parse() (err error) {
 	defer func() {
 		if panicErr := recover(); panicErr != nil {
+			// htmlparse: budget. Keep the identity of a budget error.
+			if e, ok := panicErr.(error); ok && errors.Is(e, ErrLimitExceeded) {
+				err = e
+				return
+			}
 			err = fmt.Errorf("%s", panicErr)
 		}
 	}()
@@ -2234,6 +2247,7 @@ func (p *parser) parse() (err error) {
 		// Read and parse the next token.
 		p.tokenizer.Next()
 		p.tok = p.tokenizer.Token()
+		p.budget.chargeToken(&p.tok) // htmlparse: budget
 		if p.tok.Type == ErrorToken {
 			err = p.tokenizer.Err()
 			if err != nil && err != io.EOF {

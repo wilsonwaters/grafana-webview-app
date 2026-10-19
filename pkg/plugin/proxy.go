@@ -1088,7 +1088,7 @@ func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logg
 		return nil
 	}
 
-	raw, err := readBounded(resp.Body, maxBytes)
+	raw, err := readBounded(resp.Body, resp.ContentLength, maxBytes)
 	// Close the upstream body whatever the outcome.
 	if cerr := resp.Body.Close(); cerr != nil && err == nil {
 		err = cerr
@@ -1120,6 +1120,15 @@ func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logg
 		setBufferedBody(resp, raw)
 		return nil
 	}
+
+	// HTML is decoded, parsed, rewritten and rendered while holding a rewrite
+	// slot, so only a few documents are in memory as parse trees at once,
+	// however many requests are in flight.
+	release, err := acquireRewriteSlot(responseContext(resp))
+	if err != nil {
+		return err
+	}
+	defer release()
 
 	decoded := raw
 	if gzipped {
@@ -1159,20 +1168,59 @@ func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logg
 // proxyErrorHandler maps it to 502.
 var errRewriteFailed = errors.New("proxy: upstream HTML could not be rewritten")
 
+// maxConcurrentHTMLRewrites is the number of HTML documents this plugin
+// process decodes, parses, rewrites and renders at the same time, across all
+// app instances. A parse tree is many times larger than its document, so this,
+// not MaxConcurrentRequests, bounds the memory of the rewrite step. Other
+// requests wait for a slot until their request deadline. See
+// ai-state/streams/v1-stabilisation/memory-sizing.md.
+const maxConcurrentHTMLRewrites = 2
+
+// htmlRewriteSlots is the semaphore behind maxConcurrentHTMLRewrites.
+var htmlRewriteSlots = make(chan struct{}, maxConcurrentHTMLRewrites)
+
+// acquireRewriteSlot waits for a rewrite slot and returns the function that
+// frees it. It returns ctx's error if ctx ends first (a timeout is then a 504).
+func acquireRewriteSlot(ctx context.Context) (func(), error) {
+	select {
+	case htmlRewriteSlots <- struct{}{}:
+		return func() { <-htmlRewriteSlots }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// responseContext returns the context of the request resp answers: the proxy
+// request's context with its deadline. A response with no request (a unit
+// test) gets context.Background().
+func responseContext(resp *http.Response) context.Context {
+	if resp.Request != nil {
+		return resp.Request.Context()
+	}
+	return context.Background()
+}
+
 // readBounded reads r to the end. More than maxBytes returns
 // errResponseTooLarge without reading further; maxBytes <= 0 means no limit.
-func readBounded(r io.Reader, maxBytes int64) ([]byte, error) {
-	if maxBytes <= 0 {
-		return io.ReadAll(r)
+// sizeHint (the declared Content-Length, or -1) pre-sizes the buffer so a body
+// of known length is read without the garbage of a growing buffer.
+func readBounded(r io.Reader, sizeHint, maxBytes int64) ([]byte, error) {
+	var buf bytes.Buffer
+	if sizeHint > 0 && (maxBytes <= 0 || sizeHint <= maxBytes) {
+		// ReadFrom wants bytes.MinRead free bytes before each read, including
+		// the final read that returns io.EOF.
+		buf.Grow(int(sizeHint) + bytes.MinRead)
 	}
-	b, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
-	if err != nil {
+	if maxBytes > 0 {
+		r = io.LimitReader(r, maxBytes+1)
+	}
+	if _, err := buf.ReadFrom(r); err != nil {
 		return nil, err
 	}
-	if int64(len(b)) > maxBytes {
+	if maxBytes > 0 && int64(buf.Len()) > maxBytes {
 		return nil, errResponseTooLarge
 	}
-	return b, nil
+	return buf.Bytes(), nil
 }
 
 // setBufferedBody replaces the response body with body and sets the framing to

@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"net/url"
 	"strconv"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/andybalholm/cascadia"
+	"github.com/wilsonwaters/webview/pkg/internal/htmlparse"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 	"golang.org/x/net/html/charset"
@@ -167,16 +169,22 @@ func rewriteHTMLLimited(htmlBytes []byte, pageURL *url.URL, contentType string, 
 		return htmlBytes, nil
 	}
 	// Charset-aware decode: charset.NewReader sniffs the BOM / <meta charset> /
-	// the supplied Content-Type and yields a UTF-8 reader, so goquery (which
+	// the supplied Content-Type and yields a UTF-8 reader, so the parser (which
 	// assumes UTF-8) parses correctly regardless of the upstream encoding.
 	reader, err := charset.NewReader(bytes.NewReader(htmlBytes), contentType)
 	if err != nil {
 		return nil, fmt.Errorf("charset reader: %w", err)
 	}
-	doc, err := goquery.NewDocumentFromReader(reader)
+	// The parse is bounded (htmlParseLimits): a document whose tree would grow
+	// past the budget is refused as too large instead of exhausting memory.
+	root, err := htmlparse.ParseDocument(reader, htmlParseLimits)
 	if err != nil {
+		if errors.Is(err, htmlparse.ErrLimitExceeded) {
+			return nil, fmt.Errorf("%w: %w", errResponseTooLarge, err)
+		}
 		return nil, fmt.Errorf("parse html: %w", err)
 	}
+	doc := goquery.NewDocumentFromNode(root)
 
 	base, baseNode := ensureBase(doc, pageURL)
 
@@ -192,14 +200,57 @@ func rewriteHTMLLimited(htmlBytes []byte, pageURL *url.URL, contentType string, 
 	removeReferrerPolicies(doc)
 	injectSandboxCompat(doc, baseNode)
 
-	out, err := goquery.OuterHtml(doc.Selection)
-	if err != nil {
+	return renderLimited(root, len(htmlBytes), maxBytes)
+}
+
+// htmlParseLimits bounds the parse of one proxied HTML document, whatever
+// MaxResponseBytes is. A document that goes over a limit is refused with 413.
+// See ai-state/streams/v1-stabilisation/memory-sizing.md for the sizing.
+var htmlParseLimits = htmlparse.Limits{
+	// The tokenizer's memory for one tag grows with its attributes (about 27
+	// bytes per input byte for a tag of short, distinct attributes), so one
+	// tag, text run, comment or inline script may be at most 2 MiB.
+	MaxTokenBytes: 2 << 20,
+	// The estimated tree (nodes, attributes, text, cloned formatting
+	// elements). An ordinary 5 MiB page needs well under half of this.
+	MaxTreeBytes: 48 << 20,
+	// Text appends and attribute comparisons, which grow faster than the
+	// input on hostile documents. Ordinary pages use almost none of this.
+	MaxWork: 16 << 20,
+}
+
+// renderLimited renders the tree as HTML into a buffer and stops with
+// errResponseTooLarge as soon as the output would exceed maxBytes, so an
+// oversize document is never rendered in full first. sizeHint (the input
+// length) pre-sizes the buffer. maxBytes <= 0 means no limit.
+func renderLimited(root *html.Node, sizeHint int, maxBytes int64) ([]byte, error) {
+	var buf bytes.Buffer
+	grow := int64(sizeHint) + int64(sizeHint)/4 + 4096
+	if maxBytes > 0 && grow > maxBytes {
+		grow = maxBytes
+	}
+	buf.Grow(int(grow))
+	if err := html.Render(&limitedWriter{buf: &buf, max: maxBytes}, root); err != nil {
+		if errors.Is(err, errResponseTooLarge) {
+			return nil, errResponseTooLarge
+		}
 		return nil, fmt.Errorf("render html: %w", err)
 	}
-	if maxBytes > 0 && int64(len(out)) > maxBytes {
-		return nil, errResponseTooLarge
+	return buf.Bytes(), nil
+}
+
+// limitedWriter appends to buf and fails with errResponseTooLarge, writing
+// nothing, when a write would take buf past max bytes (max <= 0: no limit).
+type limitedWriter struct {
+	buf *bytes.Buffer
+	max int64
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	if w.max > 0 && int64(w.buf.Len())+int64(len(p)) > w.max {
+		return 0, errResponseTooLarge
 	}
-	return []byte(out), nil
+	return w.buf.Write(p)
 }
 
 // growthBudget bounds the bytes that URL rewriting may add to a document
