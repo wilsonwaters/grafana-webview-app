@@ -41,6 +41,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 
@@ -207,7 +208,10 @@ func tc1NewApp(t *testing.T, jsonData string) *App {
 }
 
 // tc1AppGet issues GET <path>?url=<target> through app.CallResource (the real
-// resource mux) as an Editor and returns the HTTP status.
+// resource mux) as an Editor and returns the HTTP status. For
+// /check-frameable it also fails the test if the response is the role denial:
+// an Editor must get past the role gate, so a 403 there must come from the
+// allowlist, not from the role check.
 func tc1AppGet(t *testing.T, app *App, path, target string) int {
 	t.Helper()
 	var r mockCallResourceResponseSender
@@ -222,6 +226,9 @@ func tc1AppGet(t *testing.T, app *App, path, target string) int {
 	}
 	if r.response == nil {
 		t.Fatalf("CallResource %s: no response", path)
+	}
+	if path == "check-frameable" && strings.Contains(string(r.response.Body), `"reason":"role"`) {
+		t.Errorf("app /check-frameable as Editor: role denial %q, want the request past the role gate", r.response.Body)
 	}
 	return r.response.Status
 }
