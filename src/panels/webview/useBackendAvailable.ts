@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { getBackendSrv } from '@grafana/runtime';
 
-import { PLUGIN_ID } from './loadMode';
+import { PLUGIN_ID } from '../../constants';
 
 /**
  * Plugin resource path for the FR2 backend liveness probe.

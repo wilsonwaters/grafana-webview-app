@@ -115,15 +115,13 @@ const formatZoom = (value: number) => value.toFixed(2);
  *
  * ## Persistence note
  * A custom editor's `onChange` is bound to a single options path (Grafana wires
- * it as `value => onChange(item.path, value)`), so it cannot set three sibling
- * fields in one synchronous call without dropping updates. This component
- * therefore keeps the authoritative live state locally (driving the preview +
- * readout instantly) and flushes changed fields to the panel options one-per-
- * render via the bound `onChange` and per-field callbacks, each reading the
- * freshest committed options. See {@link useViewportPersistence} and
- * {@link useDimensionPersistence}.
+ * it as `value => onChange(item.path, value)`). This component keeps the live
+ * state locally (driving the preview and readout instantly) and saves each
+ * change in one options update: it writes the sibling fields onto the live
+ * options object and then calls the bound `onChange`. See
+ * {@link useViewportPersistence} and {@link useDimensionPersistence}.
  */
-export function ViewportEditor({ value, onChange, context }: StandardEditorProps<number, unknown, PanelOptions>) {
+export function ViewportEditor({ onChange, context }: StandardEditorProps<number, unknown, PanelOptions>) {
   const styles = useStyles2(getStyles);
   const opts = normalizeOptions(context.options ?? {});
   const helpId = useId();
@@ -142,7 +140,7 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
     viewportZoom: opts.viewportZoom,
   });
 
-  const persist = useViewportPersistence(value, onChange, context.options);
+  const persist = useViewportPersistence(onChange, context.options);
 
   // Remember the last state we committed so the re-sync below can distinguish
   // our own writes from genuine external edits (e.g. dashboard reload) and
@@ -176,7 +174,7 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
   const [iframeWidth, setIframeWidth] = useState<number>(opts.iframeWidth);
   const [iframeHeight, setIframeHeight] = useState<number>(opts.iframeHeight);
 
-  const persistDimension = useDimensionPersistence(value, onChange, context.options);
+  const persistDimension = useDimensionPersistence(onChange, context.options);
 
   // Sync dimension state from external changes (e.g. dashboard reload).
   const committedDimRef = useRef({ iframeWidth: opts.iframeWidth, iframeHeight: opts.iframeHeight });
@@ -556,21 +554,18 @@ function NumericField(props: NumericFieldProps) {
  * A custom editor receives an `onChange` bound to ONE path — Grafana wires it as
  * `value => onChange(item.path, value)`, where that handler does
  * `onPanelOptionsChanged(setOptionImmutably(currentOptions, item.path, value))`.
- * `setOptionImmutably` deep-clones `currentOptions` first, so any sibling values
- * already present on `currentOptions` are carried into the new options object.
+ * `setOptionImmutably` copies `currentOptions` (a shallow copy along the path)
+ * and sets the value, so any sibling values already present on
+ * `currentOptions` are carried into the new options object.
  *
- * We exploit that: write `viewportX`/`viewportY` directly onto the shared
- * `context.options` object (the same reference Grafana clones from), then fire
- * the bound `onChange` for `viewportZoom`. The clone therefore captures the
- * updated X/Y AND the new zoom in one immutable update — no lost-update race,
- * no multi-tick flush. The bound `onChange` is always called (even when zoom is
- * unchanged) so the change is committed and the dashboard marked dirty.
+ * We use that: write `viewportX`/`viewportY` directly onto the shared
+ * `context.options` object (the object Grafana copies), then fire the bound
+ * `onChange` for `viewportZoom`. The copy therefore holds the updated X/Y AND
+ * the new zoom in one immutable update — no lost-update race. The bound
+ * `onChange` is always called (even when zoom is unchanged) so the change is
+ * committed and the dashboard marked dirty.
  */
-function useViewportPersistence(
-  _boundValue: number,
-  onChange: (value?: number) => void,
-  options: PanelOptions | undefined
-) {
+function useViewportPersistence(onChange: (value?: number) => void, options: PanelOptions | undefined) {
   const onChangeRef = useRef(onChange);
   const optionsRef = useRef(options);
   useEffect(() => {
@@ -581,8 +576,8 @@ function useViewportPersistence(
   return useCallback((next: ViewportState) => {
     const current = optionsRef.current;
     if (current) {
-      // Stage X/Y on the live options object so Grafana's immutable clone picks
-      // them up alongside the zoom change below.
+      // Stage X/Y on the live options object so Grafana's copy picks them up
+      // with the zoom change below.
       current.viewportX = next.viewportX;
       current.viewportY = next.viewportY;
     }
@@ -596,21 +591,15 @@ function useViewportPersistence(
  * Persists iframeWidth / iframeHeight through the custom editor's single bound
  * `onChange`, using the same sibling-write technique as {@link useViewportPersistence}.
  *
- * We write `iframeWidth` directly onto the live `context.options` object, then
- * fire the bound `onChange` for `iframeHeight` (or vice versa) — Grafana's
- * `setOptionImmutably` deep-clones the options object on each call, so the
- * staged value is included in the resulting snapshot.
+ * We write `iframeWidth` and `iframeHeight` onto the live `context.options`
+ * object, then fire the bound `onChange` — Grafana's `setOptionImmutably`
+ * copies the options object, so the written values are part of the update.
  *
  * NOTE: this shares the same `onChange` callback that `useViewportPersistence`
  * uses (both are bound to `viewportZoom`). When a dimension changes, the current
- * zoom is passed to `onChange` so that the viewport fields are also preserved
- * in the cloned snapshot without being reset to the default.
+ * zoom is passed to `onChange` so that the zoom is kept unchanged.
  */
-function useDimensionPersistence(
-  _boundValue: number,
-  onChange: (value?: number) => void,
-  options: PanelOptions | undefined
-) {
+function useDimensionPersistence(onChange: (value?: number) => void, options: PanelOptions | undefined) {
   const onChangeRef = useRef(onChange);
   const optionsRef = useRef(options);
   useEffect(() => {
@@ -621,8 +610,7 @@ function useDimensionPersistence(
   return useCallback((dims: { iframeWidth: number; iframeHeight: number }) => {
     const current = optionsRef.current;
     if (current) {
-      // Stage both dimension fields and the current viewport offsets so they
-      // all survive Grafana's deep-clone of the options object.
+      // Stage both dimension fields so Grafana's copy of the options picks them up.
       current.iframeWidth = dims.iframeWidth;
       current.iframeHeight = dims.iframeHeight;
     }

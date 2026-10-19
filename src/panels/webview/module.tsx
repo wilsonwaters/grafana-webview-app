@@ -13,9 +13,10 @@ import { migratePanelOptions, needsDetectedForUrl } from './migrations';
  * (see ./plugin.json). The webpack build discovers this `module.tsx` via the
  * sibling `plugin.json` and emits it to `dist/panels/webview/module.js`.
  *
- * At this stage the panel is a registration/packaging placeholder only: the
- * options editor exposes the F2 `PanelOptions` fields and the component renders
- * a placeholder. Real viewport / proxy behaviour is added by later streams.
+ * The options registered here are the editable `PanelOptions` fields (see
+ * src/types.ts). `viewportX`/`viewportY`, `iframeWidth`/`iframeHeight` and
+ * `detectedForUrl` have no option of their own: the custom editors write them
+ * next to the option path they are bound to.
  */
 export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOptions((builder) => {
   builder

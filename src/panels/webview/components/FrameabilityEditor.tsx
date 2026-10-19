@@ -3,6 +3,7 @@ import { css } from '@emotion/css';
 import { GrafanaTheme2, StandardEditorProps } from '@grafana/data';
 import { getBackendSrv } from '@grafana/runtime';
 import { Alert, Button, Tooltip, useStyles2 } from '@grafana/ui';
+import { PLUGIN_ID } from '../../../constants';
 import { normalizeOptions, type PanelOptions } from '../../../types';
 import { detectedModeForUrl } from '../loadMode';
 import { validateWebViewUrl } from '../url';
@@ -18,7 +19,7 @@ import { frameabilityEditorTestIds } from './frameabilityEditorTestIds';
  *   - a non-2xx status (400/403/429/405/…) whose body carries a `message`/reason
  *     on a security denial or upstream/network error.
  */
-const CHECK_FRAMEABLE_PATH = '/api/plugins/wilsonwaters-webview-app/resources/check-frameable';
+export const CHECK_FRAMEABLE_PATH = `/api/plugins/${PLUGIN_ID}/resources/check-frameable`;
 
 /** Shape of a successful (HTTP 200) /check-frameable response. */
 interface CheckFrameableResponse {
@@ -83,16 +84,18 @@ function extractErrorMessage(err: unknown): string {
  * re-detects).
  *
  * Behaviour:
- * - The button calls `/check-frameable` with the current `context.options.url`
- *   via `getBackendSrv().get(...)`, letting it encode the `url` query param.
- * - States: idle → loading (button shows a spinner / disabled) → result/error.
+ * - The button calls `/check-frameable` with the current, validated and trimmed
+ *   `context.options.url` via `getBackendSrv().get(...)`, which encodes the
+ *   `url` query param.
+ * - States: idle → loading (the button is disabled) → result/error.
  * - 200 `recommendedMode:'direct'` → "Direct" success; `'proxy'` → "Proxied"
  *   info with the reason; rejection → "Error" with the server reason/message.
  * - On a SUCCESSFUL response, `recommendedMode` is persisted into
  *   `options.detectedMode` through the bound `onChange`, and the tested URL
  *   into `options.detectedForUrl`. Auto mode uses the verdict only while the
  *   URL is still the tested one. Nothing is written on error.
- * - The button is disabled (and a click is a no-op) when the URL is empty.
+ * - The button is disabled (and a click is a no-op) when the URL is empty or
+ *   not a valid http(s) URL.
  *
  * Stale-result hygiene: each click takes a new request id, and unmounting
  * invalidates every id. A response is applied (shown AND persisted) only when

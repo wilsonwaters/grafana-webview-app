@@ -1,5 +1,5 @@
 export const viewportEditorTestIds = {
-  /** The interactive preview container that captures mouse events. */
+  /** The interactive preview container that handles the pointer (drag and wheel). */
   preview: 'data-testid webview-viewport-editor-preview',
   /** The (pointer-events: none) iframe shown inside the preview. */
   iframe: 'data-testid webview-viewport-editor-iframe',

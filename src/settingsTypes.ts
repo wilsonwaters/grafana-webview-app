@@ -2,9 +2,8 @@
  * Admin-configurable plugin settings schema for the Web View plugin.
  *
  * These types mirror the Go PluginSettings / DomainOptions / AllowedDomain
- * structs defined in pkg/plugin/config.go and are consumed by the plugin
- * configuration UI (AppConfig — a later task) and any TypeScript code that
- * needs to read or write jsonData for this plugin.
+ * structs defined in pkg/plugin/config.go and are used by the configuration
+ * page (src/components/AppConfig).
  *
  * All values live in non-secret jsonData. Nothing here belongs in
  * secureJsonData because these are operational configuration fields that
@@ -29,9 +28,11 @@ export interface DomainOptions {
 
   /**
    * Explicit opt-in that permits the resolved IP address of this domain to
-   * fall within RFC 1918 / link-local / loopback ranges. Must remain false
-   * in almost all deployments; exists only for internal-status-board
-   * use cases where the admin has accepted the SSRF risk.
+   * fall within the RFC 1918 IPv4 ranges (10.0.0.0/8, 172.16.0.0/12,
+   * 192.168.0.0/16) only. Loopback, link-local (including the metadata
+   * address), CGNAT, IPv6 ULA and the other blocked ranges stay blocked.
+   * Must remain false in almost all deployments; exists only for
+   * internal-status-board use cases where the admin has accepted the SSRF risk.
    * @default false
    */
   allowPrivateIP: boolean;
@@ -110,8 +111,10 @@ export interface PluginSettings {
   maxRedirects: number;
 
   /**
-   * Maximum total proxy requests per minute across the entire Grafana instance
-   * (token-bucket limiter). Requests that exceed the limit receive 429.
+   * Maximum total proxy requests per minute (token-bucket limiter). The backend
+   * keys this tier on the request's Grafana namespace, so on a single Grafana
+   * server each organization has its own bucket. Requests that exceed the
+   * limit receive 429.
    * @default 60
    */
   rateLimitPerInstancePerMin: number;

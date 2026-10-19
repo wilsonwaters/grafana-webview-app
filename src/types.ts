@@ -4,7 +4,8 @@ import { clampZoom } from './panels/webview/viewport';
  * Canonical panel options for the Web View panel.
  *
  * This is the single source of truth for the panel configuration schema.
- * All fields match the implementation spec (ai-state/reference/implementation-spec.md).
+ * The fields follow the implementation spec (ai-state/reference/implementation-spec.md),
+ * plus `detectedForUrl`, which ties the Test URL verdict to the tested URL.
  *
  * Note on field-name history: earlier research documents used different names
  * (e.g. `forceProxy`, `initialX`, `initialZoom`, `interactive`). Those names
