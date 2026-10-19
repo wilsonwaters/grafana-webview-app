@@ -4,7 +4,14 @@ import { WebViewPanel } from './components/WebViewPanel';
 import { ViewportEditor } from './components/ViewportEditor';
 import { FrameabilityEditor } from './components/FrameabilityEditor';
 import { LoadModeEditor } from './components/LoadModeEditor';
+import { HideSelectorsEditor } from './components/HideSelectorsEditor';
+import { MAX_HIDE_SELECTORS } from './hideSelectors';
 import { migratePanelOptions, needsDetectedForUrl } from './migrations';
+
+const HIDE_SELECTORS_DESCRIPTION =
+  'CSS selectors of elements to hide, one per line, for example a cookie banner. Applies in proxy mode only; ' +
+  `direct mode shows the page unchanged. At most ${MAX_HIDE_SELECTORS} selectors; :has(), :contains() and ` +
+  'other slow selectors are not supported.';
 
 /**
  * Registration for the nested Web View panel plugin.
@@ -40,14 +47,16 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
       editor: LoadModeEditor,
       defaultValue: DEFAULT_PANEL_OPTIONS.loadMode,
     })
-    .addTextInput({
+    // CR5: a custom editor, so it can say which selectors the proxy would
+    // refuse; the panel does not send those (see hideSelectors.ts).
+    .addCustomEditor({
+      id: 'hideSelectors',
       path: 'hideSelectors',
       name: 'Hide elements (proxy mode)',
-      description:
-        'CSS selectors of elements to hide, one per line, for example a cookie banner. Applies in proxy mode only; direct mode shows the page unchanged.',
+      description: HIDE_SELECTORS_DESCRIPTION,
+      editor: HideSelectorsEditor,
       defaultValue: DEFAULT_PANEL_OPTIONS.hideSelectors,
       settings: {
-        useTextarea: true,
         rows: 3,
         placeholder: '.cookie-banner\n#site-header',
       },

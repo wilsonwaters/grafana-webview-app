@@ -237,8 +237,8 @@ func writeDenial(w http.ResponseWriter, reason, message string) string {
 //
 // Pipeline order: parse url param → SF2 ValidateURL (scheme/userinfo/malformed) →
 // SF3 MatchHostname (empty allowlist ⇒ deny) → SF2 port re-check against the
-// matched domain's AllowedPorts → SF5 Allow (rate tiers) and Acquire
-// (concurrency). On any denial the handler writes the mapped status and returns
+// matched domain's AllowedPorts → CR5 hide-selector check → SF5 Allow (rate
+// tiers) and Acquire (concurrency). On any denial the handler writes the mapped status and returns
 // without contacting the upstream.
 func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// P5 / AC 28 + P6 / AC 29: exactly one audit entry and one metrics
@@ -304,6 +304,20 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// CR5: read the author hide selectors from the repeated `hide` query
+	// params and refuse the request (400, JSON) when there are too many, one
+	// is too long, or one uses a selector feature whose matching cost is not
+	// bounded (see hide_selectors.go). This runs before any rate-limit token
+	// is spent or the upstream is contacted. The panel editor does not send
+	// such selectors, so only a hand-made request gets here. The params are a
+	// PROXY-request-only control and are never forwarded upstream (the
+	// outbound URL is rebuilt from `url` alone).
+	hideSelectors := hideSelectorsOf(req)
+	if msg := checkHideSelectors(hideSelectors); msg != "" {
+		a.denied = writeJSONDenial(w, denialReasonBadRequest, msg)
+		return
+	}
+
 	// SF5: rate-limit tiers (per instance, per domain), then concurrency cap.
 	// The domain tier is keyed on the matched allowlist entry, not the request
 	// host, so every subdomain of an allowSubdomains entry shares one bucket
@@ -343,12 +357,6 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// onto the upstream request (the outbound URL is rebuilt from `url` alone).
 	depth := redirectDepthOf(req)
 
-	// CR5: read the author hide-selectors from the repeated `hide` query params.
-	// These are applied ONLY to proxied HTML (in prepareHTMLBody via
-	// rewriteHTML); they are a PROXY-request-only control and are never forwarded
-	// upstream (the outbound URL is rebuilt from `url` alone).
-	hideSelectors := hideSelectorsOf(req)
-
 	// Build the per-request relaxation Policy from the matched domain's opt-in.
 	// When allowPrivate is false this is the strict zero-equivalent Policy
 	// (AllowPrivate:false), so the default path is unchanged. OnPrivatePermit is
@@ -368,9 +376,9 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // hideSelectorsOf reads the repeated `hide` query params (CR5) from the inbound
 // proxy request, returning each non-blank value (trimmed) in order. Each value is
 // ONE CSS selector (selectors may contain commas/whitespace, so they are passed as
-// repeated params, never comma-joined). Validation (length / count caps and
-// cascadia compilation) is the rewriter's job in applyHideSelectors; this only
-// lifts the raw values. A request with no `hide` params yields nil (a no-op
+// repeated params, never comma-joined). Validation is checkHideSelectors' job
+// (and the rewriter's, which skips what it cannot use); this only lifts the raw
+// values. A request with no `hide` params yields nil (a no-op
 // downstream). The param is internal to the proxy URL and never sent upstream.
 func hideSelectorsOf(req *http.Request) []string {
 	values := req.URL.Query()[hideParam]
@@ -574,6 +582,7 @@ func stripRequestHeaders(h http.Header) {
 //   - SF4 cloud-metadata host (ReasonMetadataHost) ⇒ metadata ⇒ 403
 //   - SF4 resolve failure / no host (ReasonResolveFailed, ReasonNoHost) ⇒ upstream ⇒ 502
 //   - over-size response (P4, VR-6, VR-7) ⇒ size-limit ⇒ 413
+//   - hide selectors over their work budget (CR5) ⇒ size-limit ⇒ 413
 //   - unsupported Content-Encoding (VR-6) ⇒ upstream ⇒ 502
 //   - HTML that could not be rewritten (errRewriteFailed) ⇒ upstream ⇒ 502
 //   - CR4 redirect depth cap reached / redirects disabled ⇒ redirect-loop ⇒ 502
@@ -601,6 +610,11 @@ func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) string
 	}
 	if errors.Is(err, errRedirectBlocked) {
 		return writeDenial(w, denialReasonAllowlist, "redirect target host is not allowlisted")
+	}
+	// CR5: the hide selectors need more than their work budget on this page
+	// ⇒ 413, with a message that names the cause.
+	if errors.Is(err, errHideMatchBudget) {
+		return writeDenial(w, denialReasonSizeLimit, "upstream page is too large for the hide selectors")
 	}
 	// P4 / VR-6 / VR-7: the declared, read, decoded or rewritten size exceeded
 	// the configured limit (no body bytes sent yet) ⇒ 413.

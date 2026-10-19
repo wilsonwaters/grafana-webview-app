@@ -1,5 +1,6 @@
 import { PLUGIN_ID } from '../../constants';
 import type { PanelOptions } from '../../types';
+import { parseHideSelectors } from './hideSelectors';
 
 /**
  * Base path for the backend proxy resource handler.
@@ -65,8 +66,10 @@ export function resolveLoadMode(opts: PanelOptions): ResolvedLoadMode {
  * CSS selector.
  *
  * `hideSelectors` is a newline-separated list; blank/whitespace-only lines are
- * dropped and each remaining selector is trimmed. Encoding is handled by
- * `URLSearchParams` so URLs and selectors with special characters are safe.
+ * dropped and each remaining selector is trimmed. Selectors the backend would
+ * refuse, and any beyond the first `MAX_HIDE_SELECTORS`, are left out
+ * (see {@link parseHideSelectors}); the editor shows why. Encoding is handled
+ * by `URLSearchParams` so URLs and selectors with special characters are safe.
  *
  * The path is root-relative and has no sub-url prefix. `getBackendSrv()` removes
  * the leading `/` from local URLs, so the request resolves against Grafana's
@@ -79,11 +82,8 @@ export function buildProxyFetchUrl(url: string, hideSelectors: string): string {
   const params = new URLSearchParams();
   params.set('url', url);
 
-  for (const selector of hideSelectors.split('\n')) {
-    const trimmed = selector.trim();
-    if (trimmed.length > 0) {
-      params.append('hide', trimmed);
-    }
+  for (const selector of parseHideSelectors(hideSelectors).selectors) {
+    params.append('hide', selector);
   }
 
   return `${PROXY_RESOURCE_BASE}?${params.toString()}`;

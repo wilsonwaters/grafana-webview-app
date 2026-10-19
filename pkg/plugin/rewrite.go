@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
-	"github.com/andybalholm/cascadia"
 	"github.com/wilsonwaters/webview/pkg/internal/htmlparse"
 	"golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
@@ -110,23 +109,14 @@ var htmlRewriter = rewriteHTMLLimited
 // hide-selectors (CR5). It is REPEATED — one CSS selector per value — rather than
 // a single comma-joined value, because a CSS selector group can itself contain
 // commas and significant whitespace (e.g. `a, b` or `div > .x`), so comma-joining
-// would be ambiguous. ServeHTTP reads every `hide` value and threads them through to
-// rewriteHTML, which applies them to the proxied HTML document.
+// would be ambiguous. ServeHTTP reads every `hide` value, refuses the request
+// when a value breaks the limits in hide_selectors.go, and threads them through
+// to rewriteHTML, which applies them to the proxied HTML document.
 const hideParam = "hide"
-
-// maxHideSelectorLen bounds the byte length of any single hide selector (CR5,
-// AC 31). A selector longer than this is rejected (skipped) before it ever reaches
-// cascadia.Compile, so a pathological selector cannot drive unbounded compile work.
-const maxHideSelectorLen = 1024
-
-// maxHideSelectors caps the NUMBER of hide selectors honoured per request (CR5,
-// AC 31). Selectors beyond this count are ignored, bounding the total matching work
-// regardless of how many `hide` params a caller supplies.
-const maxHideSelectors = 50
 
 // hideStyleDecl is appended to a matched element's inline style attribute to hide
 // it. `!important` overrides author/UA stylesheet rules; the leading separator is
-// added conditionally (see applyHideSelectors) so an existing inline style is
+// added conditionally (see hideElement) so an existing inline style is
 // preserved and correctly terminated before this declaration.
 const hideStyleDecl = "display:none!important"
 
@@ -161,7 +151,9 @@ func rewriteHTML(htmlBytes []byte, pageURL *url.URL, contentType string, hideSel
 // errResponseTooLarge (413). Absolute URLs are longer than relative ones, and a
 // long base URL multiplied over many short references could otherwise grow the
 // document without bound, so URL rewriting also stops as soon as its growth
-// exceeds the room left under maxBytes. maxBytes <= 0 means no limit.
+// exceeds the room left under maxBytes. maxBytes <= 0 means no limit. The hide
+// selectors have their own work budget, whatever maxBytes is; when they exceed
+// it the error is errHideMatchBudget, which also wraps errResponseTooLarge.
 func rewriteHTMLLimited(htmlBytes []byte, pageURL *url.URL, contentType string, hideSelectors []string, maxBytes int64) ([]byte, error) {
 	// An empty body has nothing to rewrite (and charset.NewReader would surface an
 	// EOF on it); return it unchanged rather than treating it as a parse failure.
@@ -196,7 +188,9 @@ func rewriteHTMLLimited(htmlBytes []byte, pageURL *url.URL, contentType string, 
 	}
 	removeCSPMetas(doc)
 	removeFrameBusters(doc)
-	applyHideSelectors(doc, hideSelectors)
+	if err := applyHideSelectors(root, hideSelectors); err != nil {
+		return nil, err
+	}
 	removeReferrerPolicies(doc)
 	injectSandboxCompat(doc, baseNode)
 
@@ -650,72 +644,4 @@ func containsAny(s string, markers []string) bool {
 		}
 	}
 	return false
-}
-
-// applyHideSelectors applies the author-configured CR5 hide-selectors to the
-// top-level proxied document: each VALID selector's matching elements have
-// `display:none!important` APPENDED to their existing inline `style` attribute so
-// they are hidden. An empty/nil hideSelectors is a complete no-op (no DOM touched),
-// so the rendered output is byte-identical to a rewrite with no hide-selectors.
-//
-// VALIDATION (security-critical, AC 31). Each selector is rejected/skipped — never
-// fatal — when it (a) exceeds maxHideSelectorLen, or (b) fails cascadia.Compile
-// (malformed / unsupported selector syntax). The NUMBER of selectors honoured is
-// also capped at maxHideSelectors to bound total matching work. Rejected selectors
-// are simply ignored; valid selectors in the same request are unaffected.
-//
-// MARKUP-INJECTION SAFETY (the core of AC 31). The hide is NOT applied by injecting
-// a <style> block built from selector text: a cascadia-VALID attribute selector such
-// as `[x="</style><script>…"]` would, if emitted verbatim into a raw-text <style>
-// element, close the style element and inject live markup. Instead this pass uses
-// goquery to FIND matching elements (the compiled cascadia.Sel is used purely for
-// MATCHING, never serialised) and SetAttr to write only the fixed, selector-free
-// hideStyleDecl into each matched element's style attribute. goquery's renderer
-// HTML-escapes attribute values, and the selector TEXT never enters the rendered
-// markup at all, so markup injection is impossible by construction.
-//
-// LIMITATION (documented, accepted). Only elements PRESENT in the server-rendered
-// HTML are hidden. Elements the page's client-side JS adds to the DOM later are not
-// covered — we do not execute JS — which is acceptable: the panel can additionally
-// hide via client-side CSS where it has same-origin DOM access (out of scope here).
-func applyHideSelectors(doc *goquery.Document, hideSelectors []string) {
-	if len(hideSelectors) == 0 {
-		return
-	}
-	applied := 0
-	for _, raw := range hideSelectors {
-		if applied >= maxHideSelectors {
-			break // over-count cap: ignore any further selectors
-		}
-		sel := strings.TrimSpace(raw)
-		if sel == "" || len(sel) > maxHideSelectorLen {
-			continue // empty or oversized: skip without affecting valid selectors
-		}
-		matcher, err := cascadia.Compile(sel)
-		if err != nil {
-			continue // invalid CSS selector: skip (logged/ignored, never fatal)
-		}
-		applied++
-		doc.FindMatcher(matcher).Each(func(_ int, s *goquery.Selection) {
-			hideElement(s)
-		})
-	}
-}
-
-// hideElement appends hideStyleDecl to s's inline style attribute, preserving any
-// existing inline style. The existing style is terminated with a ';' before the
-// appended declaration (added only when the existing style does not already end in
-// one) so the two declarations stay distinct. The value is written via SetAttr, so
-// goquery's renderer escapes it on output — no selector text or HTML is ever
-// concatenated into the markup.
-func hideElement(s *goquery.Selection) {
-	existing := strings.TrimSpace(s.AttrOr("style", ""))
-	if existing == "" {
-		s.SetAttr("style", hideStyleDecl)
-		return
-	}
-	if !strings.HasSuffix(existing, ";") {
-		existing += ";"
-	}
-	s.SetAttr("style", existing+hideStyleDecl)
 }

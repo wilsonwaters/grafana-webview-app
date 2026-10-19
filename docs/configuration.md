@@ -257,9 +257,8 @@ Important details:
   while it rewrites the proxied HTML. They have **no effect in direct mode**,
   because the browser's same-origin policy prevents a plain iframe's content from
   being modified.
-- **Not a dedicated editor control.** There is currently no field for this in the
-  options pane. Set it on the panel's JSON model: **Panel menu → Inspect → Panel
-  JSON** (or edit the dashboard JSON) and add it under `options`:
+- **Set it in the panel editor** under **Hide elements (proxy mode)**, or in the
+  panel JSON under `options`:
 
   ```json
   "options": {
@@ -272,6 +271,15 @@ Important details:
 - The value is a **newline-separated** list of CSS selectors; blank lines are
   ignored and each selector is trimmed. Each selector is passed to the proxy as a
   `hide=` parameter for server-side removal.
+- **Supported selectors and limits.** Type, class, id and attribute selectors, all
+  four combinators, `:not()` with simple selectors, and the structural
+  pseudo-classes (`:first-child`, `:nth-child()`, `:only-of-type`, `:empty`,
+  `:root` and the like, plus `:link` and `:checked`) work; `:has()`, `:contains()`,
+  `:matches()`, `:hover`, `:lang()`, pseudo-elements and the `#=` attribute
+  operator do not. The panel sends at most 20 selectors of at most 256 bytes and
+  lists in the editor each selector it leaves out and why; on a very large page a
+  selector such as `:nth-child(2n)` over thousands of items can exceed the
+  proxy's matching budget, and the panel then shows an HTTP 413 error.
 
 As with any proxy-mode feature, the target domain must be
 [allowlisted](./administration.md#2-allowlist-management) by an administrator.
@@ -341,7 +349,7 @@ All options live in the panel editor's **Web View** section unless noted.
 | Page height (px) | `iframeHeight` | number (px) | `1080` | Virtual render height. |
 | Auto-refresh interval (seconds) | `refreshIntervalSec` | number (s) | `0` | `0` disables auto-refresh. |
 | Show debug overlay | `showDebugOverlay` | boolean | `false` | Overlay of mode / X / Y / zoom. |
-| *(JSON model only)* | `hideSelectors` | string (newline-separated) | `""` | Proxy-mode, server-side element hiding. |
+| Hide elements (proxy mode) | `hideSelectors` | string (newline-separated) | `""` | Proxy-mode, server-side element hiding. |
 
 ---
 
