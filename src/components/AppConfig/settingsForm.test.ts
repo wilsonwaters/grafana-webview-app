@@ -236,6 +236,75 @@ describe('buildJsonData', () => {
     ]);
   });
 
+  test('drops case variants of managed keys at every level, because Go decodes JSON keys case-insensitively', () => {
+    const existing = {
+      AllowedDomains: [{ domain: 'evil.example' }],
+      MAXREDIRECTS: 99,
+      maxResponseBYTES: 1,
+      requestTimeoutSec: 30,
+      unrelatedKey: 'kept',
+      allowedDomains: [
+        {
+          domain: 'example.com',
+          Domain: 'evil.example',
+          OPTIONS: { allowPrivateIP: true },
+          note: 'kept',
+          options: {
+            allowPrivateIP: false,
+            AllowPrivateIP: true,
+            allowprivateip: true,
+            ALLOWSUBDOMAINS: true,
+            RateLimitPerMin: 100000,
+            AllowedPorts: [22],
+            future: 1,
+          },
+        },
+      ],
+    };
+    const state = toFormState(existing);
+
+    const next = buildJsonData(existing, state);
+
+    expect(next).toEqual({
+      requestTimeoutSec: 30,
+      unrelatedKey: 'kept',
+      allowedDomains: [
+        {
+          domain: 'example.com',
+          note: 'kept',
+          options: { allowSubdomains: false, allowPrivateIP: false, rateLimitPerMin: 0, allowedPorts: [], future: 1 },
+        },
+      ],
+    });
+  });
+
+  test('drops a key spelled with U+017F (long s) or U+212A (Kelvin sign), which Go also folds to s and k', () => {
+    const existing = {
+      'allowedDomain\u017F': [{ domain: 'evil.example' }],
+      allowedDomains: [{ domain: 'example.com', options: { 'allowSubdomain\u017F': true, rateLimitPerMin: 0 } }],
+      '\u212Aept': 'not a managed key: kept',
+    };
+
+    const next = buildJsonData(existing, toFormState(existing));
+
+    expect(Object.keys(next).sort()).toEqual(['allowedDomains', '\u212Aept']);
+    const entry = (next.allowedDomains as Array<{ options: Record<string, unknown> }>)[0];
+    expect(Object.keys(entry.options).sort()).toEqual([
+      'allowPrivateIP',
+      'allowSubdomains',
+      'allowedPorts',
+      'rateLimitPerMin',
+    ]);
+  });
+
+  test('a case variant of a limit is dropped even when the exact limit field is empty (no hidden limit)', () => {
+    const existing = { RateLimitPerDomainPerMin: 1, allowedDomains: [] };
+    const state = toFormState(existing);
+    expect(state.limits.rateLimitPerDomainPerMin).toBe('');
+
+    expect(buildJsonData(existing, state)).toEqual({ allowedDomains: [] });
+  });
+
   test('the defaults shown in the form match the backend defaults', () => {
     expect(DEFAULT_PLUGIN_SETTINGS).toMatchObject({
       maxResponseBytes: 5242880,
