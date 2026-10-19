@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -1069,9 +1070,9 @@ func isHTMLContentType(contentType string) bool {
 //     otherwise 413. Content-Encoding is dropped and the charset set to UTF-8.
 //   - Content-Length is set to the length actually delivered.
 //
-// DEGRADATION: a rewrite failure other than the size limit (a parse quirk etc.)
-// does NOT fail the gateway — the security gates already ran — so the DECODED
-// ORIGINAL HTML (within maxBytes) is served (200) and a warning is logged.
+// A rewrite failure other than the size limit (for example a document nested
+// deeper than the parser accepts) fails closed: errRewriteFailed ⇒ 502, and a
+// warning is logged. The un-rewritten page is never served.
 // maxBytes <= 0 disables every bound. pageURL is the validated target of this
 // hop; it is the base for relative-URL resolution. hideSelectors are the CR5
 // author hide-selectors; rewriteHTMLLimited validates and applies them.
@@ -1127,33 +1128,36 @@ func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logg
 		}
 	}
 
-	// CR2/FR5: rewrite the HTML. On a failure other than the size limit, degrade
-	// to the decoded original (the security gates already ran — a parse quirk
-	// must not 502).
-	body := decoded
+	// CR2/FR5: rewrite the HTML. Any failure fails closed: the original page
+	// without the injected base, referrer policy and shim, and with its
+	// frame-busters and CSP metas, must never reach the panel.
 	rewritten, rerr := htmlRewriter(decoded, pageURL, resp.Header.Get("Content-Type"), hideSelectors, maxBytes)
-	switch {
-	case errors.Is(rerr, errResponseTooLarge):
-		return rerr
-	case rerr != nil:
-		if logger != nil {
-			logger.Warn("html rewrite failed; serving decoded original", "url", pageURL.String(), "error", rerr)
+	if rerr != nil {
+		if errors.Is(rerr, errResponseTooLarge) {
+			return rerr
 		}
-	default:
-		body = rewritten
-		// The rewriter emits UTF-8; update the Content-Type charset so the client
-		// decodes it correctly regardless of the upstream's declared charset.
-		resp.Header.Set("Content-Type", "text/html; charset=utf-8")
+		if logger != nil {
+			logger.Warn("html rewrite failed", "url", pageURL.String(), "error", rerr)
+		}
+		return fmt.Errorf("%w: %w", errRewriteFailed, rerr)
 	}
+	// The rewriter emits UTF-8; update the Content-Type charset so the client
+	// decodes it correctly regardless of the upstream's declared charset.
+	resp.Header.Set("Content-Type", "text/html; charset=utf-8")
 
 	// The body is now plain HTML: drop the encoding header so the client does
 	// not try to decode it again.
 	if gzipped {
 		resp.Header.Del("Content-Encoding")
 	}
-	setBufferedBody(resp, body)
+	setBufferedBody(resp, rewritten)
 	return nil
 }
+
+// errRewriteFailed wraps a rewriter error other than the size limit, for
+// example a document nested deeper than the parser accepts.
+// proxyErrorHandler maps it to 502.
+var errRewriteFailed = errors.New("proxy: upstream HTML could not be rewritten")
 
 // readBounded reads r to the end. More than maxBytes returns
 // errResponseTooLarge without reading further; maxBytes <= 0 means no limit.
@@ -1294,6 +1298,7 @@ func stripRequestHeaders(h http.Header) {
 //   - SF4 resolve failure / no host (ReasonResolveFailed, ReasonNoHost) ⇒ upstream ⇒ 502
 //   - over-size response (P4, VR-6, VR-7) ⇒ size-limit ⇒ 413
 //   - unsupported Content-Encoding (VR-6) ⇒ upstream ⇒ 502
+//   - HTML that could not be rewritten (errRewriteFailed) ⇒ upstream ⇒ 502
 //   - CR4 redirect depth cap reached / redirects disabled ⇒ redirect-loop ⇒ 502
 //   - CR4 redirect into a non-allowlisted host (pre-block) ⇒ allowlist ⇒ 403
 //   - per-request-budget timeout / net.Error timeout (P4, Q10) ⇒ timeout ⇒ 504
@@ -1328,6 +1333,10 @@ func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) string
 	// VR-6: a Content-Encoding whose decoded size the proxy cannot bound ⇒ 502.
 	if errors.Is(err, errUnsupportedEncoding) {
 		return writeDenial(w, denialReasonUpstream, "upstream response uses an unsupported content encoding")
+	}
+	// The HTML could not be rewritten (fail closed) ⇒ 502.
+	if errors.Is(err, errRewriteFailed) {
+		return writeDenial(w, denialReasonUpstream, "upstream page could not be processed")
 	}
 	// P4: the total per-request budget (Q10) expired ⇒ 504. The transport
 	// surfaces the context deadline as context.DeadlineExceeded; a stalled

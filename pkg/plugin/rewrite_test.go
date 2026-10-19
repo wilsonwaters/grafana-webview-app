@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -768,13 +769,11 @@ func TestNonHTMLByteIdenticalPassthrough(t *testing.T) {
 	}
 }
 
-// TestRewriteFailureDegradesToOriginal covers "a rewriteHTML failure serves the
-// DECODED ORIGINAL HTML (status 200), NOT a 502". It swaps in a
-// deterministically-failing rewriter via the htmlRewriter seam, drives
-// prepareHTMLBody, and asserts: no error is returned (so the ReverseProxy serves
-// 200), the ORIGINAL body bytes are preserved verbatim, and Content-Length
-// matches the original length.
-func TestRewriteFailureDegradesToOriginal(t *testing.T) {
+// TestRewriteFailureFailsClosed covers RV2: a rewriter failure other than the
+// size limit fails closed. prepareHTMLBody returns an error that wraps
+// errRewriteFailed (so the ReverseProxy sends 502), and the un-rewritten
+// original is never placed on the response.
+func TestRewriteFailureFailsClosed(t *testing.T) {
 	orig := htmlRewriter
 	t.Cleanup(func() { htmlRewriter = orig })
 	htmlRewriter = func(_ []byte, _ *url.URL, _ string, _ []string, _ int64) ([]byte, error) {
@@ -782,23 +781,54 @@ func TestRewriteFailureDegradesToOriginal(t *testing.T) {
 	}
 
 	const html = `<html><body><img src="/a.png">original</body></html>`
-	resp := &http.Response{Header: http.Header{}, Body: nopBody(html)}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: nopBody(html)}
 	resp.Header.Set("Content-Type", "text/html")
 
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil); err != nil {
-		t.Fatalf("prepareHTMLBody must NOT return an error on rewrite failure (degrade): %v", err)
+	err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil)
+	if !errors.Is(err, errRewriteFailed) || !errors.Is(err, errInjectedRewriteFailure) {
+		t.Fatalf("prepareHTMLBody error = %v, want errRewriteFailed wrapping the rewriter error", err)
 	}
-	body := readAllString(t, resp)
-	if body != html {
-		t.Errorf("degraded body = %q, want the DECODED ORIGINAL %q", body, html)
+	rec := httptest.NewRecorder()
+	if reason := proxyErrorHandler(rec, nil, err); reason != denialReasonUpstream || rec.Code != http.StatusBadGateway {
+		t.Fatalf("proxyErrorHandler = %q/%d, want %q/502", reason, rec.Code, denialReasonUpstream)
 	}
-	if resp.Header.Get("Content-Length") != itoa(len(html)) {
-		t.Errorf("Content-Length = %q, want %d", resp.Header.Get("Content-Length"), len(html))
+	if strings.Contains(rec.Body.String(), "original") {
+		t.Errorf("error body leaks the original page: %q", rec.Body.String())
+	}
+}
+
+// TestProxyParseFailureFailsClosed covers RV2 through /proxy: a document nested
+// deeper than the HTML parser accepts (more than 512 open elements) is a 502
+// with none of the upstream markup, not the un-rewritten original.
+func TestProxyParseFailureFailsClosed(t *testing.T) {
+	page := "<html><head></head><body>" + strings.Repeat("<div>", 600) + "secret-marker" + strings.Repeat("</div>", 600) + "</body></html>"
+	for _, gz := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "gzip"}[gz], func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				body := []byte(page)
+				if gz {
+					w.Header().Set("Content-Encoding", "gzip")
+					body = gzipBytes(t, body)
+				}
+				_, _ = w.Write(body)
+			}))
+			defer upstream.Close()
+			p := newTestHandler(t, settingsWith(allowExample(DomainOptions{})), upstream)
+
+			rec := doProxy(p, "http://example.com/deep")
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", rec.Code)
+			}
+			if strings.Contains(rec.Body.String(), "secret-marker") || strings.Contains(rec.Body.String(), "<div>") {
+				t.Errorf("502 body leaks upstream markup: %.200q", rec.Body.String())
+			}
+		})
 	}
 }
 
 // errInjectedRewriteFailure is the deterministic error a test rewriter returns to
-// exercise the degradation path.
+// exercise the fail-closed path.
 var errInjectedRewriteFailure = errorString("injected rewrite failure")
 
 type errorString string

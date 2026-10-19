@@ -99,10 +99,9 @@ const referrerPolicyNoReferrer = "no-referrer"
 const sandboxCompatShim = `(function(){var jar="";try{document.cookie}catch(e){try{Object.defineProperty(Document.prototype,"cookie",{configurable:true,get:function(){return jar},set:function(v){var kv=String(v).split(";")[0];var k=kv.split("=")[0];var parts=jar?jar.split("; ").filter(function(p){return p.split("=")[0]!==k}):[];parts.push(kv);jar=parts.join("; ")}})}catch(e2){}}function mem(){var s={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(s,k)?s[k]:null},setItem:function(k,v){s[k]=String(v)},removeItem:function(k){delete s[k]},clear:function(){s={}},key:function(i){return Object.keys(s)[i]||null},get length(){return Object.keys(s).length}}}["localStorage","sessionStorage"].forEach(function(n){try{window[n].length}catch(e){try{Object.defineProperty(window,n,{configurable:true,value:mem()})}catch(e2){}}})})();`
 
 // htmlRewriter is the rewrite function prepareHTMLBody invokes on HTML bodies. It
-// defaults to rewriteHTMLLimited and is a package var ONLY so a test can
-// substitute a deterministically-failing rewriter to exercise the degradation
-// path (serve the decoded original on rewrite error). Production never
-// reassigns it.
+// defaults to rewriteHTMLLimited and is a package var only so a test can
+// substitute a failing rewriter to exercise the fail-closed path. Production
+// never reassigns it.
 var htmlRewriter = rewriteHTMLLimited
 
 // hideParam is the inbound /proxy query parameter carrying author-configured
@@ -148,8 +147,8 @@ const hideStyleDecl = "display:none!important"
 // and x/net/html APIs, whose renderer HTML-escapes attribute values — there is
 // no string concatenation of HTML, so a hostile upstream URL (or a hostile
 // hide-selector) cannot break out of an attribute. On any parse error it
-// returns the error so the caller can degrade to serving the decoded original
-// (the security gates already ran). An empty or nil hideSelectors is a no-op.
+// returns the error, and the proxy then refuses the page (502) rather than
+// serve it un-rewritten. An empty or nil hideSelectors is a no-op.
 // rewriteHTML applies no size limit; the proxy uses rewriteHTMLLimited.
 func rewriteHTML(htmlBytes []byte, pageURL *url.URL, contentType string, hideSelectors []string) ([]byte, error) {
 	return rewriteHTMLLimited(htmlBytes, pageURL, contentType, hideSelectors, 0)
