@@ -36,9 +36,22 @@ Done so far:
   untested upstream with plugin 6.x) — maintainer asked to confirm Zabbix dashboards show data.
   pi1 rules: touch only Grafana; confirm every state-changing command with the maintainer first.
 
-In flight: backend S2 + FR5 rewriter (absolute upstream URLs, referrer meta + storage shim,
-`/proxy-resource` removed); RV1 standards review; M1 review; FE/AU1 review.
-Next: RV2 fixes, integrated runtime verification (local Docker + pi1 plugin install), DOC1, REL1.
+Update 2026-10-19 (later):
+- S2 + FR5 backend merged (adversarial security review: APPROVE-WITH-NITS, no blocking). M1 review:
+  APPROVE-WITH-NITS, CI fully green. FE review found one blocking issue (iframe kept old sandbox flags
+  on an in-place URL edit) — fixed in RV2-fe. AU1 review: APPROVE-WITH-NITS.
+- Integrated runtime verification: ALL 9 scenarios pass on 13.2.4 and 12.4.13 in Chromium, Firefox and
+  WebKit (BOM legacy radar animates in proxy mode as a Viewer; results in
+  `streams/v1-stabilisation/runtime-verification.md`, curated screenshots in `docs/screenshots/v1-runtime/`).
+- RV2-fe (15 items) and DOC1 merged. RV1 dispositions in `streams/v1-stabilisation/RV1-findings.md`.
+- `main` gained a handoff commit from the earlier cloud orchestrator (8e65e58); merged into the release
+  branch. LESSON: a PR that conflicts with `main` gets NO `pull_request` CI — check mergeability after
+  every push.
+- In flight: RV2-be (sub-path redirects, parse-failure fail-closed, rewrite memory bound, rate-bucket
+  keying, error sanitising, linters, proxy.go split, CI token scoping).
+- Next: merge RV2-be → fill the memory-sizing note in `docs/administration.md` (TODO(orchestrator)) →
+  REL1 (version 1.0.0) → final CI green → install the CI-signed build on pi1 (maintainer confirms) →
+  mark PR #146 ready.
 
 ## ⇒ HANDOFF (2026-10-18) — release work handed to another agent (target: 1.0.0) — superseded by the v1.0.0 section above (M1 did items 1–3 except tagging)
 
