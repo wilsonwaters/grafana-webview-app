@@ -796,7 +796,7 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			// blocked at the redirect step). A non-redirect status falls through
 			// unchanged. handled==true means the redirect path fully decided the
 			// response, so the body steps below must be skipped.
-			handled, rerr := p.handleRedirect(resp, target, depth)
+			handled, rerr := p.handleRedirect(resp, target, depth, hideSelectors)
 			if rerr != nil {
 				return rerr
 			}
@@ -922,10 +922,10 @@ func isRedirectStatus(status int) bool {
 //     a 3xx with an unparseable Location, and a 3xx whose Location resolves to a
 //     non-http(s) scheme (data:/mailto:/…), which is left as-is rather than
 //     rewritten into a non-fetchable proxy URL.
-//   - handled==true, err==nil: the redirect was rewritten in place. Location now
-//     points at a /proxy URL carrying the encoded absolute next-hop target and
-//     _wvredir=depth+1. The body step is skipped (a redirect body is an inert
-//     courtesy page).
+//   - handled==true, err==nil: the redirect was rewritten in place. Location is
+//     now the relative reference proxy?url=<next hop>&_wvredir=<depth+1>, plus
+//     the request's hide selectors (see buildRedirectProxyURL). The body step is
+//     skipped (a redirect body is an inert courtesy page).
 //   - err!=nil: the redirect is REFUSED at the redirect step. err is
 //     errRedirectDepthExceeded (depth cap reached / MaxRedirects==0 ⇒ redirects
 //     disabled) or errRedirectBlocked (resolved Location host fails the SF2+SF3
@@ -940,7 +940,7 @@ func isRedirectStatus(status int) bool {
 // the browser only ever talks to the proxy — never the upstream directly — a
 // destination that fails allowlist (here) or IP-blocklist (on re-request) is
 // refused before the browser can contact it.
-func (p *proxyHandler) handleRedirect(resp *http.Response, target *url.URL, depth int) (bool, error) {
+func (p *proxyHandler) handleRedirect(resp *http.Response, target *url.URL, depth int, hideSelectors []string) (bool, error) {
 	if resp == nil || !isRedirectStatus(resp.StatusCode) {
 		return false, nil
 	}
@@ -993,9 +993,10 @@ func (p *proxyHandler) handleRedirect(resp *http.Response, target *url.URL, dept
 		return false, errRedirectBlocked
 	}
 
-	// Rewrite Location to a /proxy URL the panel's fetch will re-enter, carrying
-	// the encoded absolute next-hop target and the incremented hop depth.
-	resp.Header.Set("Location", buildRedirectProxyURL(resourceBase+proxyPath, abs.String(), depth+1))
+	// Rewrite Location to a relative /proxy URL the panel's fetch will re-enter,
+	// carrying the encoded absolute next-hop target, the incremented hop depth
+	// and the request's hide selectors.
+	resp.Header.Set("Location", buildRedirectProxyURL(abs.String(), depth+1, hideSelectors))
 	return true, nil
 }
 

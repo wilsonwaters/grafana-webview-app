@@ -14,17 +14,20 @@ import (
 	"golang.org/x/net/html/charset"
 )
 
-// resourceBase is the base path under which Grafana serves this plugin's
-// backend resources. The redirect handler (CR4) emits Location headers under it
-// so the panel's fetch of /proxy re-enters the proxy for the next hop.
-const resourceBase = "/api/plugins/wilsonwaters-webview-app/resources"
+// redirectProxyRef is the path of the redirect Location the proxy emits (CR4).
+// It is relative ("proxy", the last segment of proxyPath), so the browser
+// resolves it against the URL of the /proxy request it is following. The next
+// hop therefore stays under the same .../resources/ path whatever sub-path
+// Grafana is served from (root_url = https://host/grafana/).
+const redirectProxyRef = "proxy"
 
-// buildRedirectProxyURL assembles basePath?url=<enc(target)>&_wvredir=<depth> via
-// url.Values (CR4). When the browser follows a rewritten Location, ServeHTTP reads
-// _wvredir back to learn the hop depth and enforce the MaxRedirects cap. Both
-// params are url.Values-encoded so the upstream target cannot inject into the
-// query string, and a fragment on target is dropped.
-func buildRedirectProxyURL(basePath, target string, depth int) string {
+// buildRedirectProxyURL returns the relative redirect Location
+// proxy?url=<target>&_wvredir=<depth>[&hide=<selector>...] (CR4). When the
+// browser follows it, ServeHTTP reads _wvredir back to enforce the MaxRedirects
+// cap, and the hide selectors of the original request apply to the next hop
+// too. url.Values encodes every parameter, so the upstream target cannot inject
+// into the query string. A fragment on target is dropped.
+func buildRedirectProxyURL(target string, depth int, hideSelectors []string) string {
 	enc := target
 	if i := strings.IndexByte(enc, '#'); i >= 0 {
 		enc = enc[:i]
@@ -32,7 +35,10 @@ func buildRedirectProxyURL(basePath, target string, depth int) string {
 	q := url.Values{}
 	q.Set("url", enc)
 	q.Set(wvRedirParam, strconv.Itoa(depth))
-	return basePath + "?" + q.Encode()
+	if len(hideSelectors) > 0 {
+		q[hideParam] = append([]string(nil), hideSelectors...)
+	}
+	return redirectProxyRef + "?" + q.Encode()
 }
 
 // urlAttr names an element attribute whose value is a URL. selector selects

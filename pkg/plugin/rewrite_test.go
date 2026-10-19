@@ -169,7 +169,7 @@ func TestRewriteURLAttributeSet(t *testing.T) {
 			if got != c.want {
 				t.Errorf("%s[%s] = %q, want %q", c.selector, c.attr, got, c.want)
 			}
-			if strings.Contains(got, resourceBase) {
+			if strings.Contains(got, "/api/plugins/") {
 				t.Errorf("%s[%s] = %q still routes through Grafana", c.selector, c.attr, got)
 			}
 		})
@@ -679,8 +679,8 @@ func TestRewriteThroughProxyIntegration(t *testing.T) {
 	if got := attr(t, doc, "a", "href"); got != "http://example.com/dir/next" {
 		t.Errorf("a href = %q, want http://example.com/dir/next", got)
 	}
-	if strings.Contains(body, resourceBase) {
-		t.Errorf("rewritten body still references %s: %s", resourceBase, body)
+	if strings.Contains(body, "/api/plugins/") {
+		t.Errorf("rewritten body still references the Grafana plugin API: %s", body)
 	}
 	if doc.Find("head base").Length() != 1 || doc.Find(`meta[name="referrer"]`).Length() != 1 {
 		t.Error("base or referrer meta missing through proxy")
