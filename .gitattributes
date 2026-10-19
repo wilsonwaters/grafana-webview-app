@@ -2,3 +2,9 @@
 # Linux containers (.config/entrypoint.sh, copied into the dev Grafana image)
 # and in CI (scripts/security-suite.sh). A CRLF checkout on Windows breaks both.
 *.sh text eol=lf
+
+# Go sources and module files are LF everywhere, so gofmt, go vet and the
+# go.sum checksums agree between Windows checkouts, CI and the Linux build.
+*.go   text eol=lf
+go.mod text eol=lf
+go.sum text eol=lf
