@@ -556,8 +556,10 @@ func (p *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// The target URL arrives percent-encoded in the `url` query parameter.
 	// req.URL.Query() decodes it for us.
-	rawTarget := req.URL.Query().Get("url")
-	if strings.TrimSpace(rawTarget) == "" {
+	// Surrounding whitespace is trimmed once here, so every later step (and the
+	// upstream request) sees the same string.
+	rawTarget := strings.TrimSpace(req.URL.Query().Get("url"))
+	if rawTarget == "" {
 		a.denied = writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
 		return
 	}
@@ -724,9 +726,11 @@ func hostnameOf(rawTarget string) (string, error) {
 // the validated, normalised scheme/host/port plus the path/query/fragment of
 // the caller-supplied raw URL. Using the validated components for the authority
 // guarantees the upstream host matches exactly what the pipeline approved, while
-// preserving the original path and query.
+// preserving the original path and query. rawTarget is trimmed, as ValidateURL
+// trims it, and the path keeps its original encoding (RawPath), so an encoded
+// "%2F" in a path segment reaches the upstream encoded.
 func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error) {
-	orig, err := url.Parse(rawTarget)
+	orig, err := url.Parse(strings.TrimSpace(rawTarget))
 	if err != nil {
 		return nil, err
 	}
@@ -740,6 +744,7 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 		Scheme:   v.Scheme,
 		Host:     host,
 		Path:     orig.Path,
+		RawPath:  orig.RawPath,
 		RawQuery: orig.RawQuery,
 		Fragment: orig.Fragment,
 	}, nil
@@ -772,6 +777,7 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			// rewrites the outbound request to point at the validated target.
 			r.SetURL(&url.URL{Scheme: target.Scheme, Host: target.Host})
 			r.Out.URL.Path = target.Path
+			r.Out.URL.RawPath = target.RawPath
 			r.Out.URL.RawQuery = target.RawQuery
 			r.Out.Host = "" // use target Host (r.Out.URL.Host) for the Host header
 

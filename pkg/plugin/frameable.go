@@ -89,8 +89,8 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 	w = a.rec
 
 	// Same-origin only (R1 D2): no CORS headers and no preflight handling.
-	rawTarget := req.URL.Query().Get("url")
-	if strings.TrimSpace(rawTarget) != "" {
+	rawTarget := strings.TrimSpace(req.URL.Query().Get("url"))
+	if rawTarget != "" {
 		a.url = rawTarget
 	}
 
@@ -104,7 +104,7 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 		return
 	}
 
-	if strings.TrimSpace(rawTarget) == "" {
+	if rawTarget == "" {
 		a.denied = writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
 		return
 	}

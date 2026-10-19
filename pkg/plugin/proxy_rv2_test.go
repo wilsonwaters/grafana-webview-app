@@ -14,6 +14,7 @@ import (
 	"os"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -218,6 +219,38 @@ func TestDomainRateLimitKeyedOnAllowlistEntry(t *testing.T) {
 			t.Fatalf("second subdomain: status %d, want 429 (override of 1/min on the entry)", rec.Code)
 		}
 	})
+}
+
+// TestTargetURLTrimmedAndEncodedPathKept covers RV1-22 (backend): a target
+// with surrounding whitespace is accepted by /proxy and /check-frameable (it
+// was a 400 in /proxy), and an encoded "%2F" in a path segment reaches the
+// upstream encoded instead of being decoded into a path separator.
+func TestTargetURLTrimmedAndEncodedPathKept(t *testing.T) {
+	var mu sync.Mutex
+	var gotURIs []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotURIs = append(gotURIs, r.RequestURI)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+	p := newTestHandler(t, settingsWith(allowExample(DomainOptions{})), upstream)
+
+	const target = "  http://example.com/files/a%2Fb/c.txt?x=%2F&y=1 \t"
+	if rec := doProxy(p, target); rec.Code != http.StatusOK {
+		t.Fatalf("/proxy status = %d (body %q), want 200", rec.Code, rec.Body.String())
+	}
+	if got := decodeFrameable(t, doCheckFrameable(checkFrameableHandler{p: p}, target)); !got.Frameable {
+		t.Fatalf("/check-frameable verdict = %+v, want frameable", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	want := "/files/a%2Fb/c.txt?x=%2F&y=1"
+	if len(gotURIs) != 2 || gotURIs[0] != want || gotURIs[1] != want {
+		t.Fatalf("upstream request URIs = %q, want %q twice", gotURIs, want)
+	}
 }
 
 // rv2FailingResolver is a security.Resolver whose lookup fails with an error
