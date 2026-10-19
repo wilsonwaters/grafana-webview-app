@@ -779,7 +779,9 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 		// strip, then the body step. The size step runs FIRST so an
 		// over-Content-Length response short-circuits with errResponseTooLarge
 		// before any header rewriting; the framing/header strip (P1/P3) runs next
-		// on the headers; finally an HTML body is rewritten.
+		// on the headers; finally the body is read in full (VR-6/VR-7) and an HTML
+		// body is rewritten. ModifyResponse runs before the ReverseProxy sends the
+		// status, so every size or decode failure becomes a clean error status.
 		ModifyResponse: func(resp *http.Response) error {
 			if err := enforceResponseSize(resp, maxBytes); err != nil {
 				return err
@@ -794,8 +796,15 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			// blocked at the redirect step). A non-redirect status falls through
 			// unchanged. handled==true means the redirect path fully decided the
 			// response, so the body steps below must be skipped.
-			if handled, rerr := p.handleRedirect(resp, target, depth); handled || rerr != nil {
+			handled, rerr := p.handleRedirect(resp, target, depth)
+			if rerr != nil {
 				return rerr
+			}
+			if handled {
+				// The browser follows the rewritten Location and never shows the
+				// redirect body, so it is dropped rather than streamed unbounded.
+				discardBody(resp)
+				return nil
 			}
 			return prepareHTMLBody(resp, maxBytes, target, p.logger, hideSelectors)
 		},
@@ -831,13 +840,11 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 // ModifyResponse runs before the ReverseProxy writes any status/header, so the
 // ErrorHandler can still emit a clean 413 with no bytes leaked.
 //
-// Defense-in-depth (chunked / missing / lying Content-Length, i.e. -1 or a
-// value that under-reports the real body): wrap resp.Body in a reader that
-// caps reads at maxBytes. CAVEAT: once the body starts streaming the
-// ReverseProxy has ALREADY written 200 + headers, so this path CANNOT retro-
-// actively become a 413 — it can only stop reading at the limit and surface an
-// error, truncating/failing the copy. That is acceptable belt-and-braces; the
-// guaranteed clean 413 is the Content-Length path above.
+// Undeclared or chunked length (Content-Length -1): wrap resp.Body in a reader
+// that fails with errResponseTooLarge once more than maxBytes are read.
+// prepareHTMLBody reads the whole body inside ModifyResponse, before the
+// ReverseProxy has written any status, so an oversize chunked body also ends as
+// a clean 413 and is never delivered as a truncated 200 (VR-7).
 func enforceResponseSize(resp *http.Response, maxBytes int64) error {
 	if maxBytes <= 0 {
 		return nil
@@ -992,13 +999,38 @@ func (p *proxyHandler) handleRedirect(resp *http.Response, target *url.URL, dept
 	return true, nil
 }
 
-// contentEncodingGzip is the Content-Encoding value CR1 decodes. Only gzip is
-// handled: it is the encoding the issue scopes (AC 14) and is by far the most
-// common on the web. deflate and br (Brotli) are intentionally NOT decoded here
-// — a response carrying one of those encodings is treated as non-decodable and
-// passed through with its body and headers untouched, exactly like a non-HTML
-// response, so the client (or, later, CR2) never receives a half-decoded body.
+// contentEncodingGzip is the only Content-Encoding the proxy accepts (CR1).
+// Outbound requests advertise only gzip (see stripRequestHeaders), and gzip is
+// the only coding whose decoded size the proxy checks. A response in any other
+// coding (deflate, br, zstd, or a list of codings) is refused with 502, because
+// its decoded size could not be held to MaxResponseBytes (VR-6).
 const contentEncodingGzip = "gzip"
+
+// errUnsupportedEncoding is returned for a response whose Content-Encoding is
+// not gzip or identity. proxyErrorHandler maps it to 502.
+var errUnsupportedEncoding = errors.New("proxy: upstream response uses an unsupported Content-Encoding")
+
+// responseEncoding returns "" for an unencoded (or identity) response and
+// contentEncodingGzip for gzip or x-gzip. Any other coding, or more than one
+// coding, returns errUnsupportedEncoding.
+func responseEncoding(h http.Header) (string, error) {
+	var codings []string
+	for _, v := range h.Values("Content-Encoding") {
+		for _, c := range strings.Split(v, ",") {
+			if c = strings.ToLower(strings.TrimSpace(c)); c != "" && c != "identity" {
+				codings = append(codings, c)
+			}
+		}
+	}
+	switch {
+	case len(codings) == 0:
+		return "", nil
+	case len(codings) == 1 && (codings[0] == contentEncodingGzip || codings[0] == "x-gzip"):
+		return contentEncodingGzip, nil
+	default:
+		return "", errUnsupportedEncoding
+	}
+}
 
 // isHTMLContentType reports whether a Content-Type header value names an HTML
 // document. Matching is case-insensitive and tolerates parameters such as a
@@ -1015,137 +1047,188 @@ func isHTMLContentType(contentType string) bool {
 	return strings.EqualFold(strings.TrimSpace(mediaType), "text/html")
 }
 
-// prepareHTMLBody detects HTML by Content-Type, obtains the plain HTML bytes
-// (gzip-decoding when needed, bounded), and rewrites them with goquery (CR2:
-// base-href, subresource/navigation URL rewriting, srcset, CSP/refresh-meta and
-// frame-buster removal). It runs AFTER the P4 size guard and the P1/P3
-// framing/header strip.
+// prepareHTMLBody reads the whole response body into memory, bounded, and
+// rewrites it when it is HTML. It runs in ModifyResponse AFTER the P4 size
+// guard, the P1/P3 framing/header strip and the CR4 redirect step, and BEFORE
+// the ReverseProxy sends the status. So every failure below reaches the client
+// as a clean error status, and no response is delivered truncated or with a
+// decoded size above maxBytes (VR-6/VR-7):
 //
-// Behaviour:
-//   - Non-HTML responses (any Content-Type that is not text/html) are passed
-//     through COMPLETELY UNCHANGED: no body read, no header touched. This keeps
-//     compressed JSON/images/etc. byte-identical to the upstream.
-//   - HTML responses are read into memory (decoding Content-Encoding: gzip when
-//     present; deflate/br are out of scope — see contentEncodingGzip — so a body
-//     carrying one of those is left untouched and not rewritten), then rewritten
-//     by rewriteHTML. CR2 rewrites ALL HTML, not just gzip HTML.
-//   - After rewriting, resp.Body is replaced with the rewritten bytes,
-//     Content-Length is set to the new length, and (if the body was gzip) the
-//     Content-Encoding header is removed so the client does not re-decode.
+//   - More than maxBytes on the wire (chunked or a lying Content-Length) ⇒
+//     errResponseTooLarge ⇒ 413.
+//   - A Content-Encoding other than gzip ⇒ errUnsupportedEncoding ⇒ 502.
+//   - Non-HTML: the body and headers pass through unchanged (a gzip body stays
+//     compressed, so JSON/images/etc. stay byte-identical), but a gzip body is
+//     first decoded to io.Discard to prove that its DECODED size is within
+//     maxBytes (gzip-bomb guard). Over ⇒ 413; malformed gzip ⇒ 502.
+//   - HTML: gzip is decoded (bounded), then rewriteHTMLLimited rewrites the
+//     document (CR2, FR5); the rewritten document must also fit in maxBytes,
+//     otherwise 413. Content-Encoding is dropped and the charset set to UTF-8.
+//   - Content-Length is set to the length actually delivered.
 //
-// SECURITY (gzip-bomb guard): decompression is a decompression-bomb DoS vector,
-// so the DECODED size is bounded by the same MaxResponseBytes limit P4 enforces
-// on the wire size. The gzip stream is read through an io.LimitReader capped at
-// maxBytes+1; if the decoded body would exceed maxBytes we return the
-// errResponseTooLarge sentinel (→ clean 413 via proxyErrorHandler) instead of
-// reading the stream unbounded into memory. A maxBytes <= 0 means "no limit".
-//
-// DEGRADATION: a gzip-DECODE failure (or over-size) returns an error so the
-// ReverseProxy's ErrorHandler emits a clean 413/502 before any body is written.
-// A rewriteHTML failure (parse quirk etc.) does NOT fail the gateway — the
-// security gates already ran — so the DECODED ORIGINAL HTML is served (200) and a
-// warning is logged. pageURL is the validated top-level target captured in the
-// ModifyResponse closure; it is the base for relative-URL resolution. hideSelectors
-// are the CR5 author hide-selectors threaded from the inbound request; rewriteHTML
-// validates and applies them (a nil/empty slice is a no-op).
+// DEGRADATION: a rewrite failure other than the size limit (a parse quirk etc.)
+// does NOT fail the gateway — the security gates already ran — so the DECODED
+// ORIGINAL HTML (within maxBytes) is served (200) and a warning is logged.
+// maxBytes <= 0 disables every bound. pageURL is the validated target of this
+// hop; it is the base for relative-URL resolution. hideSelectors are the CR5
+// author hide-selectors; rewriteHTMLLimited validates and applies them.
 func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logger log.Logger, hideSelectors []string) error {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
 
-	// Non-HTML ⇒ leave the response entirely alone.
-	if !isHTMLContentType(resp.Header.Get("Content-Type")) {
-		return nil
+	encoding, err := responseEncoding(resp.Header)
+	var raw []byte
+	if err == nil {
+		raw, err = readBounded(resp.Body, maxBytes)
 	}
-
-	gzipped := strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), contentEncodingGzip)
-	hasOtherEncoding := !gzipped && strings.TrimSpace(resp.Header.Get("Content-Encoding")) != ""
-	if hasOtherEncoding {
-		// HTML carrying a non-gzip encoding (deflate/br) is out of scope to decode;
-		// leave the body untouched rather than rewrite a still-encoded payload.
-		return nil
-	}
-
-	var decoded []byte
-	var err error
-	if gzipped {
-		decoded, err = decodeGzipBounded(resp.Body, maxBytes)
-	} else {
-		// Plain HTML: read the (already size-guarded) body into memory.
-		decoded, err = io.ReadAll(resp.Body)
-	}
-	// resp.Body is fully consumed (or errored) above; close the original reader
-	// regardless of outcome so the upstream connection can be reused/released.
+	// Close the upstream body whatever the outcome.
 	if cerr := resp.Body.Close(); cerr != nil && err == nil {
 		err = cerr
 	}
 	if err != nil {
-		// errResponseTooLarge propagates to proxyErrorHandler (→ 413); a malformed
-		// gzip stream surfaces as a generic error (→ 502). Either way ModifyResponse
-		// returning a non-nil error means the ReverseProxy invokes its ErrorHandler
-		// before writing any body, so the client never sees a half-decoded payload.
 		return err
 	}
+	gzipped := encoding == contentEncodingGzip
 
-	// CR2: rewrite the plain HTML with goquery. On failure, degrade to the decoded
-	// original (the security gates already ran — a parse quirk must not 502).
+	if !isHTMLContentType(resp.Header.Get("Content-Type")) {
+		if gzipped {
+			if err := gzipDecodedWithin(raw, maxBytes); err != nil {
+				return err
+			}
+		}
+		setBufferedBody(resp, raw)
+		return nil
+	}
+
+	decoded := raw
+	if gzipped {
+		if decoded, err = decodeGzipBounded(bytes.NewReader(raw), maxBytes); err != nil {
+			return err
+		}
+	}
+
+	// CR2/FR5: rewrite the HTML. On a failure other than the size limit, degrade
+	// to the decoded original (the security gates already ran — a parse quirk
+	// must not 502).
 	body := decoded
-	rewritten, rerr := htmlRewriter(decoded, pageURL, resp.Header.Get("Content-Type"), hideSelectors)
-	if rerr != nil {
+	rewritten, rerr := htmlRewriter(decoded, pageURL, resp.Header.Get("Content-Type"), hideSelectors, maxBytes)
+	switch {
+	case errors.Is(rerr, errResponseTooLarge):
+		return rerr
+	case rerr != nil:
 		if logger != nil {
 			logger.Warn("html rewrite failed; serving decoded original", "url", pageURL.String(), "error", rerr)
 		}
-	} else {
+	default:
 		body = rewritten
-		// rewriteHTML emits UTF-8; update the Content-Type charset so the client
+		// The rewriter emits UTF-8; update the Content-Type charset so the client
 		// decodes it correctly regardless of the upstream's declared charset.
 		resp.Header.Set("Content-Type", "text/html; charset=utf-8")
 	}
 
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	// The body is now plain (rewritten) HTML: drop the encoding header so the
-	// client does not attempt to re-decode, and set Content-Length to the new
-	// length so the framing is correct (no stale compressed length).
+	// The body is now plain HTML: drop the encoding header so the client does
+	// not try to decode it again.
 	if gzipped {
 		resp.Header.Del("Content-Encoding")
 	}
-	resp.ContentLength = int64(len(body))
-	resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	setBufferedBody(resp, body)
 	return nil
+}
+
+// readBounded reads r to the end. More than maxBytes returns
+// errResponseTooLarge without reading further; maxBytes <= 0 means no limit.
+func readBounded(r io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return io.ReadAll(r)
+	}
+	b, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > maxBytes {
+		return nil, errResponseTooLarge
+	}
+	return b, nil
+}
+
+// setBufferedBody replaces the response body with body and sets the framing to
+// match: Content-Length is the buffered length and upstream trailers are
+// dropped (a buffered body is sent with a fixed length).
+func setBufferedBody(resp *http.Response, body []byte) {
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	resp.Trailer = nil
+	resp.Header.Del("Trailer")
+	if bodyAllowedForStatus(resp.StatusCode) {
+		resp.Header.Set("Content-Length", strconv.Itoa(len(body)))
+	}
+}
+
+// discardBody drops the body of a response whose body the client never sees
+// (a redirect the browser follows), without reading it.
+func discardBody(resp *http.Response) {
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	resp.Header.Del("Content-Encoding")
+	setBufferedBody(resp, nil)
+}
+
+// bodyAllowedForStatus reports whether a response with this status may carry a
+// body (RFC 9110: not 1xx, 204 or 304).
+func bodyAllowedForStatus(status int) bool {
+	switch {
+	case status >= 100 && status <= 199:
+		return false
+	case status == http.StatusNoContent, status == http.StatusNotModified:
+		return false
+	}
+	return true
 }
 
 // decodeGzipBounded gzip-decompresses r, reading at most maxBytes decoded bytes
 // (maxBytes <= 0 disables the bound). If the decoded stream would exceed
-// maxBytes it returns errResponseTooLarge WITHOUT buffering the whole stream,
-// which is the decompression-bomb guard: the underlying gzip reader is wrapped
-// in an io.LimitReader capped at maxBytes+1 so io.ReadAll can never allocate
-// more than one byte past the limit before we detect the overflow.
+// maxBytes it returns errResponseTooLarge without decoding further — the
+// decompression-bomb guard.
 func decodeGzipBounded(r io.Reader, maxBytes int64) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := copyGzipBounded(&buf, r, maxBytes); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// gzipDecodedWithin decodes raw to io.Discard and reports errResponseTooLarge
+// when the decoded size exceeds maxBytes, or the gzip error when raw is not a
+// valid gzip stream. It allocates no decoded buffer.
+func gzipDecodedWithin(raw []byte, maxBytes int64) error {
+	return copyGzipBounded(io.Discard, bytes.NewReader(raw), maxBytes)
+}
+
+// copyGzipBounded decodes the gzip stream r into dst. It reads one byte past
+// maxBytes so a body of exactly maxBytes is allowed while anything larger is
+// detected as an overflow (errResponseTooLarge).
+func copyGzipBounded(dst io.Writer, r io.Reader, maxBytes int64) error {
 	gr, err := gzip.NewReader(r)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	defer func() {
-		// Best-effort close of the gzip reader; the decoded bytes are already
-		// buffered and any read error is reported via ReadAll below.
-		_ = gr.Close()
-	}()
+	// Best-effort close; any read error is reported by io.Copy below.
+	defer func() { _ = gr.Close() }()
 
-	if maxBytes <= 0 {
-		return io.ReadAll(gr)
+	src := io.Reader(gr)
+	if maxBytes > 0 {
+		src = io.LimitReader(gr, maxBytes+1)
 	}
-
-	// Read one byte past the limit so a body of exactly maxBytes is allowed while
-	// anything larger is detected as an overflow.
-	limited := io.LimitReader(gr, maxBytes+1)
-	decoded, err := io.ReadAll(limited)
+	n, err := io.Copy(dst, src)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if int64(len(decoded)) > maxBytes {
-		return nil, errResponseTooLarge
+	if maxBytes > 0 && n > maxBytes {
+		return errResponseTooLarge
 	}
-	return decoded, nil
+	return nil
 }
 
 // stripRequestHeaders sanitises the OUTGOING proxied request: it deletes every
@@ -1190,7 +1273,8 @@ func stripRequestHeaders(h http.Header) {
 //   - SF4 blocked resolved/connect IP (*DialError, ReasonBlockedIP) ⇒ ip-blocklist ⇒ 403
 //   - SF4 cloud-metadata host (ReasonMetadataHost) ⇒ metadata ⇒ 403
 //   - SF4 resolve failure / no host (ReasonResolveFailed, ReasonNoHost) ⇒ upstream ⇒ 502
-//   - over-size response (P4) ⇒ size-limit ⇒ 413
+//   - over-size response (P4, VR-6, VR-7) ⇒ size-limit ⇒ 413
+//   - unsupported Content-Encoding (VR-6) ⇒ upstream ⇒ 502
 //   - CR4 redirect depth cap reached / redirects disabled ⇒ redirect-loop ⇒ 502
 //   - CR4 redirect into a non-allowlisted host (pre-block) ⇒ allowlist ⇒ 403
 //   - per-request-budget timeout / net.Error timeout (P4, Q10) ⇒ timeout ⇒ 504
@@ -1217,10 +1301,14 @@ func proxyErrorHandler(w http.ResponseWriter, _ *http.Request, err error) string
 	if errors.Is(err, errRedirectBlocked) {
 		return writeDenial(w, denialReasonAllowlist, "redirect target host is not allowlisted")
 	}
-	// P4: response body exceeded the configured size limit (clean Content-Length
-	// path — no body bytes streamed yet) ⇒ 413.
+	// P4 / VR-6 / VR-7: the declared, read, decoded or rewritten size exceeded
+	// the configured limit (no body bytes sent yet) ⇒ 413.
 	if errors.Is(err, errResponseTooLarge) {
 		return writeDenial(w, denialReasonSizeLimit, "upstream response exceeds maximum allowed size")
+	}
+	// VR-6: a Content-Encoding whose decoded size the proxy cannot bound ⇒ 502.
+	if errors.Is(err, errUnsupportedEncoding) {
+		return writeDenial(w, denialReasonUpstream, "upstream response uses an unsupported content encoding")
 	}
 	// P4: the total per-request budget (Q10) expired ⇒ 504. The transport
 	// surfaces the context deadline as context.DeadlineExceeded; a stalled

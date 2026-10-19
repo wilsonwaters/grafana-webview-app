@@ -93,10 +93,11 @@ const referrerPolicyNoReferrer = "no-referrer"
 const sandboxCompatShim = `(function(){var jar="";try{document.cookie}catch(e){try{Object.defineProperty(Document.prototype,"cookie",{configurable:true,get:function(){return jar},set:function(v){var kv=String(v).split(";")[0];var k=kv.split("=")[0];var parts=jar?jar.split("; ").filter(function(p){return p.split("=")[0]!==k}):[];parts.push(kv);jar=parts.join("; ")}})}catch(e2){}}function mem(){var s={};return{getItem:function(k){return Object.prototype.hasOwnProperty.call(s,k)?s[k]:null},setItem:function(k,v){s[k]=String(v)},removeItem:function(k){delete s[k]},clear:function(){s={}},key:function(i){return Object.keys(s)[i]||null},get length(){return Object.keys(s).length}}}["localStorage","sessionStorage"].forEach(function(n){try{window[n].length}catch(e){try{Object.defineProperty(window,n,{configurable:true,value:mem()})}catch(e2){}}})})();`
 
 // htmlRewriter is the rewrite function prepareHTMLBody invokes on HTML bodies. It
-// defaults to rewriteHTML and is a package var ONLY so a test can substitute a
-// deterministically-failing rewriter to exercise the degradation path (serve the
-// decoded original on rewrite error). Production never reassigns it.
-var htmlRewriter = rewriteHTML
+// defaults to rewriteHTMLLimited and is a package var ONLY so a test can
+// substitute a deterministically-failing rewriter to exercise the degradation
+// path (serve the decoded original on rewrite error). Production never
+// reassigns it.
+var htmlRewriter = rewriteHTMLLimited
 
 // hideParam is the inbound /proxy query parameter carrying author-configured
 // hide-selectors (CR5). It is REPEATED — one CSS selector per value — rather than
@@ -143,7 +144,18 @@ const hideStyleDecl = "display:none!important"
 // hide-selector) cannot break out of an attribute. On any parse error it
 // returns the error so the caller can degrade to serving the decoded original
 // (the security gates already ran). An empty or nil hideSelectors is a no-op.
+// rewriteHTML applies no size limit; the proxy uses rewriteHTMLLimited.
 func rewriteHTML(htmlBytes []byte, pageURL *url.URL, contentType string, hideSelectors []string) ([]byte, error) {
+	return rewriteHTMLLimited(htmlBytes, pageURL, contentType, hideSelectors, 0)
+}
+
+// rewriteHTMLLimited is rewriteHTML with an output limit (VR-6): the rewritten
+// document must not be longer than maxBytes, otherwise it returns
+// errResponseTooLarge (413). Absolute URLs are longer than relative ones, and a
+// long base URL multiplied over many short references could otherwise grow the
+// document without bound, so URL rewriting also stops as soon as its growth
+// exceeds the room left under maxBytes. maxBytes <= 0 means no limit.
+func rewriteHTMLLimited(htmlBytes []byte, pageURL *url.URL, contentType string, hideSelectors []string, maxBytes int64) ([]byte, error) {
 	// An empty body has nothing to rewrite (and charset.NewReader would surface an
 	// EOF on it); return it unchanged rather than treating it as a parse failure.
 	if len(htmlBytes) == 0 {
@@ -163,8 +175,12 @@ func rewriteHTML(htmlBytes []byte, pageURL *url.URL, contentType string, hideSel
 
 	base, baseNode := ensureBase(doc, pageURL)
 
-	rewriteURLAttrs(doc, base)
-	rewriteSrcset(doc, base)
+	budget := newGrowthBudget(maxBytes, len(htmlBytes))
+	rewriteURLAttrs(doc, base, budget)
+	rewriteSrcset(doc, base, budget)
+	if budget.exceeded {
+		return nil, errResponseTooLarge
+	}
 	removeCSPMetas(doc)
 	removeFrameBusters(doc)
 	applyHideSelectors(doc, hideSelectors)
@@ -175,7 +191,47 @@ func rewriteHTML(htmlBytes []byte, pageURL *url.URL, contentType string, hideSel
 	if err != nil {
 		return nil, fmt.Errorf("render html: %w", err)
 	}
+	if maxBytes > 0 && int64(len(out)) > maxBytes {
+		return nil, errResponseTooLarge
+	}
 	return []byte(out), nil
+}
+
+// growthBudget bounds the bytes that URL rewriting may add to a document
+// (VR-6). An unlimited budget allows any growth.
+type growthBudget struct {
+	limited   bool
+	remaining int64
+	exceeded  bool
+}
+
+// newGrowthBudget allows URL rewriting to grow a document of inputLen bytes up
+// to maxBytes; maxBytes <= 0 means no limit.
+func newGrowthBudget(maxBytes int64, inputLen int) *growthBudget {
+	if maxBytes <= 0 {
+		return &growthBudget{}
+	}
+	return &growthBudget{limited: true, remaining: maxBytes - int64(inputLen)}
+}
+
+// allow records that oldLen bytes are replaced with newLen bytes and reports
+// whether the document is still within the budget. Once it returns false it
+// keeps returning false.
+func (b *growthBudget) allow(oldLen, newLen int) bool {
+	if !b.limited {
+		return true
+	}
+	if b.exceeded {
+		return false
+	}
+	if grow := int64(newLen - oldLen); grow > 0 {
+		b.remaining -= grow
+		if b.remaining < 0 {
+			b.exceeded = true
+			return false
+		}
+	}
+	return true
 }
 
 // ensureBase makes the document's first <base href> the first child of <head>
@@ -262,18 +318,28 @@ func removeReferrerPolicies(doc *goquery.Document) {
 }
 
 // rewriteURLAttrs makes every attribute in urlAttrs an absolute upstream URL.
-// Values that absoluteURL rejects are left verbatim.
-func rewriteURLAttrs(doc *goquery.Document, base *url.URL) {
+// Values that absoluteURL rejects are left verbatim. It stops as soon as the
+// growth budget is exceeded; the caller then fails the rewrite.
+func rewriteURLAttrs(doc *goquery.Document, base *url.URL, budget *growthBudget) {
 	for _, ua := range urlAttrs {
-		doc.Find(ua.selector).Each(func(_ int, s *goquery.Selection) {
+		doc.Find(ua.selector).EachWithBreak(func(_ int, s *goquery.Selection) bool {
 			raw, ok := s.Attr(ua.attr)
 			if !ok {
-				return
+				return true
 			}
-			if abs, ok := absoluteURL(raw, base); ok {
-				s.SetAttr(ua.attr, abs)
+			abs, ok := absoluteURL(raw, base)
+			if !ok {
+				return true
 			}
+			if !budget.allow(len(raw), len(abs)) {
+				return false
+			}
+			s.SetAttr(ua.attr, abs)
+			return true
 		})
+		if budget.exceeded {
+			return
+		}
 	}
 }
 
@@ -305,16 +371,25 @@ func absoluteURL(ref string, base *url.URL) (string, bool) {
 }
 
 // rewriteSrcset rewrites every srcset-style attribute in srcsetAttrs candidate
-// by candidate (see rewriteSrcsetValue).
-func rewriteSrcset(doc *goquery.Document, base *url.URL) {
+// by candidate (see rewriteSrcsetValue). It stops as soon as the growth budget
+// is exceeded; the caller then fails the rewrite.
+func rewriteSrcset(doc *goquery.Document, base *url.URL, budget *growthBudget) {
 	for _, sa := range srcsetAttrs {
-		doc.Find(sa.selector).Each(func(_ int, s *goquery.Selection) {
+		doc.Find(sa.selector).EachWithBreak(func(_ int, s *goquery.Selection) bool {
 			raw, ok := s.Attr(sa.attr)
 			if !ok || strings.TrimSpace(raw) == "" {
-				return
+				return true
 			}
-			s.SetAttr(sa.attr, rewriteSrcsetValue(raw, base))
+			rewritten, ok := rewriteSrcsetValue(raw, base, budget)
+			if !ok {
+				return false
+			}
+			s.SetAttr(sa.attr, rewritten)
+			return true
 		})
+		if budget.exceeded {
+			return
+		}
 	}
 }
 
@@ -327,8 +402,9 @@ const srcsetSpace = " \t\n\f\r"
 // commas end the candidate), and the descriptors that follow run to the next
 // comma outside parentheses. Each http(s) candidate URL becomes absolute; other
 // URLs (data:, ...) and every descriptor ("2x", "640w") are kept verbatim.
-// Candidates are re-joined with ", ".
-func rewriteSrcsetValue(srcset string, base *url.URL) string {
+// Candidates are re-joined with ", ". It returns false, and stops, as soon as
+// the growth budget is exceeded.
+func rewriteSrcsetValue(srcset string, base *url.URL, budget *growthBudget) (string, bool) {
 	var out []string
 	rest := srcset
 	for {
@@ -367,6 +443,9 @@ func rewriteSrcsetValue(srcset string, base *url.URL) string {
 		}
 
 		if abs, ok := absoluteURL(candidate, base); ok {
+			if !budget.allow(len(candidate), len(abs)) {
+				return "", false
+			}
 			candidate = abs
 		}
 		if descriptor != "" {
@@ -374,7 +453,7 @@ func rewriteSrcsetValue(srcset string, base *url.URL) string {
 		}
 		out = append(out, candidate)
 	}
-	return strings.Join(out, ", ")
+	return strings.Join(out, ", "), true
 }
 
 // removeCSPMetas removes <meta http-equiv> elements whose http-equiv is a CSP

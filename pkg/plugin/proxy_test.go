@@ -315,7 +315,7 @@ func TestProxySendsNoCORSHeaders(t *testing.T) {
 		h.Set("Access-Control-Max-Age", "86400")
 		// Set a raw lower-case key too, so the case-insensitive sweep is exercised.
 		h["access-control-allow-private-network"] = []string{"true"}
-		h.Set("Content-Type", "text/html")
+		h.Set("Content-Type", "text/plain")
 		if r.URL.Path == "/big" {
 			h.Set("Content-Length", "64")
 			w.WriteHeader(http.StatusOK)
@@ -837,13 +837,11 @@ func TestProxyResponseTooLargeContentLength(t *testing.T) {
 	}
 }
 
-// TestProxyResponseTooLargeChunked covers the P4 defense-in-depth path: an
+// TestProxyResponseTooLargeChunked covers the P4 undeclared-length path: an
 // upstream that does NOT declare Content-Length (chunked / -1) but streams more
-// than MaxResponseBytes. DOCUMENTED BEHAVIOUR: because the ReverseProxy has
-// already written 200 + headers before the body is read, this path CANNOT
-// become a clean 413 — the limited reader caps the copy at the limit and errors,
-// so the delivered body is truncated to at most MaxResponseBytes (and the copy
-// fails). We assert the body is capped, never the full oversized payload.
+// than MaxResponseBytes. Since VR-7 the body is read in full before the status
+// is sent, so the result is a clean 413 with none of the upstream bytes, never
+// a truncated 200.
 func TestProxyResponseTooLargeChunked(t *testing.T) {
 	const limit = 16
 	// Build a body strictly larger than the limit. No Content-Length is set
@@ -871,14 +869,11 @@ func TestProxyResponseTooLargeChunked(t *testing.T) {
 	p := newTestHandler(t, cfg, upstream)
 
 	rec := doProxy(p, "http://example.com/stream")
-	// Status was already 200 before streaming began (documented caveat); the key
-	// guarantee is that the delivered body is CAPPED at the limit, never the full
-	// oversized payload.
-	if int64(rec.Body.Len()) > limit {
-		t.Fatalf("chunked oversize: delivered %d bytes, want <= %d (body must be capped)", rec.Body.Len(), limit)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("chunked oversize: got status %d, want 413 (body=%q)", rec.Code, rec.Body.String())
 	}
-	if rec.Body.String() == oversized {
-		t.Fatalf("chunked oversize: full body leaked, limited reader did not cap")
+	if strings.Contains(rec.Body.String(), "AAAA") {
+		t.Fatalf("chunked oversize: upstream bytes leaked into the 413: %q", rec.Body.String())
 	}
 }
 

@@ -736,7 +736,7 @@ func TestNonHTMLByteIdenticalPassthrough(t *testing.T) {
 func TestRewriteFailureDegradesToOriginal(t *testing.T) {
 	orig := htmlRewriter
 	t.Cleanup(func() { htmlRewriter = orig })
-	htmlRewriter = func(_ []byte, _ *url.URL, _ string, _ []string) ([]byte, error) {
+	htmlRewriter = func(_ []byte, _ *url.URL, _ string, _ []string, _ int64) ([]byte, error) {
 		return nil, errInjectedRewriteFailure
 	}
 
