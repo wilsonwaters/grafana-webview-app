@@ -63,7 +63,7 @@ func (h checkFrameableHandler) ServeHTTP(w http.ResponseWriter, req *http.Reques
 
 // checkFrameable implements the /check-frameable endpoint contract (Q7).
 //
-// It runs the EXACT same pre-fetch security pipeline as /proxy's serve — parse
+// It runs the EXACT same pre-fetch security pipeline as /proxy (ServeHTTP) — parse
 // `url` → SF2 hostname normalise → SF3 allowlist match (empty allowlist denies)
 // → SF2 full ValidateURL with the matched domain's extra ports → SF5 rate-limit
 // then concurrency Acquire — reusing writeDenial / the reasonStatus table so the
@@ -242,7 +242,7 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 		}
 	}
 
-	return frameingVerdictFromHeaders(resp.Header)
+	return framingVerdictFromHeaders(resp.Header)
 }
 
 // unreachableVerdict is the proxy-recommended verdict for a framing check whose
@@ -276,7 +276,7 @@ func fetchFailureReason(err error) string {
 	return "the connection failed"
 }
 
-// frameingVerdictFromHeaders inspects the framing-relevant response headers and
+// framingVerdictFromHeaders inspects the framing-relevant response headers and
 // returns the Q7 verdict.
 //
 // X-Frame-Options: every value of every X-Frame-Options line is read (see
@@ -288,7 +288,7 @@ func fetchFailureReason(err error) string {
 // present frame-ancestors directive blocks UNLESS its source list contains the
 // wildcard `*` (which allows any origin). 'none' blocks outright. An ABSENT
 // frame-ancestors directive does not block via CSP.
-func frameingVerdictFromHeaders(h http.Header) frameableResponse {
+func framingVerdictFromHeaders(h http.Header) frameableResponse {
 	if blocked, reason := xFrameOptionsBlocks(h.Values("X-Frame-Options")); blocked {
 		return frameableResponse{Frameable: false, Reason: reason, RecommendedMode: recommendedModeProxy}
 	}
@@ -347,7 +347,7 @@ func xFrameOptionsBlocks(lines []string) (bool, string) {
 
 // cspFrameAncestorsBlocks parses a single Content-Security-Policy header value
 // for a frame-ancestors directive and applies the conservative blocking rule
-// (see frameingVerdictFromHeaders). It returns (true, reason) when the directive
+// (see framingVerdictFromHeaders). It returns (true, reason) when the directive
 // is present and does NOT permit any origin via `*`.
 func cspFrameAncestorsBlocks(csp string) (bool, string) {
 	for _, directive := range strings.Split(csp, ";") {

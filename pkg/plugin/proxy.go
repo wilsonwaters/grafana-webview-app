@@ -155,11 +155,9 @@ const xGrafanaHeaderPrefix = "x-grafana-"
 const corsHeaderPrefix = "access-control-"
 
 // defaultInstanceID is the rate-limiter instance key used when the plugin
-// request context does not carry an org/user we can key on. P1 keys the
-// per-instance rate-limit tier on the Grafana org ID; when that is absent we
-// fall back to this constant so the limiter still applies a single shared
-// bucket rather than failing open. Refining the instance identity (e.g. mixing
-// in user) is left to later phases.
+// request context carries no Grafana namespace. The per-instance tier is keyed
+// on the namespace (one per org, see instanceIDFromContext); without one, all
+// such requests share this single bucket, so the limiter never fails open.
 const defaultInstanceID = "default"
 
 // auditAnonymousUser is the user value logged when the proxy request carries no
@@ -204,8 +202,8 @@ type proxyHandler struct {
 // HTTP transport is wired to SF4's secure dialer so that DNS-resolve-then-dial,
 // resolved-IP validation, and the connect-time rebind guard all run at connect
 // time for every upstream request. The dialer's base *net.Dialer carries the
-// per-request connection timeout from settings (the trivial transport-timeout
-// wiring permitted in P1; full body-size/total-timeout enforcement is P4).
+// connection timeout from settings; serveProxy bounds the whole request with
+// the same RequestTimeoutSec.
 func newProxyHandler(cfg PluginSettings) *proxyHandler {
 	return newProxyHandlerWithRegistry(cfg, defaultProxyMetricsRegisterer())
 }

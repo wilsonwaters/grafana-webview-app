@@ -28,13 +28,10 @@ package plugin
 //	AC 21 → TestTC1AC21DNSRebindingPrevented (+ sub-tests)
 //	AC 22 → TestTC1AC22NonHTTPSchemesRejected
 //
-// AC 19 note: the per-domain private-IP opt-in (DomainOptions.AllowPrivateIP) is
-// parsed into config and mapped into security.EntryOptions, but it is NOT wired
-// into the endpoint dial path — buildProxyHandler constructs the secure dialer
-// with security.NewDialer(nil, …) and the SF1 blocklist is enforced strictly with
-// no opt-in relaxation (see resolvedial.go / ipblocklist.go). This suite therefore
-// asserts the DENY case and the resolved-IP rejection, exactly as the AC's
-// parenthetical permits when the opt-in is not present in the code.
+// AC 19 note: this suite covers the default (no opt-in) case, where an
+// allowlisted host that resolves to a private address is refused. The
+// per-domain private-IP opt-in (DomainOptions.AllowPrivateIP, RFC 1918 only)
+// is covered in proxy_ac19_optin_test.go.
 
 import (
 	"context"

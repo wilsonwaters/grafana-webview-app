@@ -3,11 +3,33 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
 )
+
+// idleCloser records CloseIdleConnections calls.
+type idleCloser struct {
+	http.RoundTripper
+	closed int
+}
+
+func (c *idleCloser) CloseIdleConnections() { c.closed++ }
+
+// TestDisposeClosesIdleConnections covers RV1-42: Dispose closes the idle
+// connections of the proxy transport, and is safe on an App without a proxy.
+func TestDisposeClosesIdleConnections(t *testing.T) {
+	app := tc1NewApp(t, "")
+	tr := &idleCloser{RoundTripper: http.DefaultTransport}
+	app.proxy.transport = tr
+	app.Dispose()
+	if tr.closed != 1 {
+		t.Fatalf("CloseIdleConnections called %d times, want 1", tr.closed)
+	}
+	(&App{}).Dispose()
+}
 
 // TestLoadSettingsWarnsInvalidAllowlistEntries covers RV1-18: LoadSettings
 // logs one warning per allowlist entry that is not a valid host name, and

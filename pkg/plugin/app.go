@@ -79,10 +79,17 @@ func NewApp(_ context.Context, settings backend.AppInstanceSettings) (instancemg
 	return &app, nil
 }
 
-// Dispose here tells plugin SDK that plugin wants to clean up resources when a new instance
-// created.
+// Dispose is called by the SDK when it replaces this instance (the settings
+// changed). It closes the idle upstream connections of the proxy transport.
+// The transport disables keep-alives, so there should be none; this only makes
+// sure an old instance holds no sockets.
 func (a *App) Dispose() {
-	// cleanup
+	if a.proxy == nil {
+		return
+	}
+	if t, ok := a.proxy.transport.(interface{ CloseIdleConnections() }); ok {
+		t.CloseIdleConnections()
+	}
 }
 
 // healthDetails is the JSONDetails of the CheckHealth result.
