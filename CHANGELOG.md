@@ -100,6 +100,11 @@ Fixes for the 2026-06-10 security review (VR-1 to VR-14):
   blocked; the private-IP opt-in never relaxes a translated address.
 - **Action pinning** (VR-14): every GitHub Actions dependency is pinned to a
   commit SHA.
+- **Bounded hide-selector matching**: `/proxy` refuses (400) more than 20 hide
+  selectors, a selector over 256 bytes, and selectors that use `:has()`,
+  `:contains()`, `:matches()`, `#=` or a combinator inside `:not()`.
+  Combinators are matched in linear time, and the matching work per page is
+  capped (413). The panel editor shows which selectors it does not send.
 
 ### Removed
 

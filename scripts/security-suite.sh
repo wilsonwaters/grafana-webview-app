@@ -87,6 +87,10 @@ REQUIRED_TESTS=(
   "RV1-8:TestUpstreamFailureDetailOnlyInServerLog"
   "RV1-9:TestDomainRateLimitKeyedOnAllowlistEntry"
   "RV1-23:TestAuditRedactsQueryAndUsesContextLogger"
+  # Hide-selector CPU bounds (CR5 hardening)
+  "CR5:TestProxyRefusesExpensiveHideSelectors"
+  "CR5:TestHideCombinatorChainsAreLinear"
+  "CR5:TestHideMatchBudgetStopsQuadraticSelectors"
 )
 
 # Packages that contain (or may contain) the mandatory security tests.

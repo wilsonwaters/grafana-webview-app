@@ -98,9 +98,11 @@ export interface PanelOptions {
    * Proxy mode only: each selector is sent as a `hide` parameter, and the
    * backend hides the matching elements of the server-rendered HTML with an
    * inline `display:none`. The selector text is never written into the page,
-   * so it cannot inject markup. The backend skips an invalid selector and
-   * uses at most 50 selectors. Direct mode cannot change a cross-origin page
-   * and ignores this option.
+   * so it cannot inject markup. At most 20 selectors of at most 256 bytes are
+   * sent, and selectors with slow features such as `:has()` are not sent (see
+   * `panels/webview/hideSelectors.ts`); the backend skips a selector it cannot
+   * parse. Direct mode cannot change a cross-origin page and ignores this
+   * option.
    * @default ''
    */
   hideSelectors: string;

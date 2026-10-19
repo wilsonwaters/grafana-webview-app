@@ -393,8 +393,11 @@ never set. Both iframes use `referrerPolicy="no-referrer"` and
 `pointer-events: none`, and the panel never listens for `message` events from
 the frame. Unit tests in `sandbox.test.ts` and the panel tests enforce this.
 
-**Author hide-selectors** (`applyHideSelectors`, `rewrite.go`): author-supplied
-CSS selectors are validated (length + count caps, `cascadia` compilation) and
+**Author hide-selectors** (`hide_selectors.go`): `/proxy` refuses (400) more
+than 20 selectors, a selector over 256 bytes, and `cascadia`'s expensive
+features (`:has()`, `:contains()`, `:matches()`, `#=`, `:not()` with
+combinators); combinators are resolved in one linear pass and the matching
+work per page is capped (413 beyond it). Selectors are
 applied by **finding matched elements and setting a fixed
 `display:none!important` style attribute** — the selector text never enters the
 rendered markup, so markup injection is impossible by construction (AC 31).
@@ -497,6 +500,7 @@ the caller's basic org role from the plugin context
 | **State-setting / policy-pinning via response** | `stripFramingHeaders` removes `Set-Cookie`, HSTS, HPKP, `Clear-Site-Data`, `Refresh` and every `Access-Control-*` header | None for the enumerated set. |
 | **Proxy use by any signed-in user** | Allowlist (empty by default), rate limits, concurrency cap, audit log with the Grafana login; `/check-frameable` limited to Editor and Admin | Any signed-in user, including Viewers, can fetch allowlisted URLs and can learn whether a host is allowlisted. Allowlist only hosts that every user of the organisation may read. |
 | **Malicious hide-selector markup injection** | `applyHideSelectors` matches elements and sets a fixed style attribute; selector text never serialised | None by construction. |
+| **Hide-selector CPU exhaustion** | `checkHideSelectors` refuses (400) over 20 selectors, over 256 bytes, and `:has()`/`:contains()`/`:matches()`/`#=`/`:not()` with combinators; linear combinator matching; per-page matching budget (413) | A selector within the limits can still use up to the budget (well under a second) per request. |
 
 ### Residual risk: the `AllowPrivateIP` opt-in (scoped SSRF surface)
 

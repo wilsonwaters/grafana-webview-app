@@ -1,6 +1,7 @@
 import type { PanelModel, PanelOptionsEditorBuilder, StandardEditorContext } from '@grafana/data';
 import type { PanelOptions } from '../../types';
 import { plugin } from './module';
+import { HideSelectorsEditor } from './components/HideSelectorsEditor';
 
 jest.mock('@grafana/runtime', () => ({
   getBackendSrv: jest.fn(),
@@ -14,6 +15,7 @@ interface RecordedOption {
   description?: string;
   defaultValue?: unknown;
   settings?: Record<string, unknown>;
+  editor?: unknown;
 }
 
 /**
@@ -52,12 +54,20 @@ describe('panels/webview/module', () => {
     expect(plugin.shouldMigrate?.({ options: { detectedMode: null } } as unknown as PanelModel)).toBe(false);
   });
 
-  test('hideSelectors has a multi-line text editor that asks for one selector per line (RV1-17)', () => {
+  test('hideSelectors has a multi-line editor that asks for one selector per line and states the limits (RV1-17, CR5)', () => {
     const item = optionItems().get('hideSelectors');
 
-    expect(item).toMatchObject({ method: 'addTextInput', defaultValue: '', settings: { useTextarea: true } });
+    expect(item).toMatchObject({
+      method: 'addCustomEditor',
+      name: 'Hide elements (proxy mode)',
+      defaultValue: '',
+      settings: { rows: 3 },
+    });
+    expect(item?.editor).toBe(HideSelectorsEditor);
     expect(item?.description).toMatch(/one per line/);
     expect(item?.description).toMatch(/proxy mode only/i);
+    expect(item?.description).toMatch(/at most 20 selectors/i);
+    expect(item?.description).toMatch(/:has\(\)/);
   });
 
   test('the auto-refresh interval is whole seconds and its description states the 5 s minimum (RV1-12)', () => {

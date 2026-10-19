@@ -116,6 +116,21 @@ describe('panels/webview/loadMode', () => {
       expect(params.get('url')).toBe('https://example.com');
     });
 
+    test('selectors the proxy would refuse are not sent (CR5)', () => {
+      const tooLong = '.' + 'a'.repeat(256);
+      const hide = ['.ad', 'div:has(p)', 'p:contains(x)', '[href#=(ads)]', 'div:not(.a .b)', tooLong, '#banner'];
+      const path = buildProxyFetchUrl('https://example.com', hide.join('\n'));
+      const params = new URLSearchParams(path.split('?')[1]);
+      expect(params.getAll('hide')).toEqual(['.ad', '#banner']);
+    });
+
+    test('at most 20 selectors are sent (CR5)', () => {
+      const lines = Array.from({ length: 25 }, (_, i) => `.s${i + 1}`).join('\n');
+      const params = new URLSearchParams(buildProxyFetchUrl('https://example.com', lines).split('?')[1]);
+      expect(params.getAll('hide')).toHaveLength(20);
+      expect(params.getAll('hide')[19]).toBe('.s20');
+    });
+
     test('special characters in selectors are encoded', () => {
       const selector = 'div[data-x="a b"] > .c&d';
       const path = buildProxyFetchUrl('https://example.com', selector);
