@@ -108,6 +108,14 @@ describe('panels/webview/WebViewPanel', () => {
     expect(iframe).toHaveStyle({ transform: 'scale(1.5) translate(-100px, -200px)' });
   });
 
+  test('applies a negative saved viewport (panned past the top-left edge) without resetting it', () => {
+    render(<WebViewPanel {...buildProps({ url: 'https://example.com', viewportX: -40, viewportY: -25, viewportZoom: 0.5 })} />);
+
+    expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveStyle({
+      transform: 'scale(0.5) translate(40px, 25px)',
+    });
+  });
+
   test('renders without crashing for partial / legacy options', () => {
     const props = { options: { url: 'https://x.test' }, width: 100, height: 100 } as unknown as PanelProps<PanelOptions>;
     render(<WebViewPanel {...props} />);

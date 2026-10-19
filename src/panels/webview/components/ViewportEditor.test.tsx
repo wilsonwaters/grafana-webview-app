@@ -591,6 +591,45 @@ describe('panels/webview/ViewportEditor', () => {
     expect(options.viewportY).toBe(6);
   });
 
+  test('dragging past the origin keeps the negative offsets after Grafana re-renders (RV1-10, no snap-back)', () => {
+    const { props, options } = buildProps({ viewportX: 10, viewportY: 10, viewportZoom: 1 });
+    const { rerender } = render(<ViewportEditor {...props} />);
+
+    const preview = screen.getByTestId(viewportEditorTestIds.preview);
+    fireEvent.mouseDown(preview, { clientX: 100, clientY: 100 });
+    fireEvent.mouseMove(window, { clientX: 150, clientY: 140 });
+    fireEvent.mouseUp(window);
+
+    expect(options.viewportX).toBe(-40);
+    expect(options.viewportY).toBe(-30);
+
+    // Grafana re-renders the editor with the committed options.
+    rerender(<ViewportEditor {...props} />);
+
+    const readout = screen.getByTestId(viewportEditorTestIds.readout);
+    expect(readout).toHaveTextContent('X: -40');
+    expect(readout).toHaveTextContent('Y: -30');
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({
+      transform: 'scale(1) translate(40px, 30px)',
+    });
+  });
+
+  test('cursor-anchored zoom-out near the top-left edge keeps its negative offsets', () => {
+    const { props, options } = buildProps({ viewportX: 0, viewportY: 0, viewportZoom: 1 });
+    const { rerender } = render(<ViewportEditor {...props} />);
+
+    const preview = screen.getByTestId(viewportEditorTestIds.preview);
+    // Zoom out at (200, 100): the point under the cursor stays put, so X/Y go negative.
+    fireEvent.wheel(preview, { deltaY: 100, clientX: 200, clientY: 100 });
+    rerender(<ViewportEditor {...props} />);
+
+    expect(options.viewportX).toBeLessThan(0);
+    expect(options.viewportY).toBeLessThan(0);
+    expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent(
+      `X: ${Math.round(options.viewportX)}`
+    );
+  });
+
   test('a re-render with UNCHANGED options does not clobber live interaction state', () => {
     const { props, options } = buildProps({ viewportX: 0, viewportY: 0, viewportZoom: 1 });
     const { rerender } = render(<ViewportEditor {...props} />);

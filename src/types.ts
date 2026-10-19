@@ -1,3 +1,5 @@
+import { clampZoom } from './panels/webview/viewport';
+
 /**
  * Canonical panel options for the Web View panel.
  *
@@ -37,20 +39,21 @@ export interface PanelOptions {
   /**
    * Horizontal scroll offset (in virtual iframe pixels) of the saved viewport.
    * The CSS transform translates by this amount so the viewer sees the
-   * intended region of the page.
+   * intended region of the page. A negative value moves the page right.
    * @default 0
    */
   viewportX: number;
 
   /**
    * Vertical scroll offset (in virtual iframe pixels) of the saved viewport.
+   * A negative value moves the page down.
    * @default 0
    */
   viewportY: number;
 
   /**
    * Zoom factor applied to the iframe via CSS `scale()`.
-   * Valid range: 0.1 – 5.0 (clamped by normalizeOptions).
+   * Valid range: `VIEWPORT_ZOOM_MIN` to `VIEWPORT_ZOOM_MAX` (clamped by normalizeOptions).
    * @default 1.0
    */
   viewportZoom: number;
@@ -111,60 +114,74 @@ export const DEFAULT_PANEL_OPTIONS: Readonly<PanelOptions> = {
   showDebugOverlay: false,
 };
 
-/** Minimum allowed zoom factor (inclusive). */
-const VIEWPORT_ZOOM_MIN = 0.1;
+type LoadMode = PanelOptions['loadMode'];
+type DetectedMode = Exclude<PanelOptions['detectedMode'], null>;
 
-/** Maximum allowed zoom factor (inclusive). */
-const VIEWPORT_ZOOM_MAX = 5.0;
+const LOAD_MODES: readonly LoadMode[] = ['auto', 'direct', 'proxy'];
+const DETECTED_MODES: readonly DetectedMode[] = ['direct', 'proxy'];
 
 /**
- * Merges a partial options object over the safe defaults and applies
- * range constraints to numeric fields.
- *
- * Constraints applied:
- * - `viewportZoom` is clamped to [0.1, 5.0]
- * - `iframeWidth`, `iframeHeight`, and `refreshIntervalSec` are reset to
- *   their defaults when negative (negative values are invalid)
- * - `viewportX` and `viewportY` are reset to 0 when negative
- *
- * This function is pure (no side effects) and safe to call with any partial
- * or unknown input produced by Grafana's dashboard JSON deserialisation.
- *
- * @param partial - Partial panel options (e.g. from a saved dashboard)
- * @returns A fully-populated PanelOptions object with all values in range
+ * Reads a number from a stored option value. Accepts a finite number or a
+ * numeric string (hand-edited or provisioned dashboard JSON). Returns
+ * `undefined` for anything else, including `null`, `''`, `NaN` and `Infinity`.
  */
-export function normalizeOptions(partial: Partial<PanelOptions>): PanelOptions {
-  const merged: PanelOptions = {
-    ...DEFAULT_PANEL_OPTIONS,
-    ...partial,
+function toFiniteNumber(value: unknown): number | undefined {
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value === 'string' && value.trim() !== '') {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : undefined;
+  }
+  return undefined;
+}
+
+function oneOf<T extends string>(value: unknown, allowed: readonly T[]): T | undefined {
+  return allowed.find((candidate) => candidate === value);
+}
+
+/** A positive dimension in pixels, or the default. */
+function toDimension(value: unknown, fallback: number): number {
+  const n = toFiniteNumber(value);
+  return n !== undefined && n > 0 ? n : fallback;
+}
+
+/**
+ * Builds a complete, valid `PanelOptions` from stored options.
+ *
+ * Saved, provisioned or hand-edited dashboard JSON can hold any value, so each
+ * field is coerced on its own and falls back to its default when the value is
+ * missing or has the wrong type:
+ * - `url` and `hideSelectors`: strings.
+ * - `loadMode` and `detectedMode`: one of their allowed values.
+ * - `viewportX` and `viewportY`: finite numbers. Negative values are valid:
+ *   they move the page right or down inside the panel, and the preview can pan
+ *   and zoom past the top-left edge of the page.
+ * - `viewportZoom`: a finite number, clamped with {@link clampZoom}.
+ * - `iframeWidth` and `iframeHeight`: positive numbers.
+ * - `refreshIntervalSec`: a finite number. Zero or less disables auto-refresh.
+ * - `showDebugOverlay`: `true` only for the boolean `true`.
+ *
+ * The function is pure and accepts any partial or unknown input.
+ */
+export function normalizeOptions(partial: Partial<PanelOptions> | null | undefined): PanelOptions {
+  const raw = (typeof partial === 'object' && partial !== null ? partial : {}) as Record<string, unknown>;
+  const d = DEFAULT_PANEL_OPTIONS;
+
+  const zoom = toFiniteNumber(raw.viewportZoom);
+  const refresh = toFiniteNumber(raw.refreshIntervalSec);
+
+  return {
+    url: typeof raw.url === 'string' ? raw.url : d.url,
+    loadMode: oneOf(raw.loadMode, LOAD_MODES) ?? d.loadMode,
+    detectedMode: oneOf(raw.detectedMode, DETECTED_MODES) ?? d.detectedMode,
+    viewportX: toFiniteNumber(raw.viewportX) ?? d.viewportX,
+    viewportY: toFiniteNumber(raw.viewportY) ?? d.viewportY,
+    viewportZoom: zoom === undefined ? d.viewportZoom : clampZoom(zoom),
+    iframeWidth: toDimension(raw.iframeWidth, d.iframeWidth),
+    iframeHeight: toDimension(raw.iframeHeight, d.iframeHeight),
+    refreshIntervalSec: refresh !== undefined && refresh > 0 ? refresh : d.refreshIntervalSec,
+    hideSelectors: typeof raw.hideSelectors === 'string' ? raw.hideSelectors : d.hideSelectors,
+    showDebugOverlay: raw.showDebugOverlay === true,
   };
-
-  // Clamp zoom to [VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX]
-  merged.viewportZoom = Math.min(
-    VIEWPORT_ZOOM_MAX,
-    Math.max(VIEWPORT_ZOOM_MIN, merged.viewportZoom)
-  );
-
-  // Reject negative offsets — fall back to default (0)
-  if (merged.viewportX < 0) {
-    merged.viewportX = DEFAULT_PANEL_OPTIONS.viewportX;
-  }
-  if (merged.viewportY < 0) {
-    merged.viewportY = DEFAULT_PANEL_OPTIONS.viewportY;
-  }
-
-  // Reject negative dimensions — fall back to defaults
-  if (merged.iframeWidth < 0) {
-    merged.iframeWidth = DEFAULT_PANEL_OPTIONS.iframeWidth;
-  }
-  if (merged.iframeHeight < 0) {
-    merged.iframeHeight = DEFAULT_PANEL_OPTIONS.iframeHeight;
-  }
-
-  // Reject negative refresh interval — fall back to default (disabled)
-  if (merged.refreshIntervalSec < 0) {
-    merged.refreshIntervalSec = DEFAULT_PANEL_OPTIONS.refreshIntervalSec;
-  }
-
-  return merged;
 }

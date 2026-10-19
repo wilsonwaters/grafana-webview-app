@@ -57,7 +57,7 @@ const WHEEL_ZOOM_STEP = 1.1;
  * - Drag → pan: screen-pixel deltas are converted to virtual offsets via
  *   `panDelta` (zoom-aware) and added to `viewportX/Y`.
  * - Wheel → zoom: `zoomAtCursor` keeps the virtual point under the cursor fixed
- *   while changing zoom, clamped to [0.1, 5.0].
+ *   while changing zoom, clamped with `clampZoom`.
  *
  * ## Numeric inputs (PC4)
  * Numeric `@grafana/ui` inputs for X, Y, zoom, iframeWidth, and iframeHeight are

@@ -18,7 +18,7 @@
  * - `viewportX` / `viewportY` — virtual iframe pixels. Positive values scroll
  *   the content to the right and down respectively (i.e. viewportX = 100 means
  *   the left edge of the visible region is 100 virtual pixels into the iframe).
- * - `viewportZoom` — dimensionless scale factor in [0.1, 5.0]. A zoom of 2
+ * - `viewportZoom` — dimensionless scale factor in [VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX]. A zoom of 2
  *   means the iframe is rendered at double size relative to the container, so
  *   the author can see a finer region.
  * - Screen (drag) deltas — positive dx moves the viewport right (increases
@@ -56,21 +56,20 @@ export function buildViewportTransform({
 // PC2 — Viewport interaction helpers
 // ---------------------------------------------------------------------------
 
-/** Minimum allowed zoom factor (inclusive). Matches normalizeOptions in types.ts. */
+/** Minimum allowed zoom factor (inclusive). The only definition of this bound. */
 export const VIEWPORT_ZOOM_MIN = 0.1;
 
-/** Maximum allowed zoom factor (inclusive). Matches normalizeOptions in types.ts. */
+/** Maximum allowed zoom factor (inclusive). The only definition of this bound. */
 export const VIEWPORT_ZOOM_MAX = 5.0;
 
 /**
  * Clamps `zoom` to the valid range [VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX].
  *
- * This is the single source of clamping logic for interaction helpers. The
- * same bounds are enforced by `normalizeOptions` in `src/types.ts` when
- * persisting options to the dashboard JSON.
+ * The interaction helpers, the editor inputs and `normalizeOptions` in
+ * `src/types.ts` all clamp with this function.
  *
  * @param zoom - Raw zoom value (may be outside bounds)
- * @returns A zoom value guaranteed to be in [0.1, 5.0]
+ * @returns A zoom value guaranteed to be in [VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX]
  */
 export function clampZoom(zoom: number): number {
   return Math.min(VIEWPORT_ZOOM_MAX, Math.max(VIEWPORT_ZOOM_MIN, zoom));
@@ -159,7 +158,7 @@ export interface ZoomAtCursorOutput {
  *
  * 1. Finding the virtual point P under the cursor:
  *    `P = cursorPos / oldZoom + viewportOffset`
- * 2. Computing the new zoom (clamped to [0.1, 5.0]).
+ * 2. Computing the new zoom (clamped with clampZoom).
  * 3. Adjusting the viewport offset so that P stays at the same screen position:
  *    `newOffset = P - cursorPos / newZoom`
  *
