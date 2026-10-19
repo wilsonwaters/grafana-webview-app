@@ -13,8 +13,8 @@ import { setWebViewVisualization, FRAMABLE_URL } from './tc4Helpers';
  *     cross-origin to Grafana) uses EXACTLY
  *     sandbox="allow-scripts allow-same-origin" (never broadened) and is
  *     non-interactive (pointer-events: none). The per-mode sandbox is computed:
- *     a proxy-mode iframe gets sandbox="allow-scripts" only (sandbox.test.ts,
- *     WebViewPanel.test.tsx).
+ *     a proxy-mode iframe gets sandbox="allow-scripts" only, which
+ *     fr5-proxy-render.spec.ts asserts.
  *   - VR-1: an unsafe URL (javascript:) renders an error message, never an
  *     iframe, in the panel and in the editor preview.
  *   - AC 31 (scoped): the AUTHORITATIVE CSS-selector injection guard is

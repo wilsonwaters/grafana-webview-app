@@ -11,9 +11,10 @@ import {
   VIEWPORT_ZOOM_MIN,
   zoomAtCursor,
 } from '../viewport';
-import { iframeSandbox } from '../sandbox';
+import { resolveLoadMode } from '../loadMode';
 import { validateWebViewUrl } from '../url';
 import { viewportEditorTestIds } from './viewportEditorTestIds';
+import { WebViewFrame, type WebViewFrameTestIds } from './WebViewFrame';
 
 /**
  * The live, interactive viewport state the editor manipulates. A subset of the
@@ -24,6 +25,16 @@ interface ViewportState {
   viewportY: number;
   viewportZoom: number;
 }
+
+/** The editor preview's test ids for the elements that the shared frame renders. */
+const frameTestIds: WebViewFrameTestIds = {
+  iframe: viewportEditorTestIds.iframe,
+  invalidUrl: viewportEditorTestIds.invalidUrl,
+  backendLoading: viewportEditorTestIds.backendLoading,
+  proxyUnavailable: viewportEditorTestIds.proxyUnavailable,
+  proxyLoading: viewportEditorTestIds.proxyLoading,
+  proxyError: viewportEditorTestIds.proxyError,
+};
 
 /**
  * Multiplicative wheel-zoom step. A single wheel "notch" zooms in/out by 10 %.
@@ -64,11 +75,12 @@ const WHEEL_ZOOM_STEP = 1.1;
  * the preview reactive: Grafana re-renders the editor whenever any option changes,
  * so typing in the standard URL field above updates the preview automatically.
  *
- * ## URL safety (VR-1, VR-2)
- * The preview validates the URL with `validateWebViewUrl` before it builds an
- * iframe. An unsafe URL shows an error message in the preview (editor-time
- * feedback) and never an iframe. The iframe `sandbox` value comes from the
- * shared `iframeSandbox` helper, as in the view-mode panel.
+ * ## Preview frame (VR-1, VR-2, FR5)
+ * The preview uses the shared `WebViewFrame`, the same renderer as the
+ * view-mode panel, with the resolved load mode. An unsafe URL shows an error
+ * message in the preview (editor-time feedback) and never an iframe. Proxy mode
+ * fetches the rewritten HTML and renders it with `srcdoc`, as in the panel. The
+ * preview never auto-refreshes (`reloadKey` stays 0).
  *
  * ## Persistence note
  * A custom editor's `onChange` is bound to a single options path (Grafana wires
@@ -213,8 +225,8 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
 
   const hasUrl = opts.url.trim().length > 0;
   // VR-1: only a validated http(s) URL is previewed (and can be positioned).
-  const urlCheck = validateWebViewUrl(opts.url);
-  const canPreview = urlCheck.valid;
+  // WebViewFrame validates again before it builds an iframe.
+  const canPreview = validateWebViewUrl(opts.url).valid;
 
   // Wheel-zoom is attached as a NON-passive native listener so we can
   // preventDefault and stop the editor pane / page from scrolling while the
@@ -322,26 +334,21 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
         role="application"
         aria-label="Interactive viewport preview"
       >
-        {urlCheck.valid ? (
-          <iframe
+        {hasUrl ? (
+          <WebViewFrame
+            url={opts.url}
+            mode={resolveLoadMode(opts)}
+            hideSelectors={opts.hideSelectors}
+            reloadKey={0}
             title="Viewport preview"
-            src={urlCheck.url}
-            data-testid={viewportEditorTestIds.iframe}
-            className={styles.iframe}
-            // SECURITY (VR-2): the sandbox value comes from the shared helper.
-            sandbox={iframeSandbox('direct', urlCheck.url)}
-            referrerPolicy="no-referrer"
-            style={{
+            testIds={frameTestIds}
+            frameStyle={{
               width: iframeWidth,
               height: iframeHeight,
               transform: buildViewportTransform(viewport),
               transformOrigin: 'top left',
             }}
           />
-        ) : hasUrl ? (
-          <div className={styles.hint} role="alert" data-testid={viewportEditorTestIds.invalidUrl}>
-            This URL cannot be displayed. {urlCheck.message}
-          </div>
         ) : (
           <div className={styles.hint} data-testid={viewportEditorTestIds.hint}>
             Enter a URL in the &ldquo;URL&rdquo; field above to position the viewport.
@@ -535,11 +542,6 @@ const getStyles = (theme: GrafanaTheme2) => ({
     &:active {
       cursor: grabbing;
     }
-  `,
-  iframe: css`
-    border: none;
-    /* The container captures pan/zoom; events must not reach the page. */
-    pointer-events: none;
   `,
   hint: css`
     display: flex;

@@ -12,4 +12,8 @@ export const webViewPanelTestIds = {
   backendLoading: 'data-testid webview-panel-backend-loading',
   // VR-1: shown instead of an iframe when the URL is not an absolute http(s) URL.
   invalidUrl: 'data-testid webview-panel-invalid-url',
+  // FR5: shown while the proxied HTML is being fetched.
+  proxyLoading: 'data-testid webview-panel-proxy-loading',
+  // FR5: shown when the proxy request fails (status and backend message).
+  proxyError: 'data-testid webview-panel-proxy-error',
 };

@@ -14,10 +14,9 @@ import { setWebViewVisualization } from './tc4Helpers';
  *      because /check-frameable returns 403 with the fail-closed allowlist).
  *   3. Load-mode selection (Auto / Direct / Proxy radio group).
  *
- * SCOPE NOTE (FR5 deferred — issue #102): in-panel PROXY-mode render does NOT
- * work in v1 (Grafana resource-route XFO/CSP). These tests therefore never
- * assert that proxied content renders inside the panel; the config flow is fully
- * observable WITHOUT proxy render (button verdict Alert, radio selection, etc.).
+ * SCOPE NOTE: these tests cover the config flow only (button verdict Alert,
+ * radio selection, etc.). In-panel PROXY-mode rendering (FR5, issue #102) is
+ * covered by fr5-proxy-render.spec.ts.
  *
  * Determinism: the success path needs an allowlisted host. provisioning/plugins/
  * apps.yaml allowlists `example.com` so CI exercises the HTTP-200 verdict path.
