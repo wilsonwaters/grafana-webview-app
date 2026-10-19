@@ -1,107 +1,211 @@
-import React, { ChangeEvent, useState } from 'react';
+import React, { SyntheticEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { lastValueFrom } from 'rxjs';
 import { css } from '@emotion/css';
-import { AppPluginMeta, GrafanaTheme2, PluginConfigPageProps, PluginMeta } from '@grafana/data';
+import { AppPluginMeta, GrafanaTheme2, PluginConfigPageProps } from '@grafana/data';
 import { getBackendSrv } from '@grafana/runtime';
-import { Button, Field, FieldSet, Input, SecretInput, useStyles2 } from '@grafana/ui';
+import { Alert, Button, FieldSet, useStyles2 } from '@grafana/ui';
+import { DEFAULT_PLUGIN_SETTINGS } from '../../settingsTypes';
 import { testIds } from '../testIds';
+import { DomainEntry, domainFieldId } from './DomainEntry';
+import { GlobalLimits, limitFieldId } from './GlobalLimits';
+import { reloadPage } from './reloadPage';
+import {
+  buildJsonData,
+  DomainField,
+  DomainRow,
+  emptyDomainRow,
+  hasErrors,
+  JsonData,
+  LIMIT_KEYS,
+  LimitKey,
+  SettingsFormErrors,
+  SettingsFormState,
+  toFormState,
+  validateForm,
+} from './settingsForm';
 
-type AppPluginSettings = {
-  apiUrl?: string;
-};
+export interface AppConfigProps extends PluginConfigPageProps<AppPluginMeta<JsonData>> {}
 
-type State = {
-  // The URL to reach our custom API.
-  apiUrl: string;
-  // Tells us if the API key secret is set.
-  isApiKeySet: boolean;
-  // A secret key for our custom API.
-  apiKey: string;
-};
+const DOMAIN_FIELDS: DomainField[] = ['domain', 'rateLimitPerMin', 'allowedPorts'];
 
-export interface AppConfigProps extends PluginConfigPageProps<AppPluginMeta<AppPluginSettings>> {}
+/** Element ids of all invalid fields, in page order. */
+function invalidFieldIds(state: SettingsFormState, errors: SettingsFormErrors): string[] {
+  const ids: string[] = [];
+  for (const row of state.domains) {
+    for (const field of DOMAIN_FIELDS) {
+      if (errors.domains[row.key]?.[field]) {
+        ids.push(domainFieldId(row.key, field));
+      }
+    }
+  }
+  for (const key of LIMIT_KEYS) {
+    if (errors.limits[key]) {
+      ids.push(limitFieldId(key));
+    }
+  }
+  return ids;
+}
+
+function errorMessage(err: unknown): string {
+  const e = err as { data?: { message?: string }; message?: string; statusText?: string };
+  return e?.data?.message || e?.message || e?.statusText || 'Unknown error.';
+}
 
 const AppConfig = ({ plugin }: AppConfigProps) => {
-  const s = useStyles2(getStyles);
-  const { enabled, pinned, jsonData, secureJsonFields } = plugin.meta;
-  const [state, setState] = useState<State>({
-    apiUrl: jsonData?.apiUrl || '',
-    apiKey: '',
-    isApiKeySet: Boolean(secureJsonFields?.apiKey),
+  const styles = useStyles2(getStyles);
+  const { id: pluginId, enabled, pinned, jsonData } = plugin.meta;
+
+  const [form, setForm] = useState<SettingsFormState>(() => toFormState(jsonData));
+  // Errors show after the first save attempt and then update as the admin types. They do not
+  // show on blur: a message that appears on blur moves the page under the pointer, and the
+  // click on Save (or Add domain) that caused the blur is lost.
+  const [submitAttempted, setSubmitAttempted] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | undefined>();
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  // Id of an element to focus after the next render (a row that was just added).
+  const pendingFocus = useRef<string | undefined>(undefined);
+
+  const errors = useMemo(() => validateForm(form), [form]);
+  const invalidIds = useMemo(() => invalidFieldIds(form, errors), [form, errors]);
+
+  useEffect(() => {
+    if (pendingFocus.current) {
+      document.getElementById(pendingFocus.current)?.focus();
+      pendingFocus.current = undefined;
+    }
   });
 
-  const isSubmitDisabled = Boolean(!state.apiUrl || (!state.isApiKeySet && !state.apiKey));
+  const updateRow = (key: string, patch: Partial<DomainRow>) =>
+    setForm((prev) => ({
+      ...prev,
+      domains: prev.domains.map((row) => (row.key === key ? { ...row, ...patch } : row)),
+    }));
 
-  const onResetApiKey = () =>
-    setState({
-      ...state,
-      apiKey: '',
-      isApiKeySet: false,
-    });
-
-  const onChange = (event: ChangeEvent<HTMLInputElement>) => {
-    setState({
-      ...state,
-      [event.target.name]: event.target.value.trim(),
-    });
+  const addRow = () => {
+    const row = emptyDomainRow();
+    setForm((prev) => ({ ...prev, domains: [...prev.domains, row] }));
+    pendingFocus.current = domainFieldId(row.key, 'domain');
   };
 
-  const onSubmit = () => {
-    if (isSubmitDisabled) {
+  const removeRow = (key: string) => {
+    const index = form.domains.findIndex((row) => row.key === key);
+    const next = form.domains[index + 1] ?? form.domains[index - 1];
+    setForm((prev) => ({ ...prev, domains: prev.domains.filter((row) => row.key !== key) }));
+    // Keep keyboard focus on the page: move it to a neighbouring entry, or to "Add domain".
+    const target = next ? document.getElementById(domainFieldId(next.key, 'domain')) : addButtonRef.current;
+    target?.focus();
+  };
+
+  const updateLimit = (key: LimitKey, value: string) =>
+    setForm((prev) => ({ ...prev, limits: { ...prev.limits, [key]: value } }));
+
+  const onSubmit = async (event: SyntheticEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubmitAttempted(true);
+    setSaveError(undefined);
+    if (hasErrors(errors)) {
+      document.getElementById(invalidIds[0])?.focus();
       return;
     }
 
-    updatePluginAndReload(plugin.meta.id, {
-      enabled,
-      pinned,
-      jsonData: {
-        apiUrl: state.apiUrl,
-      },
-      // This cannot be queried later by the frontend.
-      // We don't want to override it in case it was set previously and left untouched now.
-      secureJsonData: state.isApiKeySet
-        ? undefined
-        : {
-            apiKey: state.apiKey,
-          },
-    });
+    setSaving(true);
+    try {
+      await lastValueFrom(
+        getBackendSrv().fetch({
+          url: `/api/plugins/${pluginId}/settings`,
+          method: 'POST',
+          // secureJsonData is left out on purpose: Grafana then keeps the stored secrets unchanged.
+          data: { enabled, pinned, jsonData: buildJsonData(jsonData, form) },
+          showErrorAlert: false,
+        })
+      );
+      // Grafana has no supported way to refresh plugin meta in place.
+      reloadPage();
+    } catch (err) {
+      setSaveError(errorMessage(err));
+      setSaving(false);
+    }
   };
 
+  const typedDomainLimit = form.limits.rateLimitPerDomainPerMin.trim();
+  const globalDomainLimit =
+    typedDomainLimit && !errors.limits.rateLimitPerDomainPerMin
+      ? typedDomainLimit
+      : String(DEFAULT_PLUGIN_SETTINGS.rateLimitPerDomainPerMin);
+  const showSummary = submitAttempted && invalidIds.length > 0;
+
   return (
-    <form onSubmit={onSubmit}>
-      <FieldSet label="API Settings">
-        <Field label="API Key" description="A secret key for authenticating to our custom API">
-          <SecretInput
-            width={60}
-            id="config-api-key"
-            data-testid={testIds.appConfig.apiKey}
-            name="apiKey"
-            value={state.apiKey}
-            isConfigured={state.isApiKeySet}
-            placeholder={'Your secret API key'}
-            onChange={onChange}
-            onReset={onResetApiKey}
-          />
-        </Field>
+    <form onSubmit={onSubmit} noValidate className={styles.form} data-testid={testIds.appConfig.form}>
+      <FieldSet label="Domain allowlist">
+        <p className={styles.intro}>
+          The backend proxy and the Test URL check connect only to the domains in this list. Direct (iframe) mode does
+          not use the allowlist.
+        </p>
 
-        <Field label="API Url" description="" className={s.marginTop}>
-          <Input
-            width={60}
-            name="apiUrl"
-            id="config-api-url"
-            data-testid={testIds.appConfig.apiUrl}
-            value={state.apiUrl}
-            placeholder={`E.g.: http://mywebsite.com/api/v1`}
-            onChange={onChange}
-          />
-        </Field>
+        {form.domains.length === 0 && (
+          <Alert severity="info" title="The allowlist is empty" data-testid={testIds.appConfig.emptyAllowlist}>
+            The proxy denies every request until you add a domain. An empty allowlist is the safe default for a new
+            installation.
+          </Alert>
+        )}
 
-        <div className={s.marginTop}>
-          <Button type="submit" data-testid={testIds.appConfig.submit} disabled={isSubmitDisabled}>
-            Save API settings
-          </Button>
-        </div>
+        {form.domains.map((row, index) => (
+          <DomainEntry
+            key={row.key}
+            index={index}
+            row={row}
+            errors={submitAttempted ? (errors.domains[row.key] ?? {}) : {}}
+            globalDomainLimit={globalDomainLimit}
+            onChange={updateRow}
+            onRemove={removeRow}
+          />
+        ))}
+
+        <Button
+          ref={addButtonRef}
+          type="button"
+          variant="secondary"
+          icon="plus"
+          onClick={addRow}
+          data-testid={testIds.appConfig.addDomain}
+        >
+          Add domain
+        </Button>
       </FieldSet>
+
+      <FieldSet label="Global limits">
+        <p className={styles.intro}>
+          These limits protect Grafana and the sites that it connects to. Leave a field empty to use the default.
+        </p>
+        <GlobalLimits values={form.limits} errors={submitAttempted ? errors.limits : {}} onChange={updateLimit} />
+      </FieldSet>
+
+      {showSummary && (
+        <Alert severity="error" title="The settings were not saved">
+          {invalidIds.length === 1 ? 'One field has an error.' : `${invalidIds.length} fields have errors.`} Correct the
+          fields marked in red, then save again.
+        </Alert>
+      )}
+      {saveError && (
+        <Alert severity="error" title="The settings could not be saved">
+          {saveError}
+        </Alert>
+      )}
+
+      <div className={styles.actions}>
+        <Button
+          type="submit"
+          disabled={saving}
+          icon={saving ? 'spinner' : undefined}
+          data-testid={testIds.appConfig.submit}
+        >
+          {saving ? 'Saving settings' : 'Save settings'}
+        </Button>
+        <span className={styles.hint}>
+          The backend uses the saved settings for the next request. You do not need to restart Grafana.
+        </span>
+      </div>
     </form>
   );
 };
@@ -109,32 +213,22 @@ const AppConfig = ({ plugin }: AppConfigProps) => {
 export default AppConfig;
 
 const getStyles = (theme: GrafanaTheme2) => ({
-  colorWeak: css`
-    color: ${theme.colors.text.secondary};
-  `,
-  marginTop: css`
-    margin-top: ${theme.spacing(3)};
-  `,
+  form: css({
+    maxWidth: theme.breakpoints.values.xl,
+  }),
+  intro: css({
+    color: theme.colors.text.secondary,
+    marginBottom: theme.spacing(2),
+  }),
+  actions: css({
+    display: 'flex',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: theme.spacing(2),
+    marginTop: theme.spacing(1),
+  }),
+  hint: css({
+    color: theme.colors.text.secondary,
+    fontSize: theme.typography.bodySmall.fontSize,
+  }),
 });
-
-const updatePluginAndReload = async (pluginId: string, data: Partial<PluginMeta<AppPluginSettings>>) => {
-  try {
-    await updatePlugin(pluginId, data);
-
-    // Reloading the page as the changes made here wouldn't be propagated to the actual plugin otherwise.
-    // This is not ideal, however unfortunately currently there is no supported way for updating the plugin state.
-    window.location.reload();
-  } catch (e) {
-    console.error('Error while updating the plugin', e);
-  }
-};
-
-const updatePlugin = async (pluginId: string, data: Partial<PluginMeta>) => {
-  const response = await getBackendSrv().fetch({
-    url: `/api/plugins/${pluginId}/settings`,
-    method: 'POST',
-    data,
-  });
-
-  return lastValueFrom(response);
-};

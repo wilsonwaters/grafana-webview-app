@@ -4,11 +4,13 @@ export const appTestIds = {
   },
 };
 
-// Backwards-compatible alias retained for the AppConfig surface.
 export const testIds = {
   appConfig: {
-    apiKey: 'data-testid ac-api-key',
-    apiUrl: 'data-testid ac-api-url',
+    form: 'data-testid ac-settings-form',
+    domainEntry: 'data-testid ac-domain-entry',
+    addDomain: 'data-testid ac-add-domain',
+    emptyAllowlist: 'data-testid ac-empty-allowlist',
+    privateIpWarning: 'data-testid ac-private-ip-warning',
     submit: 'data-testid ac-submit-form',
   },
 };
