@@ -3,3 +3,6 @@ linters:
   exclusions:
     paths:
       - node_modules
+      # Copied unchanged from golang.org/x/net/html (see pkg/internal/htmlparse
+      # package doc); kept identical to upstream rather than lint-clean.
+      - pkg/internal/htmlparse/(const|doctype|foreign|node|parse)\.go$
