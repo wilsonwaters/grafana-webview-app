@@ -251,7 +251,7 @@ func (b *growthBudget) allow(oldLen, newLen int) bool {
 func ensureBase(doc *goquery.Document, pageURL *url.URL) (*url.URL, *html.Node) {
 	base := pageURL
 	var node *html.Node
-	if existing := doc.Find("base[href]").First(); existing.Length() > 0 {
+	if existing := documentBase(doc); existing.Length() > 0 {
 		node = existing.Get(0)
 		if href, ok := existing.Attr("href"); ok {
 			if ref, err := url.Parse(strings.TrimSpace(href)); err == nil {
@@ -281,6 +281,26 @@ func ensureBase(doc *goquery.Document, pageURL *url.URL) (*url.URL, *html.Node) 
 	}
 	parent.InsertBefore(node, parent.FirstChild)
 	return base, node
+}
+
+// documentBase returns the <base href> element that sets the document base URL
+// in a browser: the first one in the HTML namespace that is not inside a
+// <template>. A <base> in SVG or MathML content, or in template contents, does
+// not change the base URL, so it is ignored. The selection is empty when the
+// document has no such element.
+func documentBase(doc *goquery.Document) *goquery.Selection {
+	return doc.Find("base[href]").FilterFunction(func(_ int, s *goquery.Selection) bool {
+		n := s.Get(0)
+		if n.Namespace != "" {
+			return false
+		}
+		for p := n.Parent; p != nil; p = p.Parent {
+			if p.Type == html.ElementNode && p.DataAtom == atom.Template && p.Namespace == "" {
+				return false
+			}
+		}
+		return true
+	}).First()
 }
 
 // injectSandboxCompat inserts <meta name="referrer" content="no-referrer"> and

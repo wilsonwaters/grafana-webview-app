@@ -356,6 +356,47 @@ func TestBaseNonHTTPFallsBackToPage(t *testing.T) {
 	}
 }
 
+// TestBaseIgnoresTemplateAndForeignContent covers RV2: a <base href> inside
+// <template> contents or in SVG/MathML content does not set the document base
+// URL in a browser, so the rewriter ignores it. It stays where it is, the base
+// the rewriter uses is the page URL (or the first HTML-namespace base), and
+// relative refs resolve against that.
+func TestBaseIgnoresTemplateAndForeignContent(t *testing.T) {
+	cases := map[string]string{
+		"template in head": `<html><head><template><base href="http://evil.example/t/"></template></head><body><img src="a.png"></body></html>`,
+		"template in body": `<html><head></head><body><template><div><base href="http://evil.example/t/"></div></template><img src="a.png"></body></html>`,
+		"svg":              `<html><head></head><body><svg><base href="http://evil.example/s/"></base></svg><img src="a.png"></body></html>`,
+		"math":             `<html><head></head><body><math><base href="http://evil.example/m/"></base></math><img src="a.png"></body></html>`,
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			doc := rewriteDoc(t, in, examplePage)
+			first := doc.Find("head").Children().First()
+			if goquery.NodeName(first) != "base" {
+				t.Fatalf("first head child = %q, want the injected base", goquery.NodeName(first))
+			}
+			if href, _ := first.Attr("href"); href != examplePage {
+				t.Errorf("document base href = %q, want the page URL %q", href, examplePage)
+			}
+			if got := attr(t, doc, "img", "src"); got != "http://example.com/dir/a.png" {
+				t.Errorf("img src = %q, want it resolved against the page URL", got)
+			}
+			if n := doc.Find(`base[href^="http://evil.example/"]`).Length(); n != 1 {
+				t.Errorf("ignored base count = %d, want it left in place", n)
+			}
+		})
+	}
+
+	// A real HTML base after an ignored one is still used.
+	doc := rewriteDoc(t, `<html><head><template><base href="http://evil.example/t/"></template><base href="/app/"></head><body><img src="a.png"></body></html>`, examplePage)
+	if href := attr(t, doc, "head > base", "href"); href != "http://example.com/app/" {
+		t.Errorf("document base href = %q, want http://example.com/app/", href)
+	}
+	if got := attr(t, doc, "img", "src"); got != "http://example.com/app/a.png" {
+		t.Errorf("img src = %q, want http://example.com/app/a.png", got)
+	}
+}
+
 // TestBaseAffectsRelativeResolution covers "refs resolve against the effective
 // base (page URL combined with existing <base>)".
 func TestBaseAffectsRelativeResolution(t *testing.T) {
