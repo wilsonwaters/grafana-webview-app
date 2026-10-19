@@ -250,7 +250,7 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 // failure: the error itself can hold the resolved IP addresses of the target
 // (for example a blocked internal address), so it goes to the server log only.
 func (p *proxyHandler) unreachableVerdict(ctx context.Context, targetURL string, err error) frameableResponse {
-	p.logger.FromContext(ctx).Warn("check-frameable fetch failed", "url", targetURL, "error", err)
+	p.logger.FromContext(ctx).Warn("check-frameable fetch failed", "url", redactURL(targetURL), "error", redactErrorURL(err))
 	return frameableResponse{
 		Frameable:       false,
 		Reason:          "upstream unreachable: " + fetchFailureReason(err),

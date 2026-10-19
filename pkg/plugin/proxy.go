@@ -352,6 +352,49 @@ func auditUser(ctx context.Context) string {
 	return auditAnonymousUser
 }
 
+// redactedQueryValue replaces every query value in a logged URL.
+const redactedQueryValue = "redacted"
+
+// redactURL returns raw in the form the logs record: query values are replaced
+// with "redacted" (the keys and their order are kept), a fragment is dropped
+// and user information is replaced, because tile and API URLs often carry keys
+// in the query. The audit placeholders pass through; a value that does not
+// parse as a URL is logged as auditInvalidURL.
+func redactURL(raw string) string {
+	if raw == auditMissingURL || raw == auditInvalidURL {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return auditInvalidURL
+	}
+	if u.User != nil {
+		u.User = url.User(redactedQueryValue)
+	}
+	u.Fragment, u.RawFragment = "", ""
+	if u.RawQuery != "" {
+		parts := strings.Split(u.RawQuery, "&")
+		for i, part := range parts {
+			if key, _, hasValue := strings.Cut(part, "="); hasValue {
+				parts[i] = key + "=" + redactedQueryValue
+			}
+		}
+		u.RawQuery = strings.Join(parts, "&")
+	}
+	u.ForceQuery = false
+	return u.String()
+}
+
+// redactErrorURL returns err for logging with the URL of a *url.Error (which
+// net/http's client puts in the message) redacted like redactURL.
+func redactErrorURL(err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		return &url.Error{Op: ue.Op, URL: redactURL(ue.URL), Err: ue.Err}
+	}
+	return err
+}
+
 // instanceIDFromContext derives the per-instance rate-limit key from the plugin
 // request context. We key on the Grafana tenant namespace so the per-instance
 // tier is shared across all viewers of a tenant. When no plugin context /
@@ -506,9 +549,11 @@ func (p *proxyHandler) endAudit(req *http.Request, a *requestAudit) {
 	p.metrics.inFlight.Dec()
 	p.metrics.observeRequest(a.rec.status, duration.Seconds(), a.denied)
 	user := auditUser(req.Context())
-	p.logger.Info("proxy request",
+	logger := p.logger.FromContext(req.Context())
+	loggedURL := redactURL(a.url)
+	logger.Info("proxy request",
 		"endpoint", a.endpoint,
-		"url", a.url,
+		"url", loggedURL,
 		"user", user,
 		"status", a.rec.status,
 		"bytes", a.rec.bytes,
@@ -517,9 +562,9 @@ func (p *proxyHandler) endAudit(req *http.Request, a *requestAudit) {
 	)
 	for _, permit := range a.permits.snapshot() {
 		p.metrics.privateIPPermitted.WithLabelValues(permit.reason).Inc()
-		p.logger.Warn("proxy private-ip permitted by opt-in",
+		logger.Warn("proxy private-ip permitted by opt-in",
 			"endpoint", a.endpoint,
-			"url", a.url,
+			"url", loggedURL,
 			"user", user,
 			"permittedIP", permit.ip.String(),
 			"ipClass", permit.reason,
@@ -823,7 +868,7 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			denied = proxyErrorHandler(w, r, err)
 			// The client gets only the reason; the error, which can name the
 			// resolved IP addresses of the target, goes to the server log.
-			p.logger.FromContext(r.Context()).Warn("proxy upstream error", "url", target.String(), "reason", denied, "error", err)
+			p.logger.FromContext(r.Context()).Warn("proxy upstream error", "url", redactURL(target.String()), "reason", denied, "error", redactErrorURL(err))
 		},
 	}
 

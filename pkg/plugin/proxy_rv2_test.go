@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 )
 
 // TestProxyHostileParseRefused413 covers RV2: pages that make an unbounded
@@ -250,6 +252,73 @@ func TestTargetURLTrimmedAndEncodedPathKept(t *testing.T) {
 	want := "/files/a%2Fb/c.txt?x=%2F&y=1"
 	if len(gotURIs) != 2 || gotURIs[0] != want || gotURIs[1] != want {
 		t.Fatalf("upstream request URIs = %q, want %q twice", gotURIs, want)
+	}
+}
+
+// TestRedactURL covers RV1-23: logged URLs keep the scheme, host, path and
+// query keys, but not query values, fragments or user information.
+func TestRedactURL(t *testing.T) {
+	cases := map[string]string{
+		"http://tiles.example/z/1?apikey=SECRET&z=3&flag#token=abc": "http://tiles.example/z/1?apikey=redacted&z=redacted&flag",
+		"https://u:p@example.com/x":                                 "https://redacted@example.com/x",
+		"http://example.com/page":                                   "http://example.com/page",
+		"http://example.com/a%2Fb?q=%2F":                            "http://example.com/a%2Fb?q=redacted",
+		auditMissingURL:                                             auditMissingURL,
+		auditInvalidURL:                                             auditInvalidURL,
+		"http://example.com/%zz?k=v":                                auditInvalidURL,
+	}
+	for in, want := range cases {
+		if got := redactURL(in); got != want {
+			t.Errorf("redactURL(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// rv2ContextLogger is a capturing logger whose FromContext returns a separate
+// child, so a test can tell whether a line was logged through FromContext.
+type rv2ContextLogger struct {
+	ac19CapturingLogger
+	child *ac19CapturingLogger
+}
+
+func (l *rv2ContextLogger) FromContext(context.Context) log.Logger { return l.child }
+
+// TestAuditRedactsQueryAndUsesContextLogger covers RV1-23: the audit line of
+// /proxy and /check-frameable records the target with its query values
+// redacted, and is written through the context logger. The upstream still
+// receives the real query.
+func TestAuditRedactsQueryAndUsesContextLogger(t *testing.T) {
+	var gotQuery string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		w.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer upstream.Close()
+	p := newTestHandler(t, settingsWith(allowExample(DomainOptions{})), upstream)
+	logs := &rv2ContextLogger{child: &ac19CapturingLogger{}}
+	p.logger = logs
+
+	const target = "http://example.com/tiles/1?apikey=SECRET&z=3"
+	if rec := doProxy(p, target); rec.Code != http.StatusOK {
+		t.Fatalf("/proxy status %d", rec.Code)
+	}
+	if gotQuery != "apikey=SECRET&z=3" {
+		t.Fatalf("upstream query = %q, want the real query", gotQuery)
+	}
+	_ = doCheckFrameable(checkFrameableHandler{p: p}, target)
+
+	if len(logs.infoEntries()) != 0 {
+		t.Errorf("audit lines went to the base logger, want the context logger")
+	}
+	entries := logs.child.infoEntries()
+	if len(entries) != 2 {
+		t.Fatalf("context logger got %d audit lines, want 2", len(entries))
+	}
+	for _, e := range entries {
+		if got := e.kv["url"]; got != "http://example.com/tiles/1?apikey=redacted&z=redacted" {
+			t.Errorf("%s audit url = %v, want the query values redacted", e.kv["endpoint"], got)
+		}
 	}
 }
 
