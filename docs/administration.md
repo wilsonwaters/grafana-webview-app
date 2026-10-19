@@ -218,7 +218,7 @@ accidentally disable a limit by zeroing it — the default is reapplied.
 
 | Configuration page label | `jsonData` key | Default | What it controls |
 | --- | --- | --- | --- |
-| Rate limit per Grafana instance | `rateLimitPerInstancePerMin` | `60` | Max proxy requests per minute for one Grafana **organisation** (token bucket). Each organisation has its own budget. Over-limit → **429**. |
+| Rate limit per organisation | `rateLimitPerInstancePerMin` | `60` | Max proxy requests per minute for one Grafana **organisation** (token bucket). Each organisation has its own budget. Over-limit → **429**. |
 | Rate limit per domain | `rateLimitPerDomainPerMin` | `30` | Max proxy requests per minute to any single target domain. Over-limit → **429**. Overridable per domain via `options.rateLimitPerMin`. |
 | Maximum concurrent requests | `maxConcurrentRequests` | `10` | Max in-flight proxy requests at once. Exceeded → **429**. |
 | Maximum response size | `maxResponseBytes` | `5242880` (5 MiB) | Max upstream response body size. Oversize → **413**. Also bounds the **gzip-decoded** size (decompression-bomb guard) and the size of the rewritten HTML. |

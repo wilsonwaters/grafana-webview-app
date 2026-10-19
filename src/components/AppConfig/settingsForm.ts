@@ -55,8 +55,8 @@ export const LIMIT_SPECS: readonly LimitSpec[] = [
   },
   {
     key: 'rateLimitPerInstancePerMin',
-    label: 'Rate limit per Grafana instance',
-    description: 'Total proxy requests per minute for this Grafana instance.',
+    label: 'Rate limit per organisation',
+    description: 'Total proxy requests per minute for each Grafana organisation.',
     unit: 'requests/min',
     min: 1,
     max: GO_INT32_MAX,

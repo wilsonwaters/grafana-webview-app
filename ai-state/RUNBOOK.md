@@ -116,9 +116,9 @@ docker run --rm --network container:wilsonwaters-webview-app -v "${PWD}:/work" `
   mcr.microsoft.com/playwright:v1.64.1-noble npx playwright test --retries=2
 ```
 
-Use `--force-recreate` between runs. `tests/appConfig.spec.ts` saves the app
-settings, which replaces `jsonData` and drops the provisioned allowlist, so the
-TC4 success-path test skips itself when it runs after that spec.
+Use `--force-recreate` between runs. Since AU1 the Configuration page merges
+into `jsonData`, and `tests/appConfig.spec.ts` only adds and removes its own
+entry, so no spec depends on test order or skips because of another spec.
 
 ### Dependency audit
 

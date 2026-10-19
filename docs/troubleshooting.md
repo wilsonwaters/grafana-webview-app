@@ -316,7 +316,7 @@ See [Administration guide §4](./administration.md#4-tuning).
 `{reason="concurrency"}` increments.
 
 **Cause:** a rate tier or the concurrency cap was exceeded — the per-organisation
-tier (**Rate limit per Grafana instance**, `rateLimitPerInstancePerMin`,
+tier (**Rate limit per organisation**, `rateLimitPerInstancePerMin`,
 default 60), the per-domain tier (`rateLimitPerDomainPerMin`, default 30), or
 `maxConcurrentRequests` (default 10). Every proxy-mode panel on every open
 dashboard makes one request per load and per auto-refresh, and **Test URL**
