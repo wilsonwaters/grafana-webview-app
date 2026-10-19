@@ -136,6 +136,21 @@ describe('panels/webview/ViewportEditor', () => {
     expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute('sandbox', 'allow-scripts');
   });
 
+  test('a URL edit from cross-origin to the Grafana origin mounts a NEW preview iframe with allow-scripts only', () => {
+    const { props, options } = buildProps({ url: 'https://example.com' });
+    const { rerender } = render(<ViewportEditor {...props} />);
+    const before = screen.getByTestId(viewportEditorTestIds.iframe);
+    expect(before).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+
+    options.url = 'http://localhost/d/abc';
+    rerender(<ViewportEditor {...props} />);
+
+    const after = screen.getByTestId(viewportEditorTestIds.iframe);
+    expect(after).not.toBe(before);
+    expect(before.isConnected).toBe(false);
+    expect(after).toHaveAttribute('sandbox', 'allow-scripts');
+  });
+
   test('readout reflects the current X / Y / zoom values', () => {
     const { props } = buildProps({ viewportX: 42, viewportY: 7, viewportZoom: 2 });
     render(<ViewportEditor {...props} />);

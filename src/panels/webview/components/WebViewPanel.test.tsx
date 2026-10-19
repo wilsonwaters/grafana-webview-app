@@ -608,6 +608,65 @@ describe('panels/webview/WebViewPanel', () => {
       expect(iframe.getAttribute('sandbox')).not.toContain('allow-same-origin');
     });
 
+    test('a URL edit from cross-origin to the Grafana origin mounts a NEW iframe with allow-scripts only', () => {
+      // A browser applies the sandbox flags that are set when a navigation
+      // starts. If the mounted iframe were reused, React would write the new
+      // src before the new sandbox, and the Grafana-origin page would load with
+      // the old allow-same-origin flag.
+      const { rerender } = render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+      const before = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(before).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+
+      rerender(<WebViewPanel {...buildProps({ url: 'http://localhost/api/user', loadMode: 'direct' })} />);
+
+      const after = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(after).not.toBe(before);
+      expect(before.isConnected).toBe(false);
+      expect(after).toHaveAttribute('sandbox', 'allow-scripts');
+      expect(after).toHaveAttribute('src', 'http://localhost/api/user');
+    });
+
+    test('a URL edit from the Grafana origin to cross-origin also mounts a new iframe', () => {
+      const { rerender } = render(
+        <WebViewPanel {...buildProps({ url: 'http://localhost/d/abc', loadMode: 'direct' })} />
+      );
+      const before = screen.getByTestId(webViewPanelTestIds.iframe);
+
+      rerender(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+
+      const after = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(after).not.toBe(before);
+      expect(after).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+    });
+
+    test('a URL edit with the same sandbox value still mounts a new iframe', () => {
+      const { rerender } = render(<WebViewPanel {...buildProps({ url: 'https://a.example.com', loadMode: 'direct' })} />);
+      const before = screen.getByTestId(webViewPanelTestIds.iframe);
+
+      rerender(<WebViewPanel {...buildProps({ url: 'https://b.example.com', loadMode: 'direct' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).not.toBe(before);
+    });
+
+    test('a viewport-only change keeps the same iframe (no reload)', () => {
+      const { rerender } = render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+      const before = screen.getByTestId(webViewPanelTestIds.iframe);
+
+      rerender(
+        <WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct', viewportX: 50, viewportZoom: 2 })} />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toBe(before);
+    });
+
+    test('the sandbox attribute is set before src on the iframe element', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+
+      const names = screen.getByTestId(webViewPanelTestIds.iframe).getAttributeNames();
+      expect(names.indexOf('sandbox')).toBeGreaterThanOrEqual(0);
+      expect(names.indexOf('sandbox')).toBeLessThan(names.indexOf('src'));
+    });
+
     test('every iframe keeps referrerPolicy="no-referrer"', () => {
       const { container } = render(
         <>
@@ -847,6 +906,33 @@ describe('panels/webview/WebViewPanel', () => {
 
       expect(proxyFetch.calls).toHaveLength(2);
       expect(fetchParams(1).getAll('hide')).toEqual(['.a', '.b']);
+    });
+
+    test('switching proxy → direct for the same URL mounts a new iframe with the direct flags', () => {
+      const { rerender } = render(<WebViewPanel {...proxyProps()} />);
+      respondHtml(proxyFetch.calls[0], '<p>x</p>');
+      const srcdocFrame = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(srcdocFrame).toHaveAttribute('sandbox', 'allow-scripts');
+
+      rerender(<WebViewPanel {...proxyProps({ loadMode: 'direct' })} />);
+
+      const directFrame = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(directFrame).not.toBe(srcdocFrame);
+      expect(directFrame).not.toHaveAttribute('srcdoc');
+      expect(directFrame).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+    });
+
+    test('switching direct → proxy never reuses the direct iframe', () => {
+      const { rerender } = render(<WebViewPanel {...proxyProps({ loadMode: 'direct' })} />);
+      const directFrame = screen.getByTestId(webViewPanelTestIds.iframe);
+
+      rerender(<WebViewPanel {...proxyProps()} />);
+      respondHtml(proxyFetch.calls[0], '<p>x</p>');
+
+      const srcdocFrame = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(srcdocFrame).not.toBe(directFrame);
+      expect(srcdocFrame).toHaveAttribute('sandbox', 'allow-scripts');
+      expect(srcdocFrame).not.toHaveAttribute('src');
     });
 
     test('a viewport-only change does not refetch', () => {
