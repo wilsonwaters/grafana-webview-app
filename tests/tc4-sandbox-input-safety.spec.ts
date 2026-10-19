@@ -110,9 +110,8 @@ test.describe('TC4 editor-input safety (AC31)', () => {
     test.setTimeout(180000);
     await setWebViewVisualization(panelEditPage, page);
 
-    // A value combining CSS-injection and HTML/script-injection probes. v1 has no
-    // dedicated hideSelectors field, so the URL field is the author-controlled
-    // text input we exercise.
+    // A value combining CSS-injection and HTML/script-injection probes, entered
+    // into the URL field and the Hide elements (selector) field.
     const malicious = '"><img src=x onerror=alert(1)>}*{display:none}</style><script>alert(2)</script>';
 
     const urlField = page.getByRole('textbox', { name: 'URL' });
@@ -141,8 +140,21 @@ test.describe('TC4 editor-input safety (AC31)', () => {
     await preview.scrollIntoViewIfNeeded();
     await expect(preview).toBeVisible();
 
-    // The Test URL button is still operable (the editor did not crash).
+    // The Test URL control still renders (the editor did not crash). It never
+    // sends an invalid URL: the button is disabled and a hint says why.
     const testButton = page.getByTestId(frameabilityEditorTestIds.testButton);
-    await expect(testButton).toBeEnabled();
+    await testButton.scrollIntoViewIfNeeded();
+    await expect(testButton).toBeDisabled();
+    await expect(page.getByTestId(frameabilityEditorTestIds.invalidUrlHint)).toContainText('cannot be tested');
+
+    // The same value in the selector field is kept as data and injects nothing.
+    const hideField = page.getByRole('textbox', { name: 'Hide elements (proxy mode)' });
+    await hideField.scrollIntoViewIfNeeded();
+    await hideField.fill(malicious);
+    await hideField.blur();
+    await expect(hideField).toHaveValue(malicious);
+    expect(await page.locator('img[src="x"]').count()).toBe(0);
+    expect(await page.locator('script:has-text("alert(2)")').count()).toBe(0);
+    await expect(preview).toBeVisible();
   });
 });
