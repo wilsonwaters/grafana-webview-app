@@ -98,10 +98,11 @@ func auditUser(ctx context.Context) string {
 const redactedQueryValue = "redacted"
 
 // redactURL returns raw in the form the logs record: query values are replaced
-// with "redacted" (the keys and their order are kept), a fragment is dropped
-// and user information is replaced, because tile and API URLs often carry keys
-// in the query. The audit placeholders pass through; a value that does not
-// parse as a URL is logged as auditInvalidURL.
+// with "redacted" (the keys and their order are kept), a query part without
+// "=" is replaced whole (it can be a bare key, such as "?SECRETKEY"), a
+// fragment is dropped and user information is replaced, because tile and API
+// URLs often carry keys in the query. The audit placeholders pass through; a
+// value that does not parse as a URL is logged as auditInvalidURL.
 func redactURL(raw string) string {
 	if raw == auditMissingURL || raw == auditInvalidURL {
 		return raw
@@ -119,6 +120,8 @@ func redactURL(raw string) string {
 		for i, part := range parts {
 			if key, _, hasValue := strings.Cut(part, "="); hasValue {
 				parts[i] = key + "=" + redactedQueryValue
+			} else if part != "" {
+				parts[i] = redactedQueryValue
 			}
 		}
 		u.RawQuery = strings.Join(parts, "&")

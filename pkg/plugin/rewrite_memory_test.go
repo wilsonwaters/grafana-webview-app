@@ -62,6 +62,17 @@ func adversarialPages(size int) map[string][]byte {
 		fmt.Fprintf(&bigTag, " %x", i)
 	}
 	bigTag.WriteString(">")
+	// Repeated <body> tags, each with a new attribute: each tag merges all the
+	// attributes so far into the first <body>, which is quadratic work.
+	var merge strings.Builder
+	merge.WriteString("<!doctype html>")
+	for i := 0; ; i++ {
+		tag := fmt.Sprintf("<body a%d>", i)
+		if merge.Len()+len(tag) > size {
+			break
+		}
+		merge.WriteString(tag)
+	}
 	return map[string][]byte{
 		"void-elements":  fill("<!doctype html><body>", "<br>"),
 		"attributes":     fill("<!doctype html><body>", "<br a b c d e f g h i j k l m n o p q r s t u v w x y z>"),
@@ -70,6 +81,10 @@ func adversarialPages(size int) map[string][]byte {
 		"reconstruction": fill(reconstruction.String(), "<p>x"),
 		"text-appends":   fill("<!doctype html><body>", "x</q>"),
 		"big-tag":        []byte(bigTag.String()),
+		// Each "<tr><table>" makes three elements from two tokens: an implied
+		// <tbody>, the <tr> and a new <table>.
+		"implied-tables":  fill("<!doctype html><body><table>", "<tr><table>"),
+		"attribute-merge": []byte(merge.String()),
 	}
 }
 

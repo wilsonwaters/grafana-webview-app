@@ -387,6 +387,28 @@ func TestCheckFrameableXFrameOptionsEveryLine(t *testing.T) {
 	}
 }
 
+// TestXFrameOptionsMultipleValuesReasonIsFixed checks that the verdict reason
+// for several X-Frame-Options values is fixed text: it does not repeat the
+// upstream's header values, which the upstream controls.
+func TestXFrameOptionsMultipleValuesReasonIsFixed(t *testing.T) {
+	for _, lines := range [][]string{
+		{"SAMEORIGIN, DENY"},
+		{"ALLOW-FROM https://evil.example/<img src=x onerror=alert(1)>", "DENY"},
+		{"DENY", "attacker-chosen text"},
+	} {
+		blocked, reason := xFrameOptionsBlocks(lines)
+		if !blocked || reason != xFrameOptionsMultipleReason {
+			t.Errorf("xFrameOptionsBlocks(%q) = %v, %q; want true, %q", lines, blocked, reason, xFrameOptionsMultipleReason)
+		}
+	}
+	// One distinct value, repeated or not, keeps its own reason.
+	for _, lines := range [][]string{{"deny"}, {"DENY", " deny"}} {
+		if _, reason := xFrameOptionsBlocks(lines); reason != "X-Frame-Options: DENY" {
+			t.Errorf("xFrameOptionsBlocks(%q) reason = %q, want %q", lines, reason, "X-Frame-Options: DENY")
+		}
+	}
+}
+
 // TestCSPFrameAncestorsBlocks covers the conservative CSP frame-ancestors rule.
 func TestCSPFrameAncestorsBlocks(t *testing.T) {
 	cases := []struct {

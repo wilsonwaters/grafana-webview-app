@@ -258,7 +258,7 @@ size of the page, so the plugin bounds it:
   timeout (then **504**).
 - The parser stops at fixed limits: one tag or text run at most 2 MiB, an
   estimated tree of at most 48 MiB. A page over a limit gets **413**. Ordinary
-  pages up to about 6.5 MiB fit.
+  pages up to about 7 MiB fit.
 - A page the parser cannot read (for example, more than 512 nested elements) gets
   **502**. The unrewritten page is never served.
 - The plugin process sets a Go soft memory limit of 256 MiB. To change it, set
@@ -267,8 +267,8 @@ size of the page, so the plugin bounds it:
   passes it to the plugin process.
 
 Worst-case plugin memory is roughly
-`2 × maxConcurrentRequests × maxResponseBytes + 220 MiB`. With the defaults
-(10 × 5 MiB) it measured about 225 MiB under hostile pages. On a small host such
+`2 × maxConcurrentRequests × maxResponseBytes + 240 MiB`. With the defaults
+(10 × 5 MiB) it measured about 205 MiB under hostile pages. On a small host such
 as a 1 GB Raspberry Pi, keep the defaults or lower `maxResponseBytes` or
 `maxConcurrentRequests`.
 

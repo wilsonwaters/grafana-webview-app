@@ -7,8 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/net/html"
 )
@@ -45,17 +47,29 @@ func parseBoth(t *testing.T, input string, lim Limits) (upstream, ours string) {
 	return ub.String(), ob.String()
 }
 
+// skipUnlessCI skips the test, or fails it when the CI environment variable is
+// set: in CI the html5lib corpus must be available, so that the comparison
+// with upstream always runs there.
+func skipUnlessCI(t *testing.T, format string, args ...any) {
+	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Fatalf(format+" (CI is set, so this test must not skip)", args...)
+	}
+	t.Skipf(format, args...)
+}
+
 // moduleDir returns the directory of the golang.org/x/net module that go.mod
-// selects, or skips the test when the go command cannot report it.
+// selects, or skips the test (outside CI) when the go command cannot report
+// it.
 func moduleDir(t *testing.T) string {
 	t.Helper()
 	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "golang.org/x/net").Output()
 	if err != nil {
-		t.Skipf("go list golang.org/x/net: %v", err)
+		skipUnlessCI(t, "go list golang.org/x/net: %v", err)
 	}
 	dir := strings.TrimSpace(string(out))
 	if dir == "" {
-		t.Skip("golang.org/x/net module directory not available")
+		skipUnlessCI(t, "golang.org/x/net module directory not available")
 	}
 	return dir
 }
@@ -66,7 +80,7 @@ func html5libDocuments(t *testing.T, dir string) map[string]string {
 	t.Helper()
 	files, err := filepath.Glob(filepath.Join(dir, "html", "testdata", "html5lib-tests", "tree-construction", "*.dat"))
 	if err != nil || len(files) == 0 {
-		t.Skipf("no html5lib tree-construction tests under %s", dir)
+		skipUnlessCI(t, "no html5lib tree-construction tests under %s", dir)
 	}
 	docs := map[string]string{}
 	for _, file := range files {
@@ -222,5 +236,94 @@ func TestParseDocumentStopsAtLimits(t *testing.T) {
 	// A parse error that is not a limit keeps its own error.
 	if _, err := ParseDocument(strings.NewReader(strings.Repeat("<div>", 600)), lim); err == nil || errors.Is(err, ErrLimitExceeded) {
 		t.Fatalf("deep nesting err = %v, want the parser's own error", err)
+	}
+}
+
+// measureTree parses in with no effective limits and returns the tree
+// estimate and the heap that the tree holds: the growth of the live heap,
+// measured after garbage collection, while the tree is still referenced.
+func measureTree(t *testing.T, in string) (estimate, live int64) {
+	t.Helper()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	doc, b, err := parseDocument(strings.NewReader(in), Limits{MaxTreeBytes: 1 << 40})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	runtime.KeepAlive(doc)
+	return b.tree, int64(after.HeapAlloc) - int64(before.HeapAlloc)
+}
+
+// TestTreeEstimateIsUpperBound checks that the tree estimate (what
+// MaxTreeBytes limits) is at least the heap the tree really holds. The tree
+// builder creates nodes that have no token of their own: "<tr><table>" makes
+// an implied <tbody>, the <tr> and a new <table> from two tokens, so a page
+// of it is the case that a charge per token missed (an estimate of 69% of the
+// live tree).
+func TestTreeEstimateIsUpperBound(t *testing.T) {
+	var merge strings.Builder
+	for i := 0; i < 1000; i++ {
+		fmt.Fprintf(&merge, "<body a%d>", i)
+	}
+	cases := map[string]string{
+		"implied table elements": "<body><table>" + strings.Repeat("<tr><table>", 40000),
+		"void elements":          "<body>" + strings.Repeat("<br>", 100000),
+		"attributes":             "<body>" + strings.Repeat("<br a b c d e f g h i j k l m n o p q r s t u v w x y z>", 8000),
+		"text nodes":             "<body>" + strings.Repeat("<p>x", 100000),
+		"formatting clones":      reconstructionBomb(32<<10, 4),
+		"comments after html":    "</html>" + strings.Repeat("<!---->", 50000),
+		"foster-parented text":   "<table>" + strings.Repeat("x<td>y</td>", 20000),
+		"merged body attributes": merge.String(),
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			estimate, live := measureTree(t, in)
+			t.Logf("input %d KiB, estimate %d KiB, live tree %d KiB (%.2f)", len(in)>>10, estimate>>10, live>>10, float64(estimate)/float64(live))
+			// The tolerance covers heap measurement noise. The estimate is
+			// 1.00 to 1.8 times the live tree for these documents and 1.10
+			// to 1.20 times for real pages.
+			if float64(estimate) < 0.97*float64(live) {
+				t.Errorf("estimate %d bytes is below the live tree of %d bytes", estimate, live)
+			}
+		})
+	}
+}
+
+// TestAttributeMergeWorkIsWeighted checks that repeated <body> and <html> tags
+// are stopped early. Each one merges its attributes into the first element
+// through a map of all their attributes, about 40 ns per attribute against
+// well under 1 ns per byte of appended text. Unweighted, the 5,700 tags below
+// were about 16 million units of work and 0.7 s of CPU time; weighted, a work
+// limit of 16 Mi units (the proxy's) stops them after about 1,000 tags and
+// 20 ms.
+func TestAttributeMergeWorkIsWeighted(t *testing.T) {
+	lim := Limits{MaxWork: 16 << 20}
+	repeated := func(tag string, n int) string {
+		var b strings.Builder
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&b, "<%s a%d>", tag, i)
+		}
+		return b.String()
+	}
+	for _, tag := range []string{"body", "html"} {
+		runtime.GC() // so that the time logged is not the collection of an earlier test's garbage
+		start := time.Now()
+		if _, err := ParseDocument(strings.NewReader(repeated(tag, 5700)), lim); !errors.Is(err, ErrLimitExceeded) {
+			t.Fatalf("5,700 <%s> tags: err = %v, want ErrLimitExceeded", tag, err)
+		}
+		t.Logf("5,700 <%s> tags refused after %v", tag, time.Since(start))
+		// 1,100 tags are about 605,000 attribute merges: over the limit
+		// only because the merges are weighted.
+		if _, err := ParseDocument(strings.NewReader(repeated(tag, 1100)), lim); !errors.Is(err, ErrLimitExceeded) {
+			t.Fatalf("1,100 <%s> tags: err = %v, want ErrLimitExceeded", tag, err)
+		}
+	}
+	// A few repeated <body> tags, as some templates emit, are fine.
+	ordinary := "<!doctype html><body class=a>" + strings.Repeat(`<p>text</p><body class=b data-x=1>`, 100)
+	if _, err := ParseDocument(strings.NewReader(ordinary), lim); err != nil {
+		t.Fatalf("ordinary repeated <body> tags: %v", err)
 	}
 }

@@ -224,6 +224,7 @@ loop:
 // addChild adds a child node n to the top element, and pushes n onto the stack
 // of open elements if it is an element node.
 func (p *parser) addChild(n *Node) {
+	p.budget.chargeNode(n) // htmlparse: budget
 	if p.shouldFosterParent() {
 		p.fosterParent(n)
 	} else {
@@ -311,6 +312,7 @@ func (p *parser) addText(text string) {
 	}
 
 	if p.shouldFosterParent() {
+		p.budget.chargeTree(nodeCost) // htmlparse: budget
 		p.fosterParent(&Node{
 			Type: TextNode,
 			Data: text,
@@ -421,7 +423,7 @@ func (p *parser) reconstructActiveFormattingElements() {
 	}
 	for {
 		i++
-		clone := p.cloneNode(p.afe[i]) // htmlparse: budget
+		clone := cloneNode(p.afe[i])
 		p.addChild(clone)
 		p.afe[i] = clone
 		if i == len(p.afe)-1 {
@@ -520,6 +522,7 @@ func initialIM(p *parser) bool {
 			return true
 		}
 	case CommentToken:
+		p.budget.chargeTree(nodeCost) // htmlparse: budget
 		p.doc.AppendChild(&Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
@@ -527,6 +530,7 @@ func initialIM(p *parser) bool {
 		return true
 	case DoctypeToken:
 		n, quirks := parseDoctype(p.tok.Data)
+		p.budget.chargeNode(n) // htmlparse: budget
 		p.doc.AppendChild(n)
 		p.quirks = quirks
 		p.im = beforeHTMLIM
@@ -565,6 +569,7 @@ func beforeHTMLIM(p *parser) bool {
 			return true
 		}
 	case CommentToken:
+		p.budget.chargeTree(nodeCost) // htmlparse: budget
 		p.doc.AppendChild(&Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
@@ -896,8 +901,7 @@ func inBodyIM(p *parser) bool {
 			if p.oe.contains(a.Template) {
 				return true
 			}
-			p.budget.chargeWork(len(p.oe[0].Attr) + len(p.tok.Attr)) // htmlparse: budget
-			copyAttributes(p.oe[0], p.tok)
+			p.copyAttributes(p.oe[0], p.tok) // htmlparse: budget
 		case a.Base, a.Basefont, a.Bgsound, a.Link, a.Meta, a.Noframes, a.Script, a.Style, a.Template, a.Title:
 			return inHeadIM(p)
 		case a.Body:
@@ -908,8 +912,7 @@ func inBodyIM(p *parser) bool {
 				body := p.oe[1]
 				if body.Type == ElementNode && body.DataAtom == a.Body {
 					p.framesetOK = false
-					p.budget.chargeWork(len(body.Attr) + len(p.tok.Attr)) // htmlparse: budget
-					copyAttributes(body, p.tok)
+					p.copyAttributes(body, p.tok) // htmlparse: budget
 				}
 			}
 		case a.Frameset:
@@ -1899,6 +1902,7 @@ func afterBodyIM(p *parser) bool {
 		if len(p.oe) < 1 || p.oe[0].DataAtom != a.Html {
 			panic("html: bad parser state: <html> element not found, in the after-body insertion mode")
 		}
+		p.budget.chargeTree(nodeCost) // htmlparse: budget
 		p.oe[0].AppendChild(&Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
@@ -2015,6 +2019,7 @@ func afterAfterBodyIM(p *parser) bool {
 			return inBodyIM(p)
 		}
 	case CommentToken:
+		p.budget.chargeTree(nodeCost) // htmlparse: budget
 		p.doc.AppendChild(&Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
@@ -2031,6 +2036,7 @@ func afterAfterBodyIM(p *parser) bool {
 func afterAfterFramesetIM(p *parser) bool {
 	switch p.tok.Type {
 	case CommentToken:
+		p.budget.chargeTree(nodeCost) // htmlparse: budget
 		p.doc.AppendChild(&Node{
 			Type: CommentNode,
 			Data: p.tok.Data,
