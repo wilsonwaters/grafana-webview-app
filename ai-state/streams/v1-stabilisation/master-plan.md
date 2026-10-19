@@ -61,18 +61,18 @@ Sizes follow the methodology (S/M/L). Issue numbers are in `ai-state/board-map.m
 | ID | Task | Size | Issue | Depends on | Status |
 |----|------|------|-------|------------|--------|
 | R1 | Research spike: proxy render on unpatched Grafana | L | #138 | — | done (findings merged) |
-| M1 | Scaffold + dependency + CI update | L | #139 | — | merged; review in progress |
-| RV1 | Standards review (read-only findings list) | M | #140 | — | in progress |
-| S1 | Frontend security: VR-1, VR-2 | M | #141 | M1 | merged; review in progress |
-| FR5-fe | Proxy render in panel (fetch + srcdoc) | L | #102 | R1, S1 | merged with S1; review in progress |
-| S2 + FR5-be | Backend security VR-3/5/6/7/8/11, #133; rewriter absolute URLs, meta + shim, remove `/proxy-resource`, CORS fix | L | #142, #102 | M1, R1 | in progress |
-| AU1 | Settings page (#129), #113, VR-4, VR-13 | L | #129 | M1 | merged; review in progress |
-| RV2 | Fix the relevant RV1 findings | M | #140 | RV1 | blocked on RV1 |
-| GH1 | Repository hygiene | S | #143 | — | done |
-| DEV1 | pi1: Grafana 13.2.4 via apt; install plugin | M | #144 | build | Grafana done; plugin install pending |
-| DOC1 | Docs refresh (incl. VR-9, VR-12) | M | #145 | features | blocked |
-| REL1 | v1.0.0 release prep | S | #56 | DOC1 | blocked |
-| SYS1 | System verification on the integrated branch | M | — | all | blocked |
+| M1 | Scaffold + dependency + CI update | L | #139 | — | done (review APPROVE-WITH-NITS; nits fixed in RV2-be) |
+| RV1 | Standards review (read-only findings list) | M | #140 | — | done (43 findings; dispositions in RV1-findings.md) |
+| S1 | Frontend security: VR-1, VR-2 | M | #141 | M1 | done (blocking review finding fixed in RV2-fe) |
+| FR5-fe | Proxy render in panel (fetch + srcdoc) | L | #102 | R1, S1 | done; runtime-verified in 3 browsers × 2 versions |
+| S2 + FR5-be | Backend security VR-3/5/6/7/8/11, #133; rewriter absolute URLs, meta + shim, remove `/proxy-resource`, CORS fix | L | #142, #102 | M1, R1 | done (security review APPROVE-WITH-NITS) |
+| AU1 | Settings page (#129), #113, VR-4, VR-13 | L | #129 | M1 | done (review APPROVE-WITH-NITS; nit fixed in RV2-fe) |
+| RV2 | Fix the relevant RV1 + review findings (fe, be, nits, hide selectors) | M | #140 | RV1 | done; hide-selector change under review |
+| GH1 | Repository hygiene | S | #143 | — | done (closed) |
+| DEV1 | pi1: Grafana 13.2.4 via apt; install plugin | M | #144 | final build | Grafana done; plugin install waits for the final build (maintainer choice) |
+| DOC1 | Docs refresh (incl. VR-9, VR-12) | M | #145 | features | done (+ README "Which sites work" table, maintainer request) |
+| REL1 | v1.0.0 release prep | S | #56 | DOC1 | version 1.0.0 set; tag after #146 merges |
+| SYS1 | System verification on the integrated branch | M | — | all | runtime verification passed; final CI pending |
 
 ## Integration points
 
