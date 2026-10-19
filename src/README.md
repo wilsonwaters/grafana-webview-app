@@ -1,50 +1,95 @@
-<!-- This README file is going to be the one displayed on the Grafana.com website for your plugin. Uncomment and replace the content here before publishing.
-
-Remove any remaining comments before publishing as these may be displayed on Grafana.com -->
-
 # Webview
 
-<!-- To help maximize the impact of your README and improve usability for users, we propose the following loose structure:
+Embed external web pages in Grafana dashboard panels, and choose exactly which
+part of the page viewers see.
 
-**BEFORE YOU BEGIN**
-- Ensure all links are absolute URLs so that they will work when the README is displayed within Grafana and Grafana.com
-- Be inspired ✨
-  - [grafana-polystat-panel](https://github.com/grafana/grafana-polystat-panel)
-  - [volkovlabs-variable-panel](https://github.com/volkovlabs/volkovlabs-variable-panel)
+[![License](https://img.shields.io/github/license/wilsonwaters/grafana-webview-app)](https://github.com/wilsonwaters/grafana-webview-app/blob/main/LICENSE)
+[![Grafana](https://img.shields.io/badge/Grafana-%3E%3D12.4.0-orange)](https://grafana.com)
 
-**ADD SOME BADGES**
+## Overview
 
-Badges convey useful information at a glance for users whether in the Catalog or viewing the source code. You can use the generator on [Shields.io](https://shields.io/badges/dynamic-json-badge) together with the Grafana.com API
-to create dynamic badges that update automatically when you publish a new version to the marketplace.
+Webview is an app plugin with a **Web View** panel. The panel shows a web page
+inside a dashboard, for example a weather radar, a status page or an internal
+tool. In the panel editor you drag and zoom a live preview to frame the region
+you want. Viewers then see that region, without scrolling or clicking.
 
-- For the URL parameter use `https://grafana.com/api/plugins/your-plugin-id`.
-- Example queries:
-  - Downloads: `$.downloads`
-  - Catalog Version: `$.version`
-  - Grafana Dependency: `$.grafanaDependency`
-  - Signature Type: `$.versionSignatureType`
-- Optionally, for the logo parameter use `grafana`.
+The panel loads a page in one of two ways:
 
-Full example: ![Dynamic JSON Badge](https://img.shields.io/badge/dynamic/json?logo=grafana&query=$.version&url=https://grafana.com/api/plugins/grafana-polystat-panel&label=Marketplace&prefix=v&color=F47A20)
+- **Direct mode** — a sandboxed iframe that points at the page. For sites that
+  allow framing. No backend is involved.
+- **Proxy mode** — for sites that block framing with `X-Frame-Options` or a
+  `frame-ancestors` policy. The plugin's backend fetches the page, removes the
+  framing headers, and the panel shows it in an isolated sandboxed frame. It
+  works on a standard Grafana install, with no change to `allow_embedding`.
 
-Consider other [badges](https://shields.io/badges) as you feel appropriate for your project.
+A **Test URL** button checks whether a page can be framed directly and picks
+the mode for you.
 
-## Overview / Introduction
-Provide one or more paragraphs as an introduction to your plugin to help users understand why they should use it.
-
-Consider including screenshots:
-- in [plugin.json](https://grafana.com/developers/plugin-tools/reference/plugin-json#info) include them as relative links.
-- in the README ensure they are absolute URLs.
+![Proxy-mode, direct-mode and error panels on one dashboard](https://raw.githubusercontent.com/wilsonwaters/grafana-webview-app/main/docs/screenshots/issue-102/grafana-13.2.4-chromium-dashboard.png)
 
 ## Requirements
-List any requirements or dependencies they may need to run the plugin.
 
-## Getting Started
-Provide a quick start on how to configure and use the plugin.
+- Grafana **12.4.0 or later** (tested on 12.4, 13.0, 13.1 and 13.2).
+- For proxy mode, a Grafana installation that can run backend plugins. Direct
+  mode works without the backend.
+- For proxy mode, viewers' browsers must be able to reach the proxied site:
+  the page's images, scripts and stylesheets load from that site directly.
+
+## Getting started
+
+1. Install the plugin and restart Grafana. See the
+   [Installation guide](https://github.com/wilsonwaters/grafana-webview-app/blob/main/docs/installation.md).
+2. Enable the app in **Administration → Plugins and data → Plugins → Webview**.
+3. **Add the domains you want to proxy.** Open the app's **Configuration** tab,
+   click **Add domain**, enter the host name (for example `status.example.com`)
+   and click **Save settings**. The change applies to the next request; no
+   restart is needed.
+4. Edit a dashboard, add a visualization and choose **Web View**.
+5. Enter the page URL, click **Test URL**, and drag and scroll the preview to
+   frame the region you want. Save the dashboard.
+
+![The Configuration page with one allowlisted domain and the global limits](https://raw.githubusercontent.com/wilsonwaters/grafana-webview-app/main/docs/screenshots/issue-129/config-13.2.4-light.png)
+
+## The allowlist
+
+The proxy is **deny-all by default**: a new installation proxies nothing until
+an administrator adds domains. The **Test URL** check uses the same list.
+
+Every signed-in user of the organisation, including Viewers, can load
+proxy-mode panels, so the allowlist and the rate limits are the access control
+for the proxy. Allowlist only sites that every user may see. The backend also
+blocks private, loopback, link-local and cloud-metadata addresses, and limits
+request rate, concurrency, response size and time. See the
+[Administration guide](https://github.com/wilsonwaters/grafana-webview-app/blob/main/docs/administration.md).
+
+## Known limitations
+
+Proxy mode sends only the HTML page through Grafana. Because of this:
+
+- If Grafana runs with `[security] content_security_policy = true`, proxied
+  pages show markup and images only; their scripts do not run.
+- The page runs in an isolated origin. Its cookies and storage last only until
+  the next reload, and single-page apps that call their own APIs do not work.
+- Sites with bot protection (for example Akamai or reCAPTCHA) can block the
+  page.
+- Pages that need a login do not work; the proxy sends no credentials.
+
+The [Troubleshooting guide](https://github.com/wilsonwaters/grafana-webview-app/blob/main/docs/troubleshooting.md)
+explains how to recognise each case.
 
 ## Documentation
-If your project has dedicated documentation available for users, provide links here. For help in following Grafana's style recommendations for technical documentation, refer to our [Writer's Toolkit](https://grafana.com/docs/writers-toolkit/).
 
-## Contributing
-Do you want folks to contribute to the plugin or provide feedback through specific means? If so, tell them how!
--->
+- [Configuration guide (panel options)](https://github.com/wilsonwaters/grafana-webview-app/blob/main/docs/configuration.md)
+- [Administration guide](https://github.com/wilsonwaters/grafana-webview-app/blob/main/docs/administration.md)
+- [Installation guide](https://github.com/wilsonwaters/grafana-webview-app/blob/main/docs/installation.md)
+- [Troubleshooting](https://github.com/wilsonwaters/grafana-webview-app/blob/main/docs/troubleshooting.md)
+- [Security policy](https://github.com/wilsonwaters/grafana-webview-app/blob/main/SECURITY.md)
+- [Changelog](https://github.com/wilsonwaters/grafana-webview-app/blob/main/CHANGELOG.md)
+
+## Feedback and contributing
+
+Report bugs and request features in
+[GitHub issues](https://github.com/wilsonwaters/grafana-webview-app/issues).
+Report security problems privately through
+[GitHub Security Advisories](https://github.com/wilsonwaters/grafana-webview-app/security/advisories/new).
+See the [contributing guide](https://github.com/wilsonwaters/grafana-webview-app/blob/main/CONTRIBUTING.md).

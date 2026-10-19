@@ -15,7 +15,7 @@
       }
     ]
   },
-  "description": "Example dashboard for the wilsonwaters-webview-app plugin. Panel 1 shows Direct mode (renders in-panel). Panel 2 shows Proxy mode, which requires an admin to allowlist the target domain first and currently displays the documented fallback (see issue #102).",
+  "description": "Example dashboard for the wilsonwaters-webview-app plugin. Panel 1 shows Direct mode. Panel 2 shows Proxy mode, which renders in-panel once an admin allowlists the target domain on the app's Configuration page.",
   "editable": true,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -33,7 +33,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "# Web View plugin — example dashboard\n\n- **Direct mode** (left) renders an external page straight inside the panel; no backend or allowlist needed.\n- **Proxy mode** (right) routes a framing-blocked page through the backend proxy. It requires an administrator to **allowlist the target domain first** (the allowlist is empty/deny-all by default), and in-panel proxy rendering is deferred for v1 (issue #102), so this panel shows the documented fallback.\n\nSee `docs/examples/README.md` and `docs/administration.md` for the allowlist prerequisite."
+        "content": "# Web View plugin — example dashboard\n\n- **Direct mode** (left) renders an external page straight inside the panel; no backend or allowlist needed.\n- **Proxy mode** (right) fetches the page through the backend proxy and renders it inside the panel in an isolated frame. It requires an administrator to **allowlist the target domain first** on the app's Configuration page (the allowlist is empty/deny-all by default). Until then the panel shows an HTTP 403 \"target host is not allowlisted\" message.\n\nSee `docs/examples/README.md` and `docs/administration.md` for the allowlist prerequisite."
       }
     },
     {
@@ -64,8 +64,8 @@
     {
       "id": 3,
       "type": "wilsonwaters-webview-panel",
-      "title": "Proxy mode — requires allowlisting (shows fallback in v1)",
-      "description": "A URL loaded with loadMode 'proxy'. An administrator must allowlist example.org before the proxy will serve it (the allowlist is deny-all by default). In-panel proxy rendering is deferred for v1 (issue #102), so this panel displays the documented fallback rather than the proxied page.",
+      "title": "Proxy mode — requires allowlisting",
+      "description": "A URL loaded with loadMode 'proxy'. An administrator must allowlist example.org on the app's Configuration page before the proxy will serve it (the allowlist is deny-all by default). Once allowlisted, the page renders inside the panel in a sandboxed frame.",
       "gridPos": {
         "h": 12,
         "w": 12,
