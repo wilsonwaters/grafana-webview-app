@@ -811,6 +811,22 @@ func buildTargetURL(rawTarget string, v *security.ValidatedURL) (*url.URL, error
 func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, target *url.URL, depth int, hideSelectors []string, pol security.Policy) string {
 	maxBytes := p.cfg.MaxResponseBytes
 
+	// P4 / Q10: ONE total per-request budget. RequestTimeoutSec is the whole
+	// deadline — it wraps the entire proxy round-trip AND the body copy, so a
+	// slow or stalled upstream body trips it too (not just connection setup,
+	// which the dialer's own Timeout already sub-bounds). On expiry the
+	// transport surfaces context.DeadlineExceeded, which proxyErrorHandler maps
+	// to 504. The HTML rewrite step waits for its slot within the same deadline.
+	//
+	// The per-request relaxation Policy is attached to the BASE context FIRST,
+	// then the timeout context is derived from it, so the Policy survives the wrap
+	// and the SF4 dialer reads it back via security.WithPolicy at connect time.
+	// With pol.AllowPrivate==false this is the strict default; the policy only
+	// ever relaxes RFC 1918 (see security.isRelaxablePrivate).
+	baseCtx := security.WithPolicy(req.Context(), pol)
+	ctx, cancel := context.WithTimeout(baseCtx, time.Duration(p.cfg.RequestTimeoutSec)*time.Second)
+	defer cancel()
+
 	var denied string
 	rp := &httputil.ReverseProxy{
 		Transport: p.transport,
@@ -860,7 +876,7 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 				discardBody(resp)
 				return nil
 			}
-			return prepareHTMLBody(resp, maxBytes, target, hideSelectors)
+			return prepareHTMLBody(ctx, resp, maxBytes, target, hideSelectors)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			denied = proxyErrorHandler(w, r, err)
@@ -869,22 +885,6 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 			p.logger.FromContext(r.Context()).Warn("proxy upstream error", "url", redactURL(target.String()), "reason", denied, "error", redactErrorURL(err))
 		},
 	}
-
-	// P4 / Q10: ONE total per-request budget. RequestTimeoutSec is the whole
-	// deadline — it wraps the entire proxy round-trip AND the body copy, so a
-	// slow or stalled upstream body trips it too (not just connection setup,
-	// which the dialer's own Timeout already sub-bounds). On expiry the
-	// transport surfaces context.DeadlineExceeded, which proxyErrorHandler maps
-	// to 504.
-	//
-	// The per-request relaxation Policy is attached to the BASE context FIRST,
-	// then the timeout context is derived from it, so the Policy survives the wrap
-	// and the SF4 dialer reads it back via security.WithPolicy at connect time.
-	// With pol.AllowPrivate==false this is the strict default; the policy only
-	// ever relaxes RFC 1918 (see security.isRelaxablePrivate).
-	baseCtx := security.WithPolicy(req.Context(), pol)
-	ctx, cancel := context.WithTimeout(baseCtx, time.Duration(p.cfg.RequestTimeoutSec)*time.Second)
-	defer cancel()
 
 	rp.ServeHTTP(w, req.WithContext(ctx))
 	return denied
@@ -1131,8 +1131,9 @@ func isHTMLContentType(contentType string) bool {
 // error handler logs the cause). The un-rewritten page is never served.
 // maxBytes <= 0 disables every bound. pageURL is the validated target of this
 // hop; it is the base for relative-URL resolution. hideSelectors are the CR5
-// author hide-selectors; rewriteHTMLLimited validates and applies them.
-func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, hideSelectors []string) error {
+// author hide-selectors; rewriteHTMLLimited validates and applies them. ctx is
+// the request context: an HTML body waits for a rewrite slot until it ends.
+func prepareHTMLBody(ctx context.Context, resp *http.Response, maxBytes int64, pageURL *url.URL, hideSelectors []string) error {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
@@ -1180,7 +1181,7 @@ func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, hide
 	// HTML is decoded, parsed, rewritten and rendered while holding a rewrite
 	// slot, so only a few documents are in memory as parse trees at once,
 	// however many requests are in flight.
-	release, err := acquireRewriteSlot(responseContext(resp))
+	release, err := acquireRewriteSlot(ctx)
 	if err != nil {
 		return err
 	}
@@ -1241,16 +1242,6 @@ func acquireRewriteSlot(ctx context.Context) (func(), error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-// responseContext returns the context of the request resp answers: the proxy
-// request's context with its deadline. A response with no request (a unit
-// test) gets context.Background().
-func responseContext(resp *http.Response) context.Context {
-	if resp.Request != nil {
-		return resp.Request.Context()
-	}
-	return context.Background()
 }
 
 // readBounded reads r to the end. More than maxBytes returns

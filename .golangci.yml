@@ -1,8 +1,24 @@
 version: '2'
 linters:
+  # The default linters plus these, which matter for an HTTP proxy that
+  # fetches URLs on behalf of users (RV1-31).
+  enable:
+    - bodyclose
+    - contextcheck
+    - errorlint
+    - gosec
+    - noctx
   exclusions:
     paths:
       - node_modules
       # Copied unchanged from golang.org/x/net/html (see pkg/internal/htmlparse
       # package doc); kept identical to upstream rather than lint-clean.
       - pkg/internal/htmlparse/(const|doctype|foreign|node|parse)\.go$
+    rules:
+      # Tests build requests with httptest.NewRequest and listen on loopback
+      # without a context (noctx), and use fake credentials in URLs and read
+      # test data from the module cache (gosec). None of it is production code.
+      - path: _test\.go$
+        linters:
+          - gosec
+          - noctx

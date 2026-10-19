@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -738,7 +739,7 @@ func TestRewriteContentLengthUpdated(t *testing.T) {
 	const html = `<html><body><img src="/a.png"></body></html>`
 	resp := &http.Response{Header: http.Header{}, Body: nopBody(html)}
 	resp.Header.Set("Content-Type", "text/html")
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
 		t.Fatalf("prepareHTMLBody: %v", err)
 	}
 	body := readAllString(t, resp)
@@ -761,7 +762,7 @@ func TestNonHTMLByteIdenticalPassthrough(t *testing.T) {
 	resp := &http.Response{Header: http.Header{}, Body: nopBody(payload)}
 	resp.Header.Set("Content-Type", "application/json")
 	resp.ContentLength = int64(len(payload))
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
 		t.Fatalf("prepareHTMLBody: %v", err)
 	}
 	if body := readAllString(t, resp); body != payload {
@@ -784,7 +785,7 @@ func TestRewriteFailureFailsClosed(t *testing.T) {
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: nopBody(html)}
 	resp.Header.Set("Content-Type", "text/html")
 
-	err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil)
+	err := prepareHTMLBody(context.Background(), resp, 1<<20, mustParseURL(t, examplePage), nil)
 	if !errors.Is(err, errRewriteFailed) || !errors.Is(err, errInjectedRewriteFailure) {
 		t.Fatalf("prepareHTMLBody error = %v, want errRewriteFailed wrapping the rewriter error", err)
 	}

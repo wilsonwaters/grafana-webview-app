@@ -3,6 +3,7 @@ package plugin
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -127,7 +128,7 @@ func TestCR1NonHTMLGzipUntouched(t *testing.T) {
 	resp.Header.Set("Content-Encoding", "gzip")
 	resp.ContentLength = int64(len(gz))
 
-	if err := prepareHTMLBody(resp, 1<<20, cr1PageURL(t), nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), resp, 1<<20, cr1PageURL(t), nil); err != nil {
 		t.Fatalf("prepareHTMLBody(non-HTML gzip): %v", err)
 	}
 	if ce := resp.Header.Get("Content-Encoding"); ce != "gzip" {
@@ -154,7 +155,7 @@ func TestCR1NonHTMLPlainUntouched(t *testing.T) {
 	resp.Header.Set("Content-Type", "image/png")
 	resp.ContentLength = int64(len(png))
 
-	if err := prepareHTMLBody(resp, 1<<20, cr1PageURL(t), nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), resp, 1<<20, cr1PageURL(t), nil); err != nil {
 		t.Fatalf("prepareHTMLBody(non-HTML plain): %v", err)
 	}
 	body, err := io.ReadAll(resp.Body)
@@ -186,7 +187,7 @@ func TestCR1GzipBombBounded(t *testing.T) {
 	resp.ContentLength = int64(len(gz)) // small compressed length passes the wire guard
 
 	const limit = 1024 // decoded body (64 KiB+) far exceeds this
-	err := prepareHTMLBody(resp, limit, cr1PageURL(t), nil)
+	err := prepareHTMLBody(context.Background(), resp, limit, cr1PageURL(t), nil)
 	if err == nil {
 		t.Fatalf("gzip bomb: prepareHTMLBody returned nil, want errResponseTooLarge")
 	}
@@ -238,7 +239,7 @@ func TestCR1MalformedGzipUnit(t *testing.T) {
 	resp.Header.Set("Content-Encoding", "gzip")
 	resp.ContentLength = int64(len(garbage))
 
-	err := prepareHTMLBody(resp, 1<<20, cr1PageURL(t), nil)
+	err := prepareHTMLBody(context.Background(), resp, 1<<20, cr1PageURL(t), nil)
 	if err == nil {
 		t.Fatalf("malformed gzip: prepareHTMLBody returned nil, want a decode error")
 	}
@@ -285,7 +286,7 @@ func TestCR1GzipHTMLNoLimit(t *testing.T) {
 	resp.Header.Set("Content-Encoding", "gzip")
 	resp.ContentLength = int64(len(gz))
 
-	if err := prepareHTMLBody(resp, 0, cr1PageURL(t), nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), resp, 0, cr1PageURL(t), nil); err != nil {
 		t.Fatalf("prepareHTMLBody(no limit): %v", err)
 	}
 	if ce := resp.Header.Get("Content-Encoding"); ce != "" {
@@ -308,12 +309,12 @@ func TestCR1GzipHTMLNoLimit(t *testing.T) {
 // TestCR1NilResponseGuard covers the defensive nil guards: a nil response or a
 // response with a nil body must be a no-op (no panic).
 func TestCR1NilResponseGuard(t *testing.T) {
-	if err := prepareHTMLBody(nil, 1<<20, cr1PageURL(t), nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), nil, 1<<20, cr1PageURL(t), nil); err != nil {
 		t.Fatalf("prepareHTMLBody(nil): %v", err)
 	}
 	resp := &http.Response{Header: http.Header{}}
 	resp.Header.Set("Content-Type", "text/html")
-	if err := prepareHTMLBody(resp, 1<<20, cr1PageURL(t), nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), resp, 1<<20, cr1PageURL(t), nil); err != nil {
 		t.Fatalf("prepareHTMLBody(nil body): %v", err)
 	}
 }

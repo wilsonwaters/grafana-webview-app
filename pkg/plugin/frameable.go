@@ -216,7 +216,11 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 	reqCtx, cancel := context.WithTimeout(security.WithPolicy(ctx, pol), p.frameableTimeout())
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
+	// Fetching a user-supplied URL is the purpose of this endpoint. targetURL
+	// passed the allowlist and URL validation, and p.transport dials only
+	// addresses that pass the IP blocklist (resolve-then-dial with a
+	// connect-time re-check).
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil) //nolint:gosec // G704: validated target, guarded dialer (see above)
 	if err != nil {
 		return p.unreachableVerdict(ctx, targetURL, err)
 	}
@@ -225,7 +229,7 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 	httpReq.Header.Set("User-Agent", proxyUserAgent)
 	httpReq.Header.Set("Accept", proxyAccept)
 
-	resp, err := client.Do(httpReq)
+	resp, err := client.Do(httpReq) //nolint:gosec // G704: validated target, guarded dialer (see NewRequestWithContext above)
 	if err != nil {
 		return p.unreachableVerdict(ctx, targetURL, err)
 	}
