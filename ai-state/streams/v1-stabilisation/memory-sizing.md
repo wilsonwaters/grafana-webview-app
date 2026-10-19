@@ -72,12 +72,23 @@ desktop (2026-10-19, after the review fixes below):
 | `<tr><table>` repeated (implied elements) | 44 MiB, 50 ms | 184 MiB | 413 |
 | `<body aN>` repeated (attribute merging) | 42 MiB, 34 ms | 174 MiB | 413 |
 | one 2 MiB tag, 300,000 attributes | 120 MiB, 98 ms | 203 MiB | 200 |
+| 390,000 `<p>` (1.1 MiB, about the most elements the parse limits allow) with 20 hide selectors that each match every element | 86 MiB, 471 ms | 173 MiB (2.7 s) | 413 |
 
 Worst case with defaults: **about 205 MiB** for 10 concurrent hostile requests (the target was
 300 MiB). Without the soft limit (GOMEMLIMIT=off) the same runs peak at 180 to 375 MiB, most of it
 uncollected garbage. `TestRewriteMemoryBounded` (one request at most 160 MiB) and
 `TestProxyConcurrentHostilePagesMemoryBounded` (10 requests at most 300 MiB) check these bounds on
-every test run without `-race` or `-short`.
+every test run without `-race` or `-short`; both include the hide-selector page.
+
+Hide-selector fixes (2026-10-19, review of the CR5 hardening). Each of the 20 selectors that
+matched an element appended the hide declaration to its style attribute again, copying the growing
+value each time, and each selector built a new slice of its matches. On the hide-selector page above
+that measured 251 to 258 MiB for one rewrite (budget 160) and 561 MiB in 27.9 s for 10 concurrent
+requests (the review measured 253 MiB and 589 MiB in 29 s). Now an element whose style already ends
+with the declaration is left alone, and the matcher reuses one slice for the matches of every
+selector: 174 to 182 MiB with the first change alone, 86 MiB with both (the table row). The rewrite
+still ends in 413, because the rewritten page (a style attribute on every element) is over
+`maxResponseBytes`.
 
 Review fixes (2026-10-19). The tree estimate first charged each token, not each node, so nodes
 that the tree builder creates without a token were not counted: the `<tr><table>` page's tree was
@@ -113,10 +124,13 @@ With the defaults (10 x 5 MiB) that is about 340 MiB before the soft limit trims
 
 ## Residual risks
 
-- A hide selector with `:has()` (cascadia supports it) can make selector matching quadratic in the
-  tree size, and any signed-in user can pass `hide` parameters to `/proxy`. The parse limits bound
-  the tree, so this is CPU time inside one rewrite slot, not memory. Follow-up: reject `:has(` and
-  the other cascadia extensions in hide selectors.
+- Any signed-in user can pass `hide` parameters to `/proxy`. Since the CR5 hardening, `:has()` and
+  the other cascadia extensions are refused (400) and the matching work on one page is bounded by
+  `hideMatchBudget`, which charges every simple selector, attribute byte and sibling a test reads
+  (the simple selectors were not charged at first: 20 long `:not()` lists of type selectors took 3.7
+  to 5 s on the hide-selector page and were served). The whole budget is 0.05 to 0.8 s of CPU on a
+  desktop, inside one rewrite slot; the slowest are walks over sibling lists too long for the CPU
+  cache (`:nth-last-child(2n)` over 150,000 items).
 - A parse cannot be cancelled. The work and tree budgets refuse every hostile page measured within
   about 70 ms of rewrite time on a desktop CPU, and the largest allowed tag takes about 100 ms
   (expect up to 10x on a Raspberry Pi); during that time it holds a rewrite slot. The work limit

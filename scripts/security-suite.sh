@@ -92,6 +92,9 @@ REQUIRED_TESTS=(
   "CR5:TestProxyRefusesExpensiveHideSelectors"
   "CR5:TestHideCombinatorChainsAreLinear"
   "CR5:TestHideMatchBudgetStopsQuadraticSelectors"
+  "CR5:TestHideMatchBudgetChargesEverySimpleSelector"
+  "CR5:TestHideSelectorsHideEachElementOnce"
+  "CR5:TestHideMatcherAgreesWithCascadiaRandom"
 )
 
 # Packages that contain (or may contain) the mandatory security tests.
@@ -146,7 +149,10 @@ for entry in "${REQUIRED_TESTS[@]}"; do
   # `go test -v` prints "--- PASS: TestName (0.00s)". A skipped test prints
   # "--- SKIP:" and a failure "--- FAIL:", neither of which matches, so any
   # state other than PASS for a required test is treated as missing/failing.
-  if printf '%s\n' "${test_output}" | grep -Eq -- "^[[:space:]]*--- PASS: ${fn}\b"; then
+  # grep reads a here-string, not a pipe: `grep -q` exits at the first match,
+  # and under `set -o pipefail` the writer's SIGPIPE would fail the pipeline
+  # and mark a passing test as missing.
+  if grep -Eq -- "^[[:space:]]*--- PASS: ${fn}\b" <<<"${test_output}"; then
     echo "  [PASS] ${ac} ${fn}"
   else
     echo "  [MISS] ${ac} ${fn}  (no '--- PASS:' line - missing, renamed, skipped, or failed)"

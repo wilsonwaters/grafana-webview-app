@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"runtime"
 	"runtime/debug"
@@ -88,6 +89,30 @@ func adversarialPages(size int) map[string][]byte {
 	}
 }
 
+// hostileRewrite is a hostile page and the hide selectors it is requested
+// with.
+type hostileRewrite struct {
+	page []byte
+	hide []string
+}
+
+// hostileRewrites returns the pages of adversarialPages(size) without hide
+// selectors, and "hide-selectors": the largest page of elements the parse
+// limits allow, with 20 hide selectors that each match every element. Before
+// an element was hidden at most once, each of its 20 matches appended to its
+// style attribute, copying the attribute each time.
+func hostileRewrites(size int) map[string]hostileRewrite {
+	out := make(map[string]hostileRewrite)
+	for name, page := range adversarialPages(size) {
+		out[name] = hostileRewrite{page: page}
+	}
+	out["hide-selectors"] = hostileRewrite{
+		page: []byte(bareParagraphs(largestElementPage)),
+		hide: matchAllSelectors(maxHideSelectors),
+	}
+	return out
+}
+
 // heapSampler records the largest heap-object size seen while it runs.
 type heapSampler struct {
 	stop chan struct{}
@@ -149,8 +174,8 @@ func peakHeapDuring(f func()) uint64 {
 const mib = 1 << 20
 
 // serveConcurrently serves page through a default-settings proxy handler n
-// times at once and returns the status codes.
-func serveConcurrently(t *testing.T, page []byte, n int) []int {
+// times at once, with the hide selectors, and returns the status codes.
+func serveConcurrently(t *testing.T, page []byte, hide []string, n int) []int {
 	t.Helper()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -164,6 +189,7 @@ func serveConcurrently(t *testing.T, page []byte, n int) []int {
 	p := newTestHandler(t, cfg, upstream)
 	p.logger = log.NewNullLogger()
 
+	target := proxyPath + "?" + url.Values{"url": {"http://example.com/"}, hideParam: hide}.Encode()
 	statuses := make([]int, n)
 	var wg sync.WaitGroup
 	start := make(chan struct{})
@@ -172,7 +198,7 @@ func serveConcurrently(t *testing.T, page []byte, n int) []int {
 		go func(i int) {
 			defer wg.Done()
 			<-start
-			req := httptest.NewRequest(http.MethodGet, "/proxy?url=http%3A%2F%2Fexample.com%2F", nil)
+			req := httptest.NewRequest(http.MethodGet, target, nil)
 			w := &discardResponseWriter{header: http.Header{}}
 			p.ServeHTTP(w, req)
 			statuses[i] = w.status
@@ -219,19 +245,21 @@ const (
 	concurrentHeapBudget    = 300 * mib
 )
 
-// TestRewriteMemoryBounded covers RV2: with the default limits, rewriting any
-// hostile page of DefaultMaxResponseBytes either succeeds or is refused as too
-// large, and its peak heap stays within singleRewriteHeapBudget.
+// TestRewriteMemoryBounded covers RV2 and the CR5 hardening: with the default
+// limits, rewriting any hostile page of DefaultMaxResponseBytes, or the
+// largest page with 20 hide selectors that match every element, either
+// succeeds or is refused as too large, and its peak heap stays within
+// singleRewriteHeapBudget.
 func TestRewriteMemoryBounded(t *testing.T) {
 	skipMemoryAssertions(t)
 	withProductionMemoryLimit(t)
 	page := mustParseURL(t, "http://example.com/")
-	for name, body := range adversarialPages(DefaultMaxResponseBytes) {
+	for name, hostile := range hostileRewrites(DefaultMaxResponseBytes) {
 		t.Run(name, func(t *testing.T) {
 			var rerr error
 			start := time.Now()
 			peak := peakHeapDuring(func() {
-				_, rerr = rewriteHTMLLimited(body, page, "text/html", nil, DefaultMaxResponseBytes)
+				_, rerr = rewriteHTMLLimited(hostile.page, page, "text/html", hostile.hide, DefaultMaxResponseBytes)
 			})
 			if rerr != nil && !errors.Is(rerr, errResponseTooLarge) {
 				t.Errorf("rewrite error = %v, want success or errResponseTooLarge", rerr)
@@ -252,21 +280,22 @@ func withProductionMemoryLimit(t *testing.T) {
 	t.Cleanup(func() { debug.SetMemoryLimit(prev) })
 }
 
-// TestProxyConcurrentHostilePagesMemoryBounded covers RV2: DefaultMaxConcurrentRequests
-// requests for the worst hostile pages at once stay within
-// concurrentHeapBudget in total, because only maxConcurrentHTMLRewrites
-// documents are parsed at a time, each parse is bounded, and the process runs
-// with DefaultMemoryLimit.
+// TestProxyConcurrentHostilePagesMemoryBounded covers RV2 and the CR5
+// hardening: DefaultMaxConcurrentRequests requests for the worst hostile pages
+// (and hide selectors) at once stay within concurrentHeapBudget in total,
+// because only maxConcurrentHTMLRewrites documents are parsed at a time, each
+// parse and each hide is bounded, and the process runs with
+// DefaultMemoryLimit.
 func TestProxyConcurrentHostilePagesMemoryBounded(t *testing.T) {
 	skipMemoryAssertions(t)
 	withProductionMemoryLimit(t)
-	pages := adversarialPages(DefaultMaxResponseBytes)
-	for _, name := range []string{"text-nodes", "reconstruction", "big-tag"} {
+	hostiles := hostileRewrites(DefaultMaxResponseBytes)
+	for _, name := range []string{"text-nodes", "reconstruction", "big-tag", "hide-selectors"} {
 		t.Run(name, func(t *testing.T) {
 			var statuses []int
 			start := time.Now()
 			peak := peakHeapDuring(func() {
-				statuses = serveConcurrently(t, pages[name], DefaultMaxConcurrentRequests)
+				statuses = serveConcurrently(t, hostiles[name].page, hostiles[name].hide, DefaultMaxConcurrentRequests)
 			})
 			for _, s := range statuses {
 				if s != http.StatusOK && s != http.StatusRequestEntityTooLarge {
@@ -288,9 +317,9 @@ func TestRewriteMemoryReport(t *testing.T) {
 		t.Skip("set WEBVIEW_MEMREPORT=1 to print the memory report")
 	}
 	page := mustParseURL(t, "http://example.com/")
-	pages := adversarialPages(DefaultMaxResponseBytes)
-	names := make([]string, 0, len(pages))
-	for name := range pages {
+	hostiles := hostileRewrites(DefaultMaxResponseBytes)
+	names := make([]string, 0, len(hostiles))
+	for name := range hostiles {
 		names = append(names, name)
 	}
 	sort.Strings(names)
@@ -300,17 +329,17 @@ func TestRewriteMemoryReport(t *testing.T) {
 		}
 		t.Logf("--- %s", limit)
 		for _, name := range names {
-			body := pages[name]
+			body, hide := hostiles[name].page, hostiles[name].hide
 			var rerr error
 			start := time.Now()
 			single := peakHeapDuring(func() {
-				_, rerr = rewriteHTMLLimited(body, page, "text/html", nil, DefaultMaxResponseBytes)
+				_, rerr = rewriteHTMLLimited(body, page, "text/html", hide, DefaultMaxResponseBytes)
 			})
 			singleTime := time.Since(start)
 			var statuses []int
 			start = time.Now()
 			concurrent := peakHeapDuring(func() {
-				statuses = serveConcurrently(t, body, DefaultMaxConcurrentRequests)
+				statuses = serveConcurrently(t, body, hide, DefaultMaxConcurrentRequests)
 			})
 			outcome := "ok"
 			if rerr != nil {
