@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useId, useRef, useState } from 'react';
 import { css } from '@emotion/css';
 import { GrafanaTheme2, StandardEditorProps } from '@grafana/data';
 import { Button, Field, Input, useStyles2 } from '@grafana/ui';
-import { DEFAULT_PANEL_OPTIONS, normalizeOptions, type PanelOptions } from '../../../types';
+import { normalizeOptions, type PanelOptions } from '../../../types';
 import {
   buildViewportTransform,
   clampZoom,
@@ -42,6 +42,27 @@ const frameTestIds: WebViewFrameTestIds = {
  */
 const WHEEL_ZOOM_STEP = 1.1;
 
+/** Parses a whole number of pixels for the X / Y offsets. Negative values are valid. */
+function parseOffset(text: string): number | undefined {
+  const n = Number(text);
+  return text.trim() !== '' && Number.isFinite(n) ? Math.round(n) : undefined;
+}
+
+/** Parses a zoom factor and clamps it to the allowed range. */
+function parseZoom(text: string): number | undefined {
+  const n = Number(text);
+  return text.trim() !== '' && Number.isFinite(n) ? clampZoom(n) : undefined;
+}
+
+/** Parses a page dimension: a whole number of pixels, 1 or more. */
+function parseDimension(text: string): number | undefined {
+  const n = Math.round(Number(text));
+  return text.trim() !== '' && Number.isFinite(n) && n >= 1 ? n : undefined;
+}
+
+const formatWhole = (value: number) => String(Math.round(value));
+const formatZoom = (value: number) => value.toFixed(2);
+
 /**
  * Config-mode interactive viewport editor (PC3 + PC4).
  *
@@ -51,22 +72,32 @@ const WHEEL_ZOOM_STEP = 1.1;
  * (PC1 `WebViewPanel`) stays static and non-interactive. This is the Q3
  * resolution: there is no edit-vs-view detection inside the panel component.
  *
- * ## Interaction model (PC3, see research-context.md "Mouse Event Handling")
- * - The CONTAINER captures all pointer events; the iframe has
- *   `pointer-events: none` so drags/wheels never reach the embedded page.
- * - Drag → pan: screen-pixel deltas are converted to virtual offsets via
- *   `panDelta` (zoom-aware) and added to `viewportX/Y`.
+ * ## Interaction model (PC3)
+ * - The CONTAINER handles the pointer; the iframe has `pointer-events: none`
+ *   so drags and wheels never reach the embedded page.
+ * - Drag → pan (mouse, pen or touch): the container captures the pointer on
+ *   `pointerdown`, so the drag keeps tracking outside the small preview and
+ *   ends on `pointerup`, `pointercancel` or lost capture, also when the button
+ *   is released outside the window. Screen-pixel deltas are converted to
+ *   virtual offsets via `panDelta` (zoom-aware) and added to `viewportX/Y`.
  * - Wheel → zoom: `zoomAtCursor` keeps the virtual point under the cursor fixed
- *   while changing zoom, clamped with `clampZoom`.
+ *   while changing zoom, clamped with `clampZoom`. The wheel zooms only after
+ *   the pointer has moved over the preview. When the options pane scrolls the
+ *   preview under a resting pointer, the wheel keeps scrolling the pane.
+ * - Keyboard: the X, Y and Zoom fields are the keyboard alternative to dragging
+ *   and the wheel. The preview itself takes no focus.
  *
  * ## Numeric inputs (PC4)
- * Numeric `@grafana/ui` inputs for X, Y, zoom, iframeWidth, and iframeHeight are
- * kept two-way in sync with the preview:
- * - Typing a value immediately moves the preview.
- * - Dragging/zooming the preview immediately updates the inputs.
- * - Zoom is clamped to [VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX] on commit.
- * - iframeWidth/iframeHeight reject non-positive values (fall back to the
- *   last valid value / default).
+ * The X, Y, zoom, page width and page height fields keep the text the author
+ * types and commit it on blur or Enter (Escape restores the current value).
+ * The value is parsed and limited only on commit, so a value such as `0.5` or
+ * `-20` can be typed one character at a time:
+ * - Zoom is clamped to [VIEWPORT_ZOOM_MIN, VIEWPORT_ZOOM_MAX].
+ * - X and Y are whole pixels and may be negative.
+ * - Width and height are whole pixels, 1 or more. Any other value (including an
+ *   empty field) restores the last valid value.
+ * - Dragging or zooming the preview, or Reset view, updates the fields at once
+ *   and replaces any uncommitted text.
  *
  * ## URL control reconciliation (PC4 design decision)
  * The standard `url` field registered in `module.tsx` (F4) is the **canonical**
@@ -95,6 +126,7 @@ const WHEEL_ZOOM_STEP = 1.1;
 export function ViewportEditor({ value, onChange, context }: StandardEditorProps<number, unknown, PanelOptions>) {
   const styles = useStyles2(getStyles);
   const opts = normalizeOptions(context.options ?? {});
+  const helpId = useId();
 
   // ---------------------------------------------------------------------------
   // Viewport state (X / Y / zoom) — drives both the preview and the numeric inputs
@@ -159,17 +191,19 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
   }, [opts.iframeWidth, opts.iframeHeight]);
 
   // ---------------------------------------------------------------------------
-  // Drag / wheel interaction (preview)
+  // Pointer / wheel interaction (preview)
   // ---------------------------------------------------------------------------
 
   const containerRef = useRef<HTMLDivElement | null>(null);
-  // Drag tracking. Null when not dragging.
-  const dragRef = useRef<{ lastX: number; lastY: number } | null>(null);
-  // Latest viewport, mirrored into a ref so the window-level move handler always
-  // reads current values without re-binding listeners. Kept current both by an
-  // effect (for external/state-driven updates) and synchronously inside the
-  // event-driven `commit` (so rapid drag moves in one frame accumulate correctly
-  // without waiting for a re-render).
+  // The active drag. Null when not dragging.
+  const dragRef = useRef<{ pointerId: number; lastX: number; lastY: number } | null>(null);
+  // True once the pointer has moved over the preview. The wheel zooms only
+  // then (see the wheel handler below).
+  const wheelArmedRef = useRef(false);
+  // Latest viewport, mirrored into a ref so the event handlers always read
+  // current values. Kept current both by an effect (for external/state-driven
+  // updates) and synchronously inside the event-driven `commit` (so rapid drag
+  // moves in one frame accumulate correctly without waiting for a re-render).
   const viewportRef = useRef(viewport);
   useEffect(() => {
     viewportRef.current = viewport;
@@ -187,12 +221,38 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
     [persist]
   );
 
-  // Drag handling uses window listeners while a drag is active so the pan keeps
-  // tracking even if the cursor leaves the (small) preview box.
-  useEffect(() => {
-    const onMove = (e: MouseEvent) => {
+  const hasUrl = opts.url.length > 0;
+  // VR-1: only a validated http(s) URL is previewed (and can be positioned).
+  // WebViewFrame validates again before it builds an iframe.
+  const canPreview = validateWebViewUrl(opts.url).valid;
+
+  const onPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (!canPreview || e.button !== 0) {
+        return;
+      }
+      e.preventDefault();
+      // Capture the pointer: moves and the release are delivered to the preview
+      // even when the pointer leaves it or the window.
+      const el = e.currentTarget;
+      if (typeof el.setPointerCapture === 'function') {
+        el.setPointerCapture(e.pointerId);
+      }
+      dragRef.current = { pointerId: e.pointerId, lastX: e.clientX, lastY: e.clientY };
+    },
+    [canPreview]
+  );
+
+  const onPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      wheelArmedRef.current = true;
       const drag = dragRef.current;
-      if (!drag) {
+      if (!drag || drag.pointerId !== e.pointerId) {
+        return;
+      }
+      if (e.buttons === 0) {
+        // The button was released where no pointerup reached the preview.
+        dragRef.current = null;
         return;
       }
       // Dragging the content right should reveal content to the LEFT, i.e.
@@ -206,27 +266,30 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
         viewportY: current.viewportY + dy,
         viewportZoom: current.viewportZoom,
       });
-    };
-    const onUp = () => {
-      dragRef.current = null;
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-    return () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-  }, [commit]);
+    },
+    [commit]
+  );
 
-  const onMouseDown = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    dragRef.current = { lastX: e.clientX, lastY: e.clientY };
+  const endDrag = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.pointerId === e.pointerId) {
+      dragRef.current = null;
+    }
   }, []);
 
-  const hasUrl = opts.url.trim().length > 0;
-  // VR-1: only a validated http(s) URL is previewed (and can be positioned).
-  // WebViewFrame validates again before it builds an iframe.
-  const canPreview = validateWebViewUrl(opts.url).valid;
+  const onPointerLeave = useCallback(() => {
+    wheelArmedRef.current = false;
+  }, []);
+
+  // When anything on the page scrolls (for example the options pane), the
+  // preview can move under a resting pointer. Disarm the wheel until the
+  // pointer moves again, so the wheel keeps scrolling the pane.
+  useEffect(() => {
+    const disarm = () => {
+      wheelArmedRef.current = false;
+    };
+    document.addEventListener('scroll', disarm, { capture: true, passive: true });
+    return () => document.removeEventListener('scroll', disarm, { capture: true });
+  }, []);
 
   // Wheel-zoom is attached as a NON-passive native listener so we can
   // preventDefault and stop the editor pane / page from scrolling while the
@@ -237,6 +300,10 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
       return;
     }
     const onWheel = (e: WheelEvent) => {
+      if (!wheelArmedRef.current) {
+        // The pointer has not moved over the preview: let the pane scroll.
+        return;
+      }
       e.preventDefault();
       const rect = el.getBoundingClientRect();
       const cursorX = e.clientX - rect.left;
@@ -249,64 +316,27 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
   }, [commit, canPreview]);
 
   // ---------------------------------------------------------------------------
-  // Numeric input handlers (viewport X / Y / zoom)
+  // Numeric input commits (viewport X / Y / zoom, iframe dimensions)
   // ---------------------------------------------------------------------------
 
-  const handleXChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const raw = parseFloat(e.currentTarget.value);
-      if (!isFinite(raw)) {
-        return;
-      }
-      commit({ ...viewportRef.current, viewportX: raw });
-    },
-    [commit]
-  );
+  const commitX = useCallback((x: number) => commit({ ...viewportRef.current, viewportX: x }), [commit]);
+  const commitY = useCallback((y: number) => commit({ ...viewportRef.current, viewportY: y }), [commit]);
+  const commitZoom = useCallback((zoom: number) => commit({ ...viewportRef.current, viewportZoom: zoom }), [commit]);
 
-  const handleYChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const raw = parseFloat(e.currentTarget.value);
-      if (!isFinite(raw)) {
-        return;
-      }
-      commit({ ...viewportRef.current, viewportY: raw });
-    },
-    [commit]
-  );
-
-  const handleZoomChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const raw = parseFloat(e.currentTarget.value);
-      if (!isFinite(raw)) {
-        return;
-      }
-      commit({ ...viewportRef.current, viewportZoom: clampZoom(raw) });
-    },
-    [commit]
-  );
-
-  // ---------------------------------------------------------------------------
-  // Numeric input handlers (iframe dimensions)
-  // ---------------------------------------------------------------------------
-
-  const handleWidthChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const raw = parseInt(e.currentTarget.value, 10);
-      const next = isFinite(raw) && raw > 0 ? raw : DEFAULT_PANEL_OPTIONS.iframeWidth;
-      committedDimRef.current.iframeWidth = next;
-      setIframeWidth(next);
-      persistDimension({ iframeWidth: next, iframeHeight: committedDimRef.current.iframeHeight });
+  const commitWidth = useCallback(
+    (width: number) => {
+      committedDimRef.current.iframeWidth = width;
+      setIframeWidth(width);
+      persistDimension({ iframeWidth: width, iframeHeight: committedDimRef.current.iframeHeight });
     },
     [persistDimension]
   );
 
-  const handleHeightChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const raw = parseInt(e.currentTarget.value, 10);
-      const next = isFinite(raw) && raw > 0 ? raw : DEFAULT_PANEL_OPTIONS.iframeHeight;
-      committedDimRef.current.iframeHeight = next;
-      setIframeHeight(next);
-      persistDimension({ iframeWidth: committedDimRef.current.iframeWidth, iframeHeight: next });
+  const commitHeight = useCallback(
+    (height: number) => {
+      committedDimRef.current.iframeHeight = height;
+      setIframeHeight(height);
+      persistDimension({ iframeWidth: committedDimRef.current.iframeWidth, iframeHeight: height });
     },
     [persistDimension]
   );
@@ -325,14 +355,20 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
 
   return (
     <div className={styles.wrapper}>
-      {/* Preview */}
+      {/* Preview. Pointer only; the fields below are the keyboard alternative. */}
       <div
         ref={containerRef}
         className={styles.preview}
         data-testid={viewportEditorTestIds.preview}
-        onMouseDown={canPreview ? onMouseDown : undefined}
-        role="application"
-        aria-label="Interactive viewport preview"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+        onLostPointerCapture={endDrag}
+        onPointerLeave={onPointerLeave}
+        role="group"
+        aria-label="Viewport preview"
+        aria-describedby={canPreview ? helpId : undefined}
       >
         {hasUrl ? (
           <WebViewFrame
@@ -364,41 +400,47 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
       </div>
 
       {canPreview && (
-        <div className={styles.help}>Drag to pan · scroll to zoom ({VIEWPORT_ZOOM_MIN}–{VIEWPORT_ZOOM_MAX}×)</div>
+        <div className={styles.help} id={helpId}>
+          Drag to pan · scroll to zoom ({VIEWPORT_ZOOM_MIN}–{VIEWPORT_ZOOM_MAX}×). With the keyboard, use the X, Y and
+          Zoom fields.
+        </div>
       )}
 
       {/* Numeric viewport inputs (X / Y / zoom) */}
       <div className={styles.inputRow}>
-        <Field label="X" className={styles.inputField}>
-          <Input
-            type="number"
-            data-testid={viewportEditorTestIds.inputX}
-            value={Math.round(viewport.viewportX)}
-            onChange={handleXChange}
-            aria-label="Viewport X offset"
-          />
-        </Field>
-        <Field label="Y" className={styles.inputField}>
-          <Input
-            type="number"
-            data-testid={viewportEditorTestIds.inputY}
-            value={Math.round(viewport.viewportY)}
-            onChange={handleYChange}
-            aria-label="Viewport Y offset"
-          />
-        </Field>
-        <Field label={`Zoom (${VIEWPORT_ZOOM_MIN}–${VIEWPORT_ZOOM_MAX})`} className={styles.inputField}>
-          <Input
-            type="number"
-            data-testid={viewportEditorTestIds.inputZoom}
-            value={viewport.viewportZoom.toFixed(2)}
-            step={0.1}
-            min={VIEWPORT_ZOOM_MIN}
-            max={VIEWPORT_ZOOM_MAX}
-            onChange={handleZoomChange}
-            aria-label="Viewport zoom"
-          />
-        </Field>
+        <NumericField
+          label="X"
+          ariaLabel="Viewport X offset"
+          testId={viewportEditorTestIds.inputX}
+          value={viewport.viewportX}
+          format={formatWhole}
+          parse={parseOffset}
+          onCommit={commitX}
+          className={styles.inputField}
+        />
+        <NumericField
+          label="Y"
+          ariaLabel="Viewport Y offset"
+          testId={viewportEditorTestIds.inputY}
+          value={viewport.viewportY}
+          format={formatWhole}
+          parse={parseOffset}
+          onCommit={commitY}
+          className={styles.inputField}
+        />
+        <NumericField
+          label={`Zoom (${VIEWPORT_ZOOM_MIN}–${VIEWPORT_ZOOM_MAX})`}
+          ariaLabel="Viewport zoom"
+          testId={viewportEditorTestIds.inputZoom}
+          value={viewport.viewportZoom}
+          format={formatZoom}
+          parse={parseZoom}
+          onCommit={commitZoom}
+          step={0.1}
+          min={VIEWPORT_ZOOM_MIN}
+          max={VIEWPORT_ZOOM_MAX}
+          className={styles.inputField}
+        />
       </div>
 
       {/* Reset view button */}
@@ -414,28 +456,96 @@ export function ViewportEditor({ value, onChange, context }: StandardEditorProps
 
       {/* Virtual iframe dimension inputs */}
       <div className={styles.inputRow}>
-        <Field label="Page width (px)" className={styles.inputField}>
-          <Input
-            type="number"
-            data-testid={viewportEditorTestIds.inputWidth}
-            value={iframeWidth}
-            min={1}
-            onChange={handleWidthChange}
-            aria-label="Virtual iframe width"
-          />
-        </Field>
-        <Field label="Page height (px)" className={styles.inputField}>
-          <Input
-            type="number"
-            data-testid={viewportEditorTestIds.inputHeight}
-            value={iframeHeight}
-            min={1}
-            onChange={handleHeightChange}
-            aria-label="Virtual iframe height"
-          />
-        </Field>
+        <NumericField
+          label="Page width (px)"
+          ariaLabel="Virtual iframe width"
+          testId={viewportEditorTestIds.inputWidth}
+          value={iframeWidth}
+          format={formatWhole}
+          parse={parseDimension}
+          onCommit={commitWidth}
+          min={1}
+          className={styles.inputField}
+        />
+        <NumericField
+          label="Page height (px)"
+          ariaLabel="Virtual iframe height"
+          testId={viewportEditorTestIds.inputHeight}
+          value={iframeHeight}
+          format={formatWhole}
+          parse={parseDimension}
+          onCommit={commitHeight}
+          min={1}
+          className={styles.inputField}
+        />
       </div>
     </div>
+  );
+}
+
+interface NumericFieldProps {
+  /** Visible label. */
+  label: string;
+  /** Accessible name of the input. */
+  ariaLabel: string;
+  testId: string;
+  /** The committed value. */
+  value: number;
+  format: (value: number) => string;
+  /** Returns the value to commit, or undefined when the text is not valid. */
+  parse: (text: string) => number | undefined;
+  onCommit: (value: number) => void;
+  step?: number;
+  min?: number;
+  max?: number;
+  className?: string;
+}
+
+/**
+ * A labelled number input that keeps the typed text and commits it on blur or
+ * Enter (RV1-11, RV1-29). Escape, and any text that does not parse, restore the
+ * committed value. When the committed value changes while the author is typing
+ * (a drag, a zoom or Reset view), the new value replaces the typed text.
+ */
+function NumericField(props: NumericFieldProps) {
+  const id = useId();
+  const { value, format, parse, onCommit } = props;
+  // `base` is the committed value when typing started.
+  const [draft, setDraft] = useState<{ text: string; base: number } | null>(null);
+  const editing = draft !== null && draft.base === value;
+
+  const commitDraft = () => {
+    if (editing) {
+      const next = parse(draft.text);
+      if (next !== undefined && next !== value) {
+        onCommit(next);
+      }
+    }
+    setDraft(null);
+  };
+
+  return (
+    <Field label={props.label} htmlFor={id} className={props.className}>
+      <Input
+        id={id}
+        type="number"
+        data-testid={props.testId}
+        aria-label={props.ariaLabel}
+        value={editing ? draft.text : format(value)}
+        step={props.step}
+        min={props.min}
+        max={props.max}
+        onChange={(e) => setDraft({ text: e.currentTarget.value, base: value })}
+        onBlur={commitDraft}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') {
+            commitDraft();
+          } else if (e.key === 'Escape') {
+            setDraft(null);
+          }
+        }}
+      />
+    </Field>
   );
 }
 
