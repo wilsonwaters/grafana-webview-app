@@ -65,6 +65,10 @@ describe('normalizeOptions', () => {
       expect(result.url).toBe('https://example.com');
     });
 
+    test('trims the url (RV1-22: every consumer gets the URL that loads)', () => {
+      expect(normalizeOptions({ url: ' \thttps://example.com/a \n' }).url).toBe('https://example.com/a');
+    });
+
     test('preserves provided loadMode', () => {
       const result = normalizeOptions({ loadMode: 'proxy' });
       expect(result.loadMode).toBe('proxy');

@@ -107,6 +107,45 @@ describe('panels/webview/FrameabilityEditor', () => {
     });
   });
 
+  test('sends the trimmed URL and records the trimmed URL with the verdict (RV1-22)', async () => {
+    const get = mockGet(jest.fn().mockResolvedValue({ frameable: true, reason: 'ok', recommendedMode: 'direct' }));
+    const { props, options } = buildProps({ url: '  https://example.com/path \n' });
+    render(<FrameabilityEditor {...props} />);
+
+    fireEvent.click(screen.getByTestId(frameabilityEditorTestIds.testButton));
+    await screen.findByTestId(frameabilityEditorTestIds.result);
+
+    expect(get).toHaveBeenCalledWith('/api/plugins/wilsonwaters-webview-app/resources/check-frameable', {
+      url: 'https://example.com/path',
+    });
+    expect(options.detectedForUrl).toBe('https://example.com/path');
+  });
+
+  test.each(['javascript:alert(1)', 'example.com', 'https://user:pw@example.com', 'ftp://example.com'])(
+    'an invalid URL %j is never sent: the button is disabled and a hint says why',
+    (url) => {
+      const get = mockGet(jest.fn());
+      const { props } = buildProps({ url });
+      render(<FrameabilityEditor {...props} />);
+
+      const button = screen.getByTestId(frameabilityEditorTestIds.testButton);
+      expect(button).toBeDisabled();
+      expect(screen.getByTestId(frameabilityEditorTestIds.invalidUrlHint)).toHaveTextContent(/cannot be tested/);
+      fireEvent.click(button);
+      expect(get).not.toHaveBeenCalled();
+    }
+  );
+
+  test('a whitespace-only URL counts as empty (no invalid-URL hint)', () => {
+    mockGet(jest.fn());
+    const { props } = buildProps({ url: '   ' });
+    render(<FrameabilityEditor {...props} />);
+
+    expect(screen.getByTestId(frameabilityEditorTestIds.testButton)).toBeDisabled();
+    expect(screen.getByText(/Enter a URL/i)).toBeInTheDocument();
+    expect(screen.queryByTestId(frameabilityEditorTestIds.invalidUrlHint)).not.toBeInTheDocument();
+  });
+
   // ---------------------------------------------------------------------------
   // CC: Loading state renders during the request
   // ---------------------------------------------------------------------------

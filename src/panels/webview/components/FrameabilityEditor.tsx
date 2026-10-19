@@ -5,6 +5,7 @@ import { getBackendSrv } from '@grafana/runtime';
 import { Alert, Button, Tooltip, useStyles2 } from '@grafana/ui';
 import { normalizeOptions, type PanelOptions } from '../../../types';
 import { detectedModeForUrl } from '../loadMode';
+import { validateWebViewUrl } from '../url';
 import { useBackendAvailable } from '../useBackendAvailable';
 import { frameabilityEditorTestIds } from './frameabilityEditorTestIds';
 
@@ -105,7 +106,10 @@ export function FrameabilityEditor({
 }: StandardEditorProps<PanelOptions['detectedMode'], unknown, PanelOptions>) {
   const styles = useStyles2(getStyles);
   const opts = normalizeOptions(context.options ?? {});
-  const url = opts.url.trim();
+  // Only a valid http(s) URL is sent, and it is sent trimmed: the same URL
+  // that the panel loads (VR-1).
+  const check = validateWebViewUrl(opts.url);
+  const url = check.valid ? check.url : opts.url;
   const hasUrl = url.length > 0;
   // A saved verdict that was measured for another URL. Auto mode ignores it.
   const verdictIsForOtherUrl =
@@ -148,7 +152,7 @@ export function FrameabilityEditor({
   });
 
   const handleTest = useCallback(async () => {
-    if (!hasUrl || backendDown) {
+    if (!check.valid || backendDown) {
       return;
     }
     const requestId = ++requestIdRef.current;
@@ -182,9 +186,9 @@ export function FrameabilityEditor({
       options.detectedForUrl = requestUrl;
     }
     onChangeRef.current(data.recommendedMode);
-  }, [hasUrl, url, backendDown]);
+  }, [check.valid, url, backendDown]);
 
-  const buttonDisabled = !hasUrl || backendDown || state.status === 'loading';
+  const buttonDisabled = !check.valid || backendDown || state.status === 'loading';
 
   // The disabled button is wrapped in a Tooltip explaining *why* it is disabled
   // when the backend is down, so the reason is perceivable on hover/focus even
@@ -231,6 +235,12 @@ export function FrameabilityEditor({
 
       {!hasUrl && !backendDown && (
         <div className={styles.hint}>Enter a URL in the &ldquo;URL&rdquo; field above to test it.</div>
+      )}
+
+      {hasUrl && !check.valid && !backendDown && (
+        <div className={styles.hint} data-testid={frameabilityEditorTestIds.invalidUrlHint}>
+          This URL cannot be tested. {check.message}
+        </div>
       )}
 
       {state.status === 'result' && state.data.recommendedMode === 'direct' && (

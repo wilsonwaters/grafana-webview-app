@@ -144,6 +144,12 @@ describe('panels/webview/WebViewPanel', () => {
       expect(iframe).not.toHaveAttribute('src');
     });
 
+    test('proxy mode → the proxy request carries the trimmed URL (RV1-22)', () => {
+      render(<WebViewPanel {...buildProps({ url: '  https://example.com/x \n', loadMode: 'proxy' })} />);
+
+      expect(fetchParams().get('url')).toBe('https://example.com/x');
+    });
+
     test('proxy mode → hideSelectors are carried as repeated hide= params (CR5)', () => {
       render(
         <WebViewPanel

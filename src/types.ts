@@ -182,7 +182,8 @@ function toDimension(value: unknown, fallback: number): number {
  * Saved, provisioned or hand-edited dashboard JSON can hold any value, so each
  * field is coerced on its own and falls back to its default when the value is
  * missing or has the wrong type:
- * - `url`, `detectedForUrl` and `hideSelectors`: strings (`detectedForUrl` may be null).
+ * - `url`, `detectedForUrl` and `hideSelectors`: strings (`detectedForUrl` may
+ *   be null). `url` is trimmed, so every consumer sees the URL that loads.
  * - `loadMode` and `detectedMode`: one of their allowed values.
  * - `viewportX` and `viewportY`: finite numbers. Negative values are valid:
  *   they move the page right or down inside the panel, and the preview can pan
@@ -202,7 +203,7 @@ export function normalizeOptions(partial: Partial<PanelOptions> | null | undefin
   const zoom = toFiniteNumber(raw.viewportZoom);
 
   return {
-    url: typeof raw.url === 'string' ? raw.url : d.url,
+    url: typeof raw.url === 'string' ? raw.url.trim() : d.url,
     loadMode: oneOf(raw.loadMode, LOAD_MODES) ?? d.loadMode,
     detectedMode: oneOf(raw.detectedMode, DETECTED_MODES) ?? d.detectedMode,
     detectedForUrl: typeof raw.detectedForUrl === 'string' ? raw.detectedForUrl : d.detectedForUrl,
