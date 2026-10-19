@@ -13,13 +13,19 @@
  */
 import { act } from '@testing-library/react';
 import { getBackendSrv, type BackendSrvRequest, type FetchResponse } from '@grafana/runtime';
-import { Observable, Subject } from 'rxjs';
+import { Observable, type Observer, Subject } from 'rxjs';
 
 export interface ProxyFetchCall {
   options: BackendSrvRequest;
   subject: Subject<FetchResponse<string>>;
   /** True once the caller has unsubscribed (which aborts a real request). */
   unsubscribed: boolean;
+  /**
+   * The observer that the caller passed to `subscribe`. Calling it directly
+   * bypasses the unsubscription, which simulates a transport that still
+   * delivers a response after the request was cancelled.
+   */
+  observer?: Partial<Observer<FetchResponse<string>>>;
 }
 
 export interface ProxyFetchMock {
@@ -34,13 +40,21 @@ export function installProxyFetchMock(): ProxyFetchMock {
     const subject = new Subject<FetchResponse<string>>();
     const call: ProxyFetchCall = { options, subject, unsubscribed: false };
     calls.push(call);
-    return new Observable<FetchResponse<string>>((subscriber) => {
+    const observable = new Observable<FetchResponse<string>>((subscriber) => {
       const inner = subject.subscribe(subscriber);
       return () => {
         call.unsubscribed = true;
         inner.unsubscribe();
       };
     });
+    // The code under test only calls `subscribe` with an observer object.
+    const tracked = {
+      subscribe: (observer: Partial<Observer<FetchResponse<string>>>) => {
+        call.observer = observer;
+        return observable.subscribe(observer);
+      },
+    };
+    return tracked as unknown as Observable<FetchResponse<string>>;
   });
   (getBackendSrv as jest.Mock).mockReturnValue({ fetch });
   return { calls, fetch };
@@ -81,5 +95,22 @@ export function respondHttpError(call: ProxyFetchCall, status: number, statusTex
 export function respondError(call: ProxyFetchCall, err: unknown): void {
   act(() => {
     call.subject.error(err);
+  });
+}
+
+/**
+ * Delivers `response` straight to the caller's observer, even when the caller
+ * has already unsubscribed. Use it to check that a cancelled request is ignored.
+ */
+export function deliverLateResponse(call: ProxyFetchCall, response: FetchResponse<string>): void {
+  act(() => {
+    call.observer?.next?.(response);
+  });
+}
+
+/** Like {@link deliverLateResponse}, for a failure. */
+export function deliverLateError(call: ProxyFetchCall, err: unknown): void {
+  act(() => {
+    call.observer?.error?.(err);
   });
 }

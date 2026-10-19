@@ -1,5 +1,5 @@
 import { PanelPlugin } from '@grafana/data';
-import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../types';
+import { DEFAULT_PANEL_OPTIONS, MIN_REFRESH_INTERVAL_SEC, type PanelOptions } from '../../types';
 import { WebViewPanel } from './components/WebViewPanel';
 import { ViewportEditor } from './components/ViewportEditor';
 import { FrameabilityEditor } from './components/FrameabilityEditor';
@@ -41,11 +41,12 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
     .addNumberInput({
       path: 'refreshIntervalSec',
       name: 'Auto-refresh interval (seconds)',
-      description: 'Reload the iframe at this interval. 0 disables auto-refresh.',
+      description: `Reload the page at this interval, in whole seconds. 0 disables auto-refresh. The minimum is ${MIN_REFRESH_INTERVAL_SEC} seconds; a smaller value uses ${MIN_REFRESH_INTERVAL_SEC}.`,
       defaultValue: DEFAULT_PANEL_OPTIONS.refreshIntervalSec,
       settings: {
         min: 0,
-        integer: false,
+        integer: true,
+        step: 1,
         placeholder: '0 (disabled)',
       },
     })

@@ -1,6 +1,9 @@
 import { renderHook } from '@testing-library/react';
 import { describeProxyError, useProxyDocument } from './useProxyDocument';
+import type { FetchResponse } from '@grafana/runtime';
 import {
+  deliverLateError,
+  deliverLateResponse,
   installProxyFetchMock,
   respondError,
   respondHtml,
@@ -20,6 +23,36 @@ let mock: ProxyFetchMock;
 beforeEach(() => {
   mock = installProxyFetchMock();
 });
+
+/** A response whose body records when it is read. A cancelled request must never read it. */
+function trackedResponse(html: string): { response: FetchResponse<string>; wasRead: () => boolean } {
+  let read = false;
+  const response = {
+    status: 200,
+    ok: true,
+    get data() {
+      read = true;
+      return html;
+    },
+  } as unknown as FetchResponse<string>;
+  return { response, wasRead: () => read };
+}
+
+/** An error whose fields record when they are read. A cancelled request must never read it. */
+function trackedError(): { error: unknown; wasRead: () => boolean } {
+  let read = false;
+  const error = {
+    get status() {
+      read = true;
+      return 502;
+    },
+    get data() {
+      read = true;
+      return { message: 'late failure' };
+    },
+  };
+  return { error, wasRead: () => read };
+}
 
 function renderDoc(fetchUrl: string, reloadKey = 0) {
   return renderHook(({ url, key }: { url: string; key: number }) => useProxyDocument(url, key), {
@@ -119,14 +152,45 @@ describe('panels/webview/useProxyDocument (FR5)', () => {
     expect(result.current).toEqual({ status: 'ready', html: '<p>same</p>', version: 2 });
   });
 
-  test('a stale reload response never overwrites a newer reload', () => {
+  test('a reload while a request is in flight is skipped: no second request and no cancellation', () => {
     const { result, rerender } = renderDoc(PATH_A, 0);
     rerender({ url: PATH_A, key: 1 });
+    rerender({ url: PATH_A, key: 2 });
 
-    respondHtml(mock.calls[1], '<p>newer</p>');
-    respondHtml(mock.calls[0], '<p>older</p>');
+    expect(mock.fetch).toHaveBeenCalledTimes(1);
+    expect(mock.calls[0].unsubscribed).toBe(false);
 
-    expect(result.current).toMatchObject({ status: 'ready', html: '<p>newer</p>' });
+    // The slow request still completes and is shown.
+    respondHtml(mock.calls[0], '<p>slow</p>');
+    expect(result.current).toEqual({ status: 'ready', html: '<p>slow</p>', version: 1 });
+
+    // The next tick after the response fetches again.
+    rerender({ url: PATH_A, key: 3 });
+    expect(mock.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('a reload after a failed request fetches again', () => {
+    const { rerender } = renderDoc(PATH_A, 0);
+    respondHttpError(mock.calls[0], 502, 'Bad Gateway', 'upstream failed');
+
+    rerender({ url: PATH_A, key: 1 });
+
+    expect(mock.fetch).toHaveBeenCalledTimes(2);
+  });
+
+  test('a reload and a new path in the same render fetch the new path once', () => {
+    const { rerender } = renderDoc(PATH_A, 0);
+    rerender({ url: PATH_B, key: 1 });
+
+    expect(mock.fetch).toHaveBeenCalledTimes(2);
+    expect(mock.calls[0].unsubscribed).toBe(true);
+    expect(mock.calls[1].options.url).toBe(PATH_B);
+  });
+
+  test('the first render never counts as a reload', () => {
+    renderDoc(PATH_A, 7);
+
+    expect(mock.fetch).toHaveBeenCalledTimes(1);
   });
 
   test('a failed reload shows the error', () => {
@@ -152,13 +216,36 @@ describe('panels/webview/useProxyDocument (FR5)', () => {
     expect(result.current).toMatchObject({ status: 'ready', html: '<p>back</p>' });
   });
 
-  test('unmount cancels the request and a late response is ignored', () => {
+  test('unmount cancels the request, and a response delivered after unmount is never read', () => {
     const { unmount } = renderDoc(PATH_A);
 
     unmount();
-
     expect(mock.calls[0].unsubscribed).toBe(true);
-    expect(() => respondHtml(mock.calls[0], '<p>late</p>')).not.toThrow();
+
+    // A transport that ignores the cancellation still delivers the response.
+    // The hook must drop it before it reads the body.
+    const late = trackedResponse('<p>late</p>');
+    deliverLateResponse(mock.calls[0], late.response);
+    expect(late.wasRead()).toBe(false);
+
+    const lateError = trackedError();
+    deliverLateError(mock.calls[0], lateError.error);
+    expect(lateError.wasRead()).toBe(false);
+  });
+
+  test('a response for a cancelled path that still arrives never replaces the newer document', () => {
+    const { result, rerender } = renderDoc(PATH_A);
+    rerender({ url: PATH_B, key: 0 });
+    respondHtml(mock.calls[1], '<p>B</p>');
+
+    const late = trackedResponse('<p>A (cancelled)</p>');
+    deliverLateResponse(mock.calls[0], late.response);
+    const lateError = trackedError();
+    deliverLateError(mock.calls[0], lateError.error);
+
+    expect(late.wasRead()).toBe(false);
+    expect(lateError.wasRead()).toBe(false);
+    expect(result.current).toEqual({ status: 'ready', html: '<p>B</p>', version: 1 });
   });
 
   test('a network failure (no HTTP status) becomes an error without a status', () => {

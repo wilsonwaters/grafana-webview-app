@@ -38,8 +38,10 @@ const frameTestIds: WebViewFrameTestIds = {
  *
  * PC5 additions:
  * - **Auto-refresh**: when `refreshIntervalSec > 0`, a `setInterval` bumps a
- *   counter key each interval. Direct mode remounts the iframe (a fresh load);
- *   proxy mode refetches the HTML and swaps it in when it arrives. The timer is
+ *   counter key each interval (at least `MIN_REFRESH_INTERVAL_SEC`, applied by
+ *   `normalizeOptions`). Direct mode remounts the iframe (a fresh load); proxy
+ *   mode refetches the HTML and swaps it in when it arrives, and skips a tick
+ *   while the previous fetch is still in flight. The timer is
  *   torn down on unmount and re-armed when the interval value changes. A
  *   counter-key approach avoids any module-level shared state, so two panel
  *   instances each maintain their own independent refresh cycle.

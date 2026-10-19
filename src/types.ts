@@ -72,7 +72,9 @@ export interface PanelOptions {
   iframeHeight: number;
 
   /**
-   * Auto-refresh interval in seconds. 0 means disabled.
+   * Auto-refresh interval in whole seconds. 0 means disabled. A positive value
+   * is rounded to whole seconds and is at least {@link MIN_REFRESH_INTERVAL_SEC}
+   * (applied by normalizeOptions).
    * @default 0
    */
   refreshIntervalSec: number;
@@ -113,6 +115,22 @@ export const DEFAULT_PANEL_OPTIONS: Readonly<PanelOptions> = {
   hideSelectors: '',
   showDebugOverlay: false,
 };
+
+/**
+ * Shortest auto-refresh interval, in seconds. Each refresh reloads the page,
+ * and in proxy mode each refresh is a backend request that counts against the
+ * proxy rate limits, so a smaller stored value is raised to this minimum.
+ */
+export const MIN_REFRESH_INTERVAL_SEC = 5;
+
+/** Zero or less disables auto-refresh; a positive value is whole seconds, at least the minimum. */
+function toRefreshInterval(value: unknown): number {
+  const n = toFiniteNumber(value);
+  if (n === undefined || n <= 0) {
+    return DEFAULT_PANEL_OPTIONS.refreshIntervalSec;
+  }
+  return Math.max(MIN_REFRESH_INTERVAL_SEC, Math.round(n));
+}
 
 type LoadMode = PanelOptions['loadMode'];
 type DetectedMode = Exclude<PanelOptions['detectedMode'], null>;
@@ -159,7 +177,8 @@ function toDimension(value: unknown, fallback: number): number {
  *   and zoom past the top-left edge of the page.
  * - `viewportZoom`: a finite number, clamped with {@link clampZoom}.
  * - `iframeWidth` and `iframeHeight`: positive numbers.
- * - `refreshIntervalSec`: a finite number. Zero or less disables auto-refresh.
+ * - `refreshIntervalSec`: zero or less disables auto-refresh. A positive value
+ *   is rounded to whole seconds and raised to {@link MIN_REFRESH_INTERVAL_SEC}.
  * - `showDebugOverlay`: `true` only for the boolean `true`.
  *
  * The function is pure and accepts any partial or unknown input.
@@ -169,7 +188,6 @@ export function normalizeOptions(partial: Partial<PanelOptions> | null | undefin
   const d = DEFAULT_PANEL_OPTIONS;
 
   const zoom = toFiniteNumber(raw.viewportZoom);
-  const refresh = toFiniteNumber(raw.refreshIntervalSec);
 
   return {
     url: typeof raw.url === 'string' ? raw.url : d.url,
@@ -180,7 +198,7 @@ export function normalizeOptions(partial: Partial<PanelOptions> | null | undefin
     viewportZoom: zoom === undefined ? d.viewportZoom : clampZoom(zoom),
     iframeWidth: toDimension(raw.iframeWidth, d.iframeWidth),
     iframeHeight: toDimension(raw.iframeHeight, d.iframeHeight),
-    refreshIntervalSec: refresh !== undefined && refresh > 0 ? refresh : d.refreshIntervalSec,
+    refreshIntervalSec: toRefreshInterval(raw.refreshIntervalSec),
     hideSelectors: typeof raw.hideSelectors === 'string' ? raw.hideSelectors : d.hideSelectors,
     showDebugOverlay: raw.showDebugOverlay === true,
   };

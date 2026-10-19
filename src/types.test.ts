@@ -1,4 +1,4 @@
-import { DEFAULT_PANEL_OPTIONS, normalizeOptions, type PanelOptions } from './types';
+import { DEFAULT_PANEL_OPTIONS, MIN_REFRESH_INTERVAL_SEC, normalizeOptions, type PanelOptions } from './types';
 import { VIEWPORT_ZOOM_MAX, VIEWPORT_ZOOM_MIN } from './panels/webview/viewport';
 
 describe('DEFAULT_PANEL_OPTIONS', () => {
@@ -178,6 +178,29 @@ describe('normalizeOptions', () => {
     test('preserves positive refreshIntervalSec', () => {
       const result = normalizeOptions({ refreshIntervalSec: 30 });
       expect(result.refreshIntervalSec).toBe(30);
+    });
+  });
+
+  describe('refresh interval minimum (RV1-12)', () => {
+    test.each([
+      [0.05, 5],
+      [1, 5],
+      [4.9, 5],
+      [5, 5],
+      [5.4, 5],
+      [5.6, 6],
+      [60, 60],
+    ])('a positive interval %p becomes %p whole seconds (minimum MIN_REFRESH_INTERVAL_SEC)', (input, expected) => {
+      expect(normalizeOptions({ refreshIntervalSec: input }).refreshIntervalSec).toBe(expected);
+    });
+
+    test('the minimum is 5 seconds', () => {
+      expect(MIN_REFRESH_INTERVAL_SEC).toBe(5);
+    });
+
+    test('zero and negative values disable auto-refresh', () => {
+      expect(normalizeOptions({ refreshIntervalSec: 0 }).refreshIntervalSec).toBe(0);
+      expect(normalizeOptions({ refreshIntervalSec: -0.5 }).refreshIntervalSec).toBe(0);
     });
   });
 

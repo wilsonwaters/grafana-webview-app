@@ -301,6 +301,31 @@ describe('panels/webview/WebViewPanel', () => {
       setIntervalSpy.mockRestore();
     });
 
+    test.each([
+      [1, 5000],
+      [0.05, 5000],
+      [4.4, 5000],
+      [12.6, 13000],
+    ])('refreshIntervalSec %p uses whole seconds with a 5 s minimum (%p ms)', (seconds, expectedMs) => {
+      const setIntervalSpy = jest.spyOn(global, 'setInterval');
+
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: seconds })} />);
+
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), expectedMs);
+      setIntervalSpy.mockRestore();
+    });
+
+    test('a non-numeric refreshIntervalSec arms no interval (no tight refresh loop)', () => {
+      const setIntervalSpy = jest.spyOn(global, 'setInterval');
+      const options = { refreshIntervalSec: 'fast' } as unknown as Partial<PanelOptions>;
+
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', ...options })} />);
+
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+      setIntervalSpy.mockRestore();
+    });
+
     test('iframe is remounted (key changes) after one interval tick', () => {
       const { rerender } = render(
         <WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: 10 })} />
@@ -990,6 +1015,26 @@ describe('panels/webview/WebViewPanel', () => {
           jest.advanceTimersByTime(10000);
         });
         expect(proxyFetch.calls).toHaveLength(3);
+      });
+
+      test('a tick while the previous request is in flight is skipped (no abort, no second request)', () => {
+        render(<WebViewPanel {...proxyProps({ refreshIntervalSec: 5 })} />);
+
+        // The first request is still in flight after two ticks.
+        act(() => {
+          jest.advanceTimersByTime(10000);
+        });
+        expect(proxyFetch.calls).toHaveLength(1);
+        expect(proxyFetch.calls[0].unsubscribed).toBe(false);
+
+        respondHtml(proxyFetch.calls[0], '<p>slow page</p>');
+        expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('srcdoc', '<p>slow page</p>');
+
+        // The next tick after the response refetches.
+        act(() => {
+          jest.advanceTimersByTime(5000);
+        });
+        expect(proxyFetch.calls).toHaveLength(2);
       });
 
       test('the iframe is remounted on each successful refresh, even with unchanged HTML', () => {

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { getBackendSrv } from '@grafana/runtime';
+import type { Unsubscribable } from 'rxjs';
 
 /**
  * State of the proxied HTML document for one proxy-mode frame (FR5).
@@ -81,54 +82,89 @@ type InternalState = { fetchUrl: string } & ProxyDocumentState;
  * - Uses `getBackendSrv().fetch`, so the request carries Grafana's session and
  *   organisation headers and resolves under `config.appSubUrl`. Grafana's own
  *   error toast is turned off; the caller shows the error state.
- * - Refetches when `fetchUrl` changes (new URL or hide selectors) and when
- *   `reloadKey` changes (auto-refresh). On a reload the current document (or
- *   error) stays on screen until the new response arrives.
- * - Stale responses are ignored. The effect cleanup unsubscribes (which aborts
- *   the request) and marks the request inactive, so a response for an older
- *   path, an older reload or an unmounted component never updates the state.
+ * - A new `fetchUrl` (new URL or hide selectors) cancels the request for the
+ *   old path and fetches the new one.
+ * - A new `reloadKey` (auto-refresh) fetches the same path again, but only when
+ *   no request for it is in flight. A tick that arrives while a request is in
+ *   flight is skipped: the request is not cancelled and no second request is
+ *   started, so a slow upstream page still loads and the proxy rate limits are
+ *   not spent on requests that are thrown away. On a reload the current
+ *   document (or error) stays on screen until the new response arrives.
+ * - Responses for a cancelled request are ignored. The cleanup unsubscribes
+ *   (which aborts the request) and marks the request inactive, so a response
+ *   for an older path or an unmounted component never updates the state.
  */
 export function useProxyDocument(fetchUrl: string, reloadKey: number): ProxyDocumentState {
   const [state, setState] = useState<InternalState>({ fetchUrl, status: 'loading' });
   // Increments on every successful response; used as the frame key.
   const versionRef = useRef(0);
+  // Starts a request for the current path unless one is in flight. Set by the
+  // fetch effect below and cleared when that path is cancelled.
+  const loadRef = useRef<(() => void) | undefined>(undefined);
+  // The reloadKey that the last load was for.
+  const reloadKeyRef = useRef(reloadKey);
 
   useEffect(() => {
     let active = true;
+    let inFlight = false;
+    let subscription: Unsubscribable | undefined;
 
-    // No state reset here: the render below reports `loading` while the stored
-    // state belongs to another path, and a reload of the same path keeps the
-    // current state (document or error) until the new response arrives.
-    const subscription = getBackendSrv()
-      .fetch<string>({
-        url: fetchUrl,
-        method: 'GET',
-        responseType: 'text',
-        showErrorAlert: false,
-        showSuccessAlert: false,
-      })
-      .subscribe({
-        next: (response) => {
-          if (!active) {
-            return;
-          }
-          versionRef.current += 1;
-          const html = typeof response.data === 'string' ? response.data : '';
-          setState({ fetchUrl, status: 'ready', html, version: versionRef.current });
-        },
-        error: (err: unknown) => {
-          if (!active) {
-            return;
-          }
-          setState({ fetchUrl, status: 'error', ...describeProxyError(err) });
-        },
-      });
+    const load = () => {
+      if (inFlight) {
+        return;
+      }
+      inFlight = true;
+      // No state reset here: the render below reports `loading` while the
+      // stored state belongs to another path, and a reload of the same path
+      // keeps the current state (document or error) until the response arrives.
+      subscription = getBackendSrv()
+        .fetch<string>({
+          url: fetchUrl,
+          method: 'GET',
+          responseType: 'text',
+          showErrorAlert: false,
+          showSuccessAlert: false,
+        })
+        .subscribe({
+          next: (response) => {
+            inFlight = false;
+            if (!active) {
+              return;
+            }
+            versionRef.current += 1;
+            const html = typeof response.data === 'string' ? response.data : '';
+            setState({ fetchUrl, status: 'ready', html, version: versionRef.current });
+          },
+          error: (err: unknown) => {
+            inFlight = false;
+            if (!active) {
+              return;
+            }
+            setState({ fetchUrl, status: 'error', ...describeProxyError(err) });
+          },
+          complete: () => {
+            inFlight = false;
+          },
+        });
+    };
+
+    loadRef.current = load;
+    load();
 
     return () => {
       active = false;
-      subscription.unsubscribe();
+      loadRef.current = undefined;
+      subscription?.unsubscribe();
     };
-  }, [fetchUrl, reloadKey]);
+  }, [fetchUrl]);
+
+  useEffect(() => {
+    if (reloadKeyRef.current === reloadKey) {
+      return;
+    }
+    reloadKeyRef.current = reloadKey;
+    loadRef.current?.();
+  }, [reloadKey]);
 
   // Until the first response for a new path arrives, the stored state belongs
   // to the previous path. Report loading so the old document is never shown.
