@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -160,6 +161,88 @@ func TestApplyDefaultMemoryLimit(t *testing.T) {
 	}
 	if got := ApplyDefaultMemoryLimit(); got != DefaultMemoryLimit || debug.SetMemoryLimit(-1) != DefaultMemoryLimit {
 		t.Fatalf("without GOMEMLIMIT: limit %d, want %d", got, DefaultMemoryLimit)
+	}
+}
+
+// rv2FailingResolver is a security.Resolver whose lookup fails with an error
+// that names an internal DNS server address.
+type rv2FailingResolver struct{}
+
+func (rv2FailingResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
+	return nil, errors.New("lookup example.com on 192.168.77.1:53: no such host")
+}
+
+// TestUpstreamFailureDetailOnlyInServerLog covers RV1-8: when the upstream
+// cannot be reached, /check-frameable and /proxy tell the client only the
+// class of failure. The dial error, which names resolved or internal IP
+// addresses, is written to the server log only.
+func TestUpstreamFailureDetailOnlyInServerLog(t *testing.T) {
+	cases := []struct {
+		name       string
+		transport  func() http.RoundTripper
+		leak       string
+		wantReason string
+		proxyCode  int
+	}{
+		{
+			name:       "blocked resolved address",
+			transport:  func() http.RoundTripper { return tc1ResolverTransport(tc1NewStubResolver("10.20.30.40")) },
+			leak:       "10.20.30.40",
+			wantReason: "upstream unreachable: the host resolves to a blocked address",
+			proxyCode:  http.StatusForbidden,
+		},
+		{
+			name:       "resolve failure",
+			transport:  func() http.RoundTripper { return tc1ResolverTransport(rv2FailingResolver{}) },
+			leak:       "192.168.77.1",
+			wantReason: "upstream unreachable: the host could not be resolved",
+			proxyCode:  http.StatusBadGateway,
+		},
+		{
+			name: "connection refused",
+			transport: func() http.RoundTripper {
+				return &http.Transport{DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+					var d net.Dialer
+					return d.DialContext(ctx, network, "127.0.0.1:1")
+				}}
+			},
+			leak:       "127.0.0.1",
+			wantReason: "upstream unreachable: the connection failed",
+			proxyCode:  http.StatusBadGateway,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newProxyHandler(settingsWith(allowExample(DomainOptions{})))
+			p.transport = tc.transport()
+			logs := &ac19CapturingLogger{}
+			p.logger = logs
+
+			got := decodeFrameable(t, doCheckFrameable(checkFrameableHandler{p: p}, "http://example.com/page"))
+			if got.Reason != tc.wantReason || got.RecommendedMode != recommendedModeProxy {
+				t.Errorf("/check-frameable verdict = %+v, want reason %q", got, tc.wantReason)
+			}
+
+			rec := doProxy(p, "http://example.com/page")
+			if rec.Code != tc.proxyCode {
+				t.Errorf("/proxy status = %d, want %d", rec.Code, tc.proxyCode)
+			}
+			if strings.Contains(rec.Body.String(), tc.leak) {
+				t.Errorf("/proxy body %q contains %s", rec.Body.String(), tc.leak)
+			}
+
+			var logged []string
+			for _, w := range logs.warnEntries() {
+				logged = append(logged, w.msg+": "+fmt.Sprint(w.kv["error"]))
+			}
+			all := strings.Join(logged, "\n")
+			if !strings.Contains(all, "check-frameable fetch failed") || !strings.Contains(all, "proxy upstream error") {
+				t.Errorf("server log = %q, want a warning from each endpoint", all)
+			}
+			if !strings.Contains(all, tc.leak) {
+				t.Errorf("server log = %q, want the error detail (%s)", all, tc.leak)
+			}
+		})
 	}
 }
 

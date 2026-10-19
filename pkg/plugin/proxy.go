@@ -807,10 +807,13 @@ func (p *proxyHandler) serveProxy(w http.ResponseWriter, req *http.Request, targ
 				discardBody(resp)
 				return nil
 			}
-			return prepareHTMLBody(resp, maxBytes, target, p.logger, hideSelectors)
+			return prepareHTMLBody(resp, maxBytes, target, hideSelectors)
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			denied = proxyErrorHandler(w, r, err)
+			// The client gets only the reason; the error, which can name the
+			// resolved IP addresses of the target, goes to the server log.
+			p.logger.FromContext(r.Context()).Warn("proxy upstream error", "url", target.String(), "reason", denied, "error", err)
 		},
 	}
 
@@ -1071,12 +1074,12 @@ func isHTMLContentType(contentType string) bool {
 //   - Content-Length is set to the length actually delivered.
 //
 // A rewrite failure other than the size limit (for example a document nested
-// deeper than the parser accepts) fails closed: errRewriteFailed ⇒ 502, and a
-// warning is logged. The un-rewritten page is never served.
+// deeper than the parser accepts) fails closed: errRewriteFailed ⇒ 502 (the
+// error handler logs the cause). The un-rewritten page is never served.
 // maxBytes <= 0 disables every bound. pageURL is the validated target of this
 // hop; it is the base for relative-URL resolution. hideSelectors are the CR5
 // author hide-selectors; rewriteHTMLLimited validates and applies them.
-func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logger log.Logger, hideSelectors []string) error {
+func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, hideSelectors []string) error {
 	if resp == nil || resp.Body == nil {
 		return nil
 	}
@@ -1144,9 +1147,6 @@ func prepareHTMLBody(resp *http.Response, maxBytes int64, pageURL *url.URL, logg
 	if rerr != nil {
 		if errors.Is(rerr, errResponseTooLarge) {
 			return rerr
-		}
-		if logger != nil {
-			logger.Warn("html rewrite failed", "url", pageURL.String(), "error", rerr)
 		}
 		return fmt.Errorf("%w: %w", errRewriteFailed, rerr)
 	}

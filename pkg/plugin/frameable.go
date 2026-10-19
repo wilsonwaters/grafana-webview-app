@@ -3,6 +3,8 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -215,11 +217,7 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 
 	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
 	if err != nil {
-		return frameableResponse{
-			Frameable:       false,
-			Reason:          "upstream unreachable: " + err.Error(),
-			RecommendedMode: recommendedModeProxy,
-		}
+		return p.unreachableVerdict(ctx, targetURL, err)
 	}
 	// Apply the same outbound header hygiene spirit as the proxy: identify
 	// honestly and leak nothing about the Grafana instance/viewer.
@@ -228,11 +226,7 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
-		return frameableResponse{
-			Frameable:       false,
-			Reason:          "upstream unreachable: " + err.Error(),
-			RecommendedMode: recommendedModeProxy,
-		}
+		return p.unreachableVerdict(ctx, targetURL, err)
 	}
 	// Close the body without reading it: the verdict comes from headers only.
 	defer func() { _ = resp.Body.Close() }()
@@ -248,6 +242,37 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 	}
 
 	return frameingVerdictFromHeaders(resp.Header)
+}
+
+// unreachableVerdict is the proxy-recommended verdict for a framing check whose
+// fetch failed. The reason given to the caller names only the class of
+// failure: the error itself can hold the resolved IP addresses of the target
+// (for example a blocked internal address), so it goes to the server log only.
+func (p *proxyHandler) unreachableVerdict(ctx context.Context, targetURL string, err error) frameableResponse {
+	p.logger.FromContext(ctx).Warn("check-frameable fetch failed", "url", targetURL, "error", err)
+	return frameableResponse{
+		Frameable:       false,
+		Reason:          "upstream unreachable: " + fetchFailureReason(err),
+		RecommendedMode: recommendedModeProxy,
+	}
+}
+
+// fetchFailureReason describes why an upstream fetch failed without any detail
+// from the error message (no host names, IP addresses or ports).
+func fetchFailureReason(err error) string {
+	switch security.DialReasonOf(err) {
+	case security.ReasonBlockedIP:
+		return "the host resolves to a blocked address"
+	case security.ReasonMetadataHost:
+		return "the host is a blocked cloud-metadata endpoint"
+	case security.ReasonResolveFailed, security.ReasonNoHost:
+		return "the host could not be resolved"
+	}
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return "the request timed out"
+	}
+	return "the connection failed"
 }
 
 // frameingVerdictFromHeaders inspects the framing-relevant response headers and
