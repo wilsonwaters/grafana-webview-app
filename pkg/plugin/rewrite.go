@@ -206,7 +206,8 @@ var htmlParseLimits = htmlparse.Limits{
 	// tag, text run, comment or inline script may be at most 2 MiB.
 	MaxTokenBytes: 2 << 20,
 	// The estimated tree (nodes, attributes, text, cloned formatting
-	// elements). An ordinary 5 MiB page needs well under half of this.
+	// elements). Ordinary pages need 2x to 7x their size, so pages up to
+	// about 7 MiB fit; see ai-state/streams/v1-stabilisation/memory-sizing.md.
 	MaxTreeBytes: 48 << 20,
 	// Text appends and attribute comparisons, which grow faster than the
 	// input on hostile documents. Ordinary pages use almost none of this.
