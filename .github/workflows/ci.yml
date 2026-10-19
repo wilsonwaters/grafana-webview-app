@@ -18,15 +18,15 @@ jobs:
     name: Build, lint and unit tests
     runs-on: ubuntu-latest
     # The QA-Alintech environment provides the GRAFANA_INSTANCE_URL variable used
-    # as a private-signing root URL. The access policy token is a repository secret.
+    # as a private-signing root URL. The access policy token is a repository
+    # secret; only the two signing steps below receive it (RV1-16), so npm
+    # scripts, tests, linters and build tools in the other steps cannot read it.
     environment: QA-Alintech
     outputs:
       plugin-id: ${{ steps.metadata.outputs.plugin-id }}
       plugin-version: ${{ steps.metadata.outputs.plugin-version }}
       has-e2e: ${{ steps.check-for-e2e.outputs.has-e2e }}
       has-backend: ${{ steps.check-for-backend.outputs.has-backend }}
-    env:
-      GRAFANA_ACCESS_POLICY_TOKEN: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -99,9 +99,23 @@ jobs:
       # `sign` script (single source of truth, shared with the release workflow) --
       # do not pass a `-- --rootUrls` override here or sign-plugin receives the flag
       # twice.
+      # A secret cannot be tested in `if:` directly, so this step tests it in the
+      # shell and exposes only whether it is set (forks and Dependabot runs have
+      # no token and skip signing).
+      - name: Check for signing token
+        id: check-signing-token
+        env:
+          GRAFANA_ACCESS_POLICY_TOKEN: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
+        run: |
+          if [ -n "${GRAFANA_ACCESS_POLICY_TOKEN}" ]; then
+            echo "has-token=true" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Sign plugin (private)
+        if: steps.check-signing-token.outputs.has-token == 'true'
+        env:
+          GRAFANA_ACCESS_POLICY_TOKEN: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
         run: npm run sign
-        if: ${{ env.GRAFANA_ACCESS_POLICY_TOKEN != '' }}
 
       - name: Get plugin metadata
         id: metadata
@@ -161,9 +175,10 @@ jobs:
 
   # AC 36: "All security tests pass in CI on every PR (security suite cannot be
   # skipped)." This job is intentionally SEPARATE from `build` and is NOT gated
-  # by any `has-backend` conditional, so the backend security suite (AC 17-29)
-  # always runs on every push to main and every PR. The guard script asserts a
-  # `--- PASS:` line for every required AC test, so removing, renaming, or
+  # by any `has-backend` conditional, so the backend security suite (AC 17-31,
+  # VR and RV2 fixes) always runs on every push to main and every PR. The guard
+  # script asserts a `--- PASS:` line for every required test (REQUIRED_TESTS
+  # in scripts/security-suite.sh), so removing, renaming, or
   # `t.Skip`-ping a security test fails this job rather than silently passing.
   #
   # NOTE: To prevent merging while this job is red or missing, add `Security
@@ -182,7 +197,7 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run mandatory security suite (AC 17-29)
+      - name: Run mandatory security suite
         run: ./scripts/security-suite.sh
 
   # AC 32 / decisions Q13b and D3: the E2E Grafana-version matrix is AUTO-RESOLVED
@@ -248,10 +263,17 @@ jobs:
       - name: Install dev dependencies
         run: npm ci
 
+      # The matrix values reach the shell through env, not ${{ }} expansion in
+      # the script, so they cannot inject shell syntax.
       - name: Start Grafana
+        env:
+          GRAFANA_VERSION: ${{ matrix.GRAFANA_IMAGE.VERSION }}
+          GRAFANA_IMAGE: ${{ matrix.GRAFANA_IMAGE.NAME }}
+          ANONYMOUS_AUTH_ENABLED: 'false'
+          DEVELOPMENT: 'false'
         run: |
           docker compose pull
-          ANONYMOUS_AUTH_ENABLED=false DEVELOPMENT=false GRAFANA_VERSION=${{ matrix.GRAFANA_IMAGE.VERSION }} GRAFANA_IMAGE=${{ matrix.GRAFANA_IMAGE.NAME }} docker compose up -d
+          docker compose up -d
 
       - name: Wait for grafana server
         uses: grafana/plugin-actions/wait-for-grafana@4205a0824a13b71fdb9b9b49f28f5f72b754f81f # wait-for-grafana/v1.0.5
