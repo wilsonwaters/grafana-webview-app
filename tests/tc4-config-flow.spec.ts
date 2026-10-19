@@ -20,12 +20,12 @@ import { setWebViewVisualization } from './tc4Helpers';
  * observable WITHOUT proxy render (button verdict Alert, radio selection, etc.).
  *
  * Determinism: the success path needs an allowlisted host. provisioning/plugins/
- * apps.yaml allowlists `example.com` so CI exercises the HTTP-200 verdict path.
- * Locally the verdict text (Direct vs Proxied) depends on the actual upstream
- * fetch (which may be sandboxed/MITM'd), so we assert only that a *non-error*
- * verdict Alert appears — never depending on the network reaching example.com.
- * If the live instance has an empty allowlist (host not allowlisted), the
- * success assertion is skipped rather than flaked; the denied path still runs.
+ * apps.yaml allowlists `example.com`. Saving the Configuration page keeps that
+ * entry (appConfig.spec only adds and removes its own domain), so the success
+ * path always runs. The verdict text (Direct vs Proxied) depends on the actual
+ * upstream fetch (which may be sandboxed/MITM'd), so we assert only that a
+ * *non-error* verdict Alert appears — never depending on the network reaching
+ * example.com.
  */
 
 /** A host deliberately NOT in the allowlist — guarantees a 403 allowlist denial. */
@@ -34,10 +34,7 @@ const NON_ALLOWLISTED_URL = 'https://not-allowlisted.example.org';
 const ALLOWLISTED_URL = 'https://example.com';
 
 test.describe('TC4 config flow (AC34)', () => {
-  test('Test URL: non-allowlisted host shows the security-boundary Error state', async ({
-    panelEditPage,
-    page,
-  }) => {
+  test('Test URL: non-allowlisted host shows the security-boundary Error state', async ({ panelEditPage, page }) => {
     test.setTimeout(180000);
     await setWebViewVisualization(panelEditPage, page);
 
@@ -61,10 +58,7 @@ test.describe('TC4 config flow (AC34)', () => {
     await expect(result).toContainText(/allowlist/i);
   });
 
-  test('Test URL: allowlisted host shows a non-error verdict (success path)', async ({
-    panelEditPage,
-    page,
-  }) => {
+  test('Test URL: allowlisted host shows a non-error verdict (success path)', async ({ panelEditPage, page }) => {
     test.setTimeout(180000);
     await setWebViewVisualization(panelEditPage, page);
 
@@ -78,25 +72,16 @@ test.describe('TC4 config flow (AC34)', () => {
     const result = page.getByTestId(frameabilityEditorTestIds.result);
     await expect(result).toBeVisible({ timeout: 20000 });
 
-    const text = (await result.textContent()) ?? '';
-    // If the live instance has an empty allowlist (no provisioned allowedDomains),
-    // the host is denied → "Error". That is the denied path, covered by the test
-    // above; skip the success assertion here rather than flake.
-    test.skip(/allowlist/i.test(text), 'host not allowlisted on this instance — success path provisioned in CI');
-
     // Success path: a 200 verdict was rendered. The verdict is either "Direct"
     // (frameable) or "Proxied" (blocked / upstream-unreachable). Both are
-    // non-error success/info Alerts. We assert it is NOT the Error state and that
-    // a recognised verdict title is shown — without depending on the network
+    // non-error success/info Alerts. We assert it is NOT the allowlist denial and
+    // that a recognised verdict title is shown — without depending on the network
     // reaching example.com (the verdict may be Proxied if the fetch is sandboxed).
-    expect(text).not.toContain('allowlist');
+    await expect(result).not.toContainText(/allowlist/i);
     await expect(result).toContainText(/Direct|Proxied/);
   });
 
-  test('Load mode selection: Auto / Direct / Proxy radio group is selectable', async ({
-    panelEditPage,
-    page,
-  }) => {
+  test('Load mode selection: Auto / Direct / Proxy radio group is selectable', async ({ panelEditPage, page }) => {
     test.setTimeout(180000);
     await setWebViewVisualization(panelEditPage, page);
 
