@@ -37,25 +37,24 @@ const BACKEND_DEPENDENT_MODES: ReadonlySet<LoadMode> = new Set<LoadMode>(['auto'
  *   note is flashed — the probe settles quickly and we avoid a jarring momentary
  *   "backend unavailable" message that then disappears.
  * - When `backendAvailable === false`, the proxy-dependent options (Auto and
- *   Proxy) are **omitted** so only `direct` is offered, the displayed selection
- *   is clamped to `direct`, and an `info` Alert explains that only direct
- *   iframing is possible. (We omit rather than rely on per-option `disabled`
+ *   Proxy) are **omitted** so only `direct` is offered, and an `info` Alert
+ *   explains that only direct iframing is possible. (We omit rather than rely on per-option `disabled`
  *   because `@grafana/ui`'s `RadioButtonGroup` does not propagate per-option
  *   `disabled` to the underlying input — so a disabled-styled option would still
  *   be selectable/focusable. Omitting makes Direct the genuinely-only choice and
  *   is accessible: there is no phantom-enabled control.)
  * - When `backendAvailable === true`, all options are shown and no note shows.
  *
- * Clamp persistence (decision): the clamp is **display-only**. We do NOT call
- * `onChange('direct')` on mount when the backend is unavailable, because that
- * would silently dirty an already-saved panel (e.g. one saved with `proxy`)
- * merely by opening its editor while the backend happens to be down. Instead we
- * render `direct` as the selected value and disable the other options; the
- * stored value is left untouched until the author actively picks something. The
- * separate DF3 view-mode guard is responsible for enforcing direct-only at
- * render time, so a stored `proxy`/`auto` value never proxies when the backend
- * is gone. The key acceptance — author cannot select Proxy and the editor
- * clearly communicates Direct-only — is met by the disable + clamp + note.
+ * Stored Auto or Proxy while degraded (RV1-28): we do NOT call
+ * `onChange('direct')` on mount, because that would silently dirty an
+ * already-saved panel (e.g. one saved with `proxy`) merely by opening its
+ * editor while the backend happens to be down. The stored value is left
+ * untouched until the author picks something. Direct is therefore shown
+ * **unselected**, and the note names the saved mode, so a click on Direct is a
+ * real change that persists `direct`. (Showing Direct as already selected made
+ * that click a no-op.) The separate DF3 view-mode guard shows a "backend proxy
+ * unavailable" message for a proxy-resolved panel, so a stored `proxy`/`auto`
+ * value never proxies when the backend is gone.
  */
 export function LoadModeEditor({
   value,
@@ -69,9 +68,9 @@ export function LoadModeEditor({
   const degraded = !loading && !backendAvailable;
 
   const stored: LoadMode = value ?? 'auto';
-  // Display-only clamp: when degraded, show Direct as selected regardless of the
-  // stored value (which we deliberately leave unpersisted — see component doc).
-  const displayed: LoadMode = degraded ? 'direct' : stored;
+  // When degraded, only Direct is offered. It is selected only when it is the
+  // stored value; otherwise nothing is selected, so clicking Direct commits it.
+  const displayed: LoadMode | undefined = degraded && stored !== 'direct' ? undefined : stored;
 
   // When degraded, omit the backend-dependent options entirely (see component
   // doc) so Direct is the only genuinely-selectable choice. Otherwise offer all.
@@ -109,6 +108,13 @@ export function LoadModeEditor({
           data-testid={loadModeEditorTestIds.backendUnavailableNote}
         >
           The proxy and URL test require the plugin backend. Until it is available, only direct iframing is possible.
+          {stored !== 'direct' && (
+            <>
+              {' '}
+              This panel is saved with the {stored === 'auto' ? 'Auto' : 'Proxy'} load mode. Select Direct to load the URL
+              directly.
+            </>
+          )}
         </Alert>
       )}
     </div>

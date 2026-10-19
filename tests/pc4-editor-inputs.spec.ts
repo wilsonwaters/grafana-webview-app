@@ -115,10 +115,20 @@ test.describe('Viewport editor PC4: numeric inputs, dimensions, reset', () => {
     const editorIframeWidth = await editorIframe.evaluate((el) => (el as HTMLElement).style.width);
     expect(editorIframeWidth).toBe('1280px');
 
-    // Non-positive dimension: enter 0, should revert to default 1920
+    // Non-positive dimension: enter 0, the field restores the last valid width
     await inputWidth.fill('0');
     await inputWidth.press('Tab');
-    await expect(inputWidth).toHaveValue('1920');
+    await expect(inputWidth).toHaveValue('1280');
+    expect(await editorIframe.evaluate((el) => (el as HTMLElement).style.width)).toBe('1280px');
+
+    // RV1-11: a decimal zoom typed one key at a time commits on Enter
+    await inputZoom.scrollIntoViewIfNeeded();
+    await inputZoom.fill('');
+    await inputZoom.pressSequentially('0.5');
+    await expect(readout).toContainText('Zoom: 1.00');
+    await inputZoom.press('Enter');
+    await expect(readout).toContainText('Zoom: 0.50');
+    await expect(inputZoom).toHaveValue('0.50');
 
     // Take screenshot for evidence
     await page.screenshot({ path: '/tmp/pc4-editor.png', fullPage: false });

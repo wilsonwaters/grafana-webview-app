@@ -108,6 +108,14 @@ describe('panels/webview/WebViewPanel', () => {
     expect(iframe).toHaveStyle({ transform: 'scale(1.5) translate(-100px, -200px)' });
   });
 
+  test('applies a negative saved viewport (panned past the top-left edge) without resetting it', () => {
+    render(<WebViewPanel {...buildProps({ url: 'https://example.com', viewportX: -40, viewportY: -25, viewportZoom: 0.5 })} />);
+
+    expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveStyle({
+      transform: 'scale(0.5) translate(40px, 25px)',
+    });
+  });
+
   test('renders without crashing for partial / legacy options', () => {
     const props = { options: { url: 'https://x.test' }, width: 100, height: 100 } as unknown as PanelProps<PanelOptions>;
     render(<WebViewPanel {...props} />);
@@ -134,6 +142,12 @@ describe('panels/webview/WebViewPanel', () => {
       expect(iframe).toHaveAttribute('srcdoc', '<h1>Example Domain</h1>');
       // The resource route is never an iframe src (Grafana sends XFO deny + CSP sandbox).
       expect(iframe).not.toHaveAttribute('src');
+    });
+
+    test('proxy mode → the proxy request carries the trimmed URL (RV1-22)', () => {
+      render(<WebViewPanel {...buildProps({ url: '  https://example.com/x \n', loadMode: 'proxy' })} />);
+
+      expect(fetchParams().get('url')).toBe('https://example.com/x');
     });
 
     test('proxy mode → hideSelectors are carried as repeated hide= params (CR5)', () => {
@@ -175,6 +189,37 @@ describe('panels/webview/WebViewPanel', () => {
       );
 
       expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://example.com');
+    });
+
+    test('auto mode + a proxy verdict measured for ANOTHER URL → direct (not tested), no proxy fetch', () => {
+      render(
+        <WebViewPanel
+          {...buildProps({
+            url: 'https://new.example.com',
+            loadMode: 'auto',
+            detectedMode: 'proxy',
+            detectedForUrl: 'https://old.example.com',
+          })}
+        />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://new.example.com');
+      expect(proxyFetch.fetch).not.toHaveBeenCalled();
+    });
+
+    test('auto mode + a proxy verdict measured for THIS URL → proxy fetch', () => {
+      render(
+        <WebViewPanel
+          {...buildProps({
+            url: 'https://example.com',
+            loadMode: 'auto',
+            detectedMode: 'proxy',
+            detectedForUrl: 'https://example.com',
+          })}
+        />
+      );
+
+      expect(proxyFetch.fetch).toHaveBeenCalledTimes(1);
     });
 
     test('auto mode + detectedMode=null → raw URL src (defaults to direct)', () => {
@@ -293,30 +338,64 @@ describe('panels/webview/WebViewPanel', () => {
       setIntervalSpy.mockRestore();
     });
 
-    test('iframe is remounted (key changes) after one interval tick', () => {
-      const { rerender } = render(
-        <WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: 10 })} />
-      );
+    test.each([
+      [1, 5000],
+      [0.05, 5000],
+      [4.4, 5000],
+      [12.6, 13000],
+    ])('refreshIntervalSec %p uses whole seconds with a 5 s minimum (%p ms)', (seconds, expectedMs) => {
+      const setIntervalSpy = jest.spyOn(global, 'setInterval');
 
-      const iframeBefore = screen.getByTestId(webViewPanelTestIds.iframe);
-      const keyBefore = iframeBefore.getAttribute('key');
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: seconds })} />);
 
-      // Advance the clock by 10 s — the interval callback should fire
+      expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+      expect(setIntervalSpy).toHaveBeenCalledWith(expect.any(Function), expectedMs);
+      setIntervalSpy.mockRestore();
+    });
+
+    test('a non-numeric refreshIntervalSec arms no interval (no tight refresh loop)', () => {
+      const setIntervalSpy = jest.spyOn(global, 'setInterval');
+      const options = { refreshIntervalSec: 'fast' } as unknown as Partial<PanelOptions>;
+
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', ...options })} />);
+
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+      setIntervalSpy.mockRestore();
+    });
+
+    test('direct mode: each interval tick mounts a NEW iframe element (a fresh page load)', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: 10 })} />);
+      const first = screen.getByTestId(webViewPanelTestIds.iframe);
+
+      // Just before the interval: same element.
+      act(() => {
+        jest.advanceTimersByTime(9999);
+      });
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toBe(first);
+
+      act(() => {
+        jest.advanceTimersByTime(1);
+      });
+      const second = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(second).not.toBe(first);
+      expect(first.isConnected).toBe(false);
+      expect(second).toHaveAttribute('src', 'https://example.com');
+
       act(() => {
         jest.advanceTimersByTime(10000);
       });
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).not.toBe(second);
+    });
 
-      // Re-render is triggered by state update; rerender ensures React flushes
-      rerender(<WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: 10 })} />);
+    test('direct mode with refresh disabled never remounts the iframe', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', refreshIntervalSec: 0 })} />);
+      const first = screen.getByTestId(webViewPanelTestIds.iframe);
 
-      const iframeAfter = screen.getByTestId(webViewPanelTestIds.iframe);
-      // The `key` prop itself is not reflected as an attribute, but the element is
-      // remounted (same DOM structure, so we verify via the data attribute being present
-      // and the component not crashing). We instead check an indirect signal: the
-      // refreshKey counter should have advanced — validated by the fact that the
-      // iframe is still present and still pointing to the correct URL.
-      expect(iframeAfter).toHaveAttribute('src', 'https://example.com');
-      void keyBefore; // suppress unused variable
+      act(() => {
+        jest.advanceTimersByTime(60 * 60 * 1000);
+      });
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toBe(first);
     });
 
     test('interval fires multiple times on subsequent ticks', () => {
@@ -608,6 +687,65 @@ describe('panels/webview/WebViewPanel', () => {
       expect(iframe.getAttribute('sandbox')).not.toContain('allow-same-origin');
     });
 
+    test('a URL edit from cross-origin to the Grafana origin mounts a NEW iframe with allow-scripts only', () => {
+      // A browser applies the sandbox flags that are set when a navigation
+      // starts. If the mounted iframe were reused, React would write the new
+      // src before the new sandbox, and the Grafana-origin page would load with
+      // the old allow-same-origin flag.
+      const { rerender } = render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+      const before = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(before).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+
+      rerender(<WebViewPanel {...buildProps({ url: 'http://localhost/api/user', loadMode: 'direct' })} />);
+
+      const after = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(after).not.toBe(before);
+      expect(before.isConnected).toBe(false);
+      expect(after).toHaveAttribute('sandbox', 'allow-scripts');
+      expect(after).toHaveAttribute('src', 'http://localhost/api/user');
+    });
+
+    test('a URL edit from the Grafana origin to cross-origin also mounts a new iframe', () => {
+      const { rerender } = render(
+        <WebViewPanel {...buildProps({ url: 'http://localhost/d/abc', loadMode: 'direct' })} />
+      );
+      const before = screen.getByTestId(webViewPanelTestIds.iframe);
+
+      rerender(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+
+      const after = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(after).not.toBe(before);
+      expect(after).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+    });
+
+    test('a URL edit with the same sandbox value still mounts a new iframe', () => {
+      const { rerender } = render(<WebViewPanel {...buildProps({ url: 'https://a.example.com', loadMode: 'direct' })} />);
+      const before = screen.getByTestId(webViewPanelTestIds.iframe);
+
+      rerender(<WebViewPanel {...buildProps({ url: 'https://b.example.com', loadMode: 'direct' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).not.toBe(before);
+    });
+
+    test('a viewport-only change keeps the same iframe (no reload)', () => {
+      const { rerender } = render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+      const before = screen.getByTestId(webViewPanelTestIds.iframe);
+
+      rerender(
+        <WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct', viewportX: 50, viewportZoom: 2 })} />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toBe(before);
+    });
+
+    test('the sandbox attribute is set before src on the iframe element', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+
+      const names = screen.getByTestId(webViewPanelTestIds.iframe).getAttributeNames();
+      expect(names.indexOf('sandbox')).toBeGreaterThanOrEqual(0);
+      expect(names.indexOf('sandbox')).toBeLessThan(names.indexOf('src'));
+    });
+
     test('every iframe keeps referrerPolicy="no-referrer"', () => {
       const { container } = render(
         <>
@@ -849,6 +987,33 @@ describe('panels/webview/WebViewPanel', () => {
       expect(fetchParams(1).getAll('hide')).toEqual(['.a', '.b']);
     });
 
+    test('switching proxy → direct for the same URL mounts a new iframe with the direct flags', () => {
+      const { rerender } = render(<WebViewPanel {...proxyProps()} />);
+      respondHtml(proxyFetch.calls[0], '<p>x</p>');
+      const srcdocFrame = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(srcdocFrame).toHaveAttribute('sandbox', 'allow-scripts');
+
+      rerender(<WebViewPanel {...proxyProps({ loadMode: 'direct' })} />);
+
+      const directFrame = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(directFrame).not.toBe(srcdocFrame);
+      expect(directFrame).not.toHaveAttribute('srcdoc');
+      expect(directFrame).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+    });
+
+    test('switching direct → proxy never reuses the direct iframe', () => {
+      const { rerender } = render(<WebViewPanel {...proxyProps({ loadMode: 'direct' })} />);
+      const directFrame = screen.getByTestId(webViewPanelTestIds.iframe);
+
+      rerender(<WebViewPanel {...proxyProps()} />);
+      respondHtml(proxyFetch.calls[0], '<p>x</p>');
+
+      const srcdocFrame = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(srcdocFrame).not.toBe(directFrame);
+      expect(srcdocFrame).toHaveAttribute('sandbox', 'allow-scripts');
+      expect(srcdocFrame).not.toHaveAttribute('src');
+    });
+
     test('a viewport-only change does not refetch', () => {
       const { rerender } = render(<WebViewPanel {...proxyProps()} />);
       respondHtml(proxyFetch.calls[0], '<p>x</p>');
@@ -896,6 +1061,26 @@ describe('panels/webview/WebViewPanel', () => {
           jest.advanceTimersByTime(10000);
         });
         expect(proxyFetch.calls).toHaveLength(3);
+      });
+
+      test('a tick while the previous request is in flight is skipped (no abort, no second request)', () => {
+        render(<WebViewPanel {...proxyProps({ refreshIntervalSec: 5 })} />);
+
+        // The first request is still in flight after two ticks.
+        act(() => {
+          jest.advanceTimersByTime(10000);
+        });
+        expect(proxyFetch.calls).toHaveLength(1);
+        expect(proxyFetch.calls[0].unsubscribed).toBe(false);
+
+        respondHtml(proxyFetch.calls[0], '<p>slow page</p>');
+        expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('srcdoc', '<p>slow page</p>');
+
+        // The next tick after the response refetches.
+        act(() => {
+          jest.advanceTimersByTime(5000);
+        });
+        expect(proxyFetch.calls).toHaveLength(2);
       });
 
       test('the iframe is remounted on each successful refresh, even with unchanged HTML', () => {

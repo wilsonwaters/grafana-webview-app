@@ -398,23 +398,82 @@ export function hasErrors(errors: SettingsFormErrors): boolean {
 // Save payload
 // ---------------------------------------------------------------------------
 
+/** jsonData keys that this page writes (pkg/plugin/config.go PluginSettings). */
+const MANAGED_TOP_LEVEL_KEYS: readonly string[] = ['allowedDomains', ...LIMIT_KEYS];
+/** Keys of one allowlist entry (AllowedDomain). */
+const MANAGED_ENTRY_KEYS: readonly string[] = ['domain', 'options'];
+/** Keys of an entry's options (DomainOptions). */
+const MANAGED_OPTION_KEYS: readonly string[] = ['allowSubdomains', 'allowPrivateIP', 'rateLimitPerMin', 'allowedPorts'];
+
+/**
+ * Folds a JSON object key the way Go's encoding/json matches keys to struct
+ * fields (equal under bytes.EqualFold: Unicode simple case folding). ASCII
+ * letters fold to lower case. The only other characters that fold to an ASCII
+ * letter are U+017F LATIN SMALL LETTER LONG S (s) and U+212A KELVIN SIGN (k).
+ * Every managed key is ASCII, so this finds every key that Go would treat as
+ * the same field.
+ */
+function foldKey(key: string): string {
+  return key.replace(/[A-Z\u017F\u212A]/g, (c) => {
+    if (c === '\u017F') {
+      return 's';
+    }
+    if (c === '\u212A') {
+      return 'k';
+    }
+    return c.toLowerCase();
+  });
+}
+
+/**
+ * Returns a copy of `record` without the keys that Go would decode into one of
+ * the `managed` fields but that are not spelled exactly like it. Go's JSON
+ * decoder matches keys case-insensitively, and when a name appears more than
+ * once the last one wins, so such a key could enforce a value that this page
+ * neither shows nor writes. The exact managed keys are kept (the caller
+ * overwrites them).
+ */
+function withoutManagedKeyVariants(
+  record: Record<string, unknown>,
+  managed: readonly string[]
+): Record<string, unknown> {
+  const folded = new Set(managed.map(foldKey));
+  const exact = new Set(managed);
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (!exact.has(key) && folded.has(foldKey(key))) {
+      continue;
+    }
+    result[key] = value;
+  }
+  return result;
+}
+
 /**
  * Builds the jsonData to save. Starts from the stored jsonData so that keys
  * this page does not manage are kept, removes the unused scaffold keys, and
  * writes the settings this page manages. An empty limit field removes the key
  * so that the backend applies its default.
  *
+ * A kept key that matches a managed key except for letter case (for example
+ * `AllowPrivateIP` next to `allowPrivateIP`) is dropped at every level (top,
+ * allowlist entry and entry options): the backend decodes JSON keys
+ * case-insensitively, so it would apply a hidden value.
+ *
  * Call only with a state that passes validateForm.
  */
 export function buildJsonData(existing: JsonData | undefined | null, state: SettingsFormState): JsonData {
-  const next: JsonData = { ...(existing ?? {}) };
+  const next: JsonData = withoutManagedKeyVariants(existing ?? {}, MANAGED_TOP_LEVEL_KEYS);
   for (const key of LEGACY_JSON_DATA_KEYS) {
     delete next[key];
   }
 
   next.allowedDomains = state.domains.map((row) => {
-    const source = row.source ?? {};
-    const sourceOptions = isRecord(source.options) ? source.options : {};
+    const source = withoutManagedKeyVariants(row.source ?? {}, MANAGED_ENTRY_KEYS);
+    const sourceOptions = withoutManagedKeyVariants(
+      isRecord(source.options) ? source.options : {},
+      MANAGED_OPTION_KEYS
+    );
     const ports = parsePorts(row.allowedPorts);
     return {
       ...source,

@@ -66,16 +66,21 @@ export function WebViewFrame(props: WebViewFrameProps) {
     return <ProxyFrame {...props} url={check.url} />;
   }
 
+  const sandbox = iframeSandbox('direct', check.url);
   return (
     <iframe
-      // Remounting the iframe reloads the page (auto-refresh).
-      key={props.reloadKey}
+      // A browser reads the sandbox flags when a navigation starts, and React
+      // updates `src` before `sandbox` on a mounted iframe. A new key for every
+      // URL and sandbox value mounts a new iframe, so the first navigation of
+      // each URL always uses its own flags. A new reloadKey also remounts the
+      // iframe, which reloads the page (auto-refresh).
+      key={`${props.reloadKey}|${sandbox}|${check.url}`}
+      sandbox={sandbox}
+      referrerPolicy="no-referrer"
       title={props.title}
       src={check.url}
       data-testid={props.testIds.iframe}
       className={styles.iframe}
-      sandbox={iframeSandbox('direct', check.url)}
-      referrerPolicy="no-referrer"
       style={props.frameStyle}
     />
   );
@@ -137,16 +142,19 @@ function ProxyDocumentFrame(props: WebViewFrameProps) {
     );
   }
 
+  const sandbox = iframeSandbox('proxy', props.url);
   return (
     <iframe
-      // A new key for each response reloads the frame, even when the HTML is unchanged.
-      key={proxyDocument.version}
+      // A new key for each response reloads the frame, even when the HTML is
+      // unchanged. The sandbox value and the URL are in the key for the same
+      // reason as in direct mode: the frame is never reused with other flags.
+      key={`${proxyDocument.version}|${sandbox}|${props.url}`}
+      sandbox={sandbox}
+      referrerPolicy="no-referrer"
       title={props.title}
       srcDoc={proxyDocument.html}
       data-testid={props.testIds.iframe}
       className={styles.iframe}
-      sandbox={iframeSandbox('proxy', props.url)}
-      referrerPolicy="no-referrer"
       style={props.frameStyle}
     />
   );

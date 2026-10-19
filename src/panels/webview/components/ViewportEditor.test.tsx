@@ -51,6 +51,54 @@ function buildProps(optionOverrides: Partial<PanelOptions> = {}): {
   return { props, options, onChange };
 }
 
+// jsdom has no PointerEvent and no pointer capture. A MouseEvent subclass with a
+// pointerId is enough for React's pointer handlers.
+beforeAll(() => {
+  if (!('PointerEvent' in window)) {
+    class PointerEventPolyfill extends MouseEvent {
+      pointerId: number;
+      constructor(type: string, init: PointerEventInit = {}) {
+        super(type, init);
+        this.pointerId = init.pointerId ?? 1;
+      }
+    }
+    Object.defineProperty(window, 'PointerEvent', { value: PointerEventPolyfill, configurable: true });
+  }
+  Element.prototype.setPointerCapture = jest.fn();
+  Element.prototype.releasePointerCapture = jest.fn();
+  Element.prototype.hasPointerCapture = jest.fn(() => false);
+});
+
+/** Primary-button press on the preview. */
+function pointerDown(el: Element, clientX: number, clientY: number, pointerId = 1) {
+  fireEvent.pointerDown(el, { pointerId, button: 0, buttons: 1, clientX, clientY });
+}
+
+/** Pointer move with the button held (a drag step), delivered to the capturing preview. */
+function pointerMove(el: Element, clientX: number, clientY: number, buttons = 1, pointerId = 1) {
+  fireEvent.pointerMove(el, { pointerId, buttons, clientX, clientY });
+}
+
+/** Button release. */
+function pointerUp(el: Element, pointerId = 1) {
+  fireEvent.pointerUp(el, { pointerId, button: 0, buttons: 0 });
+}
+
+/**
+ * Moves the pointer over the preview (which arms wheel zoom), then turns the
+ * wheel. Returns false when the wheel event's default action was prevented.
+ */
+function wheelOver(el: Element, init: { deltaY: number; clientX: number; clientY: number }): boolean {
+  fireEvent.pointerMove(el, { pointerId: 1, buttons: 0, clientX: init.clientX, clientY: init.clientY });
+  return fireEvent.wheel(el, init);
+}
+
+/** Types `value` into a numeric field and commits it the way a user does: by leaving the field. */
+function typeAndCommit(input: HTMLElement, value: string) {
+  fireEvent.change(input, { target: { value } });
+  fireEvent.blur(input);
+}
+
 // Anchor the container at the origin so cursor maths are deterministic.
 beforeAll(() => {
   Element.prototype.getBoundingClientRect = jest.fn(
@@ -110,9 +158,9 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const preview = screen.getByTestId(viewportEditorTestIds.preview);
-    fireEvent.mouseDown(preview, { clientX: 100, clientY: 100 });
-    fireEvent.mouseMove(window, { clientX: 50, clientY: 50 });
-    fireEvent.mouseUp(window);
+    pointerDown(preview, 100, 100);
+    pointerMove(preview, 50, 50);
+    pointerUp(preview);
 
     expect(onChange).not.toHaveBeenCalled();
   });
@@ -136,6 +184,21 @@ describe('panels/webview/ViewportEditor', () => {
     expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute('sandbox', 'allow-scripts');
   });
 
+  test('a URL edit from cross-origin to the Grafana origin mounts a NEW preview iframe with allow-scripts only', () => {
+    const { props, options } = buildProps({ url: 'https://example.com' });
+    const { rerender } = render(<ViewportEditor {...props} />);
+    const before = screen.getByTestId(viewportEditorTestIds.iframe);
+    expect(before).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
+
+    options.url = 'http://localhost/d/abc';
+    rerender(<ViewportEditor {...props} />);
+
+    const after = screen.getByTestId(viewportEditorTestIds.iframe);
+    expect(after).not.toBe(before);
+    expect(before.isConnected).toBe(false);
+    expect(after).toHaveAttribute('sandbox', 'allow-scripts');
+  });
+
   test('readout reflects the current X / Y / zoom values', () => {
     const { props } = buildProps({ viewportX: 42, viewportY: 7, viewportZoom: 2 });
     render(<ViewportEditor {...props} />);
@@ -153,9 +216,9 @@ describe('panels/webview/ViewportEditor', () => {
     const preview = screen.getByTestId(viewportEditorTestIds.preview);
     // Drag the content right+down by (30, 20) screen px. With the "drag right
     // reveals content to the left" convention this DECREASES X/Y at zoom 1.
-    fireEvent.mouseDown(preview, { clientX: 200, clientY: 150 });
-    fireEvent.mouseMove(window, { clientX: 230, clientY: 170 });
-    fireEvent.mouseUp(window, { clientX: 230, clientY: 170 });
+    pointerDown(preview, 200, 150);
+    pointerMove(preview, 230, 170);
+    pointerUp(preview);
 
     const readout = screen.getByTestId(viewportEditorTestIds.readout);
     expect(readout).toHaveTextContent('X: -30');
@@ -171,10 +234,10 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const preview = screen.getByTestId(viewportEditorTestIds.preview);
-    fireEvent.mouseDown(preview, { clientX: 0, clientY: 0 });
+    pointerDown(preview, 0, 0);
     // Drag left by 100px (clientX 0 -> -100): reveals content to the right,
     // increasing X by 100/2 = 50.
-    fireEvent.mouseMove(window, { clientX: -100, clientY: 0 });
+    pointerMove(preview, -100, 0);
 
     expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('X: 50');
   });
@@ -185,7 +248,7 @@ describe('panels/webview/ViewportEditor', () => {
 
     const preview = screen.getByTestId(viewportEditorTestIds.preview);
     // Wheel up (deltaY < 0) at cursor (200, 100) zooms in by 1.1.
-    fireEvent.wheel(preview, { deltaY: -100, clientX: 200, clientY: 100 });
+    wheelOver(preview, { deltaY: -100, clientX: 200, clientY: 100 });
 
     const readout = screen.getByTestId(viewportEditorTestIds.readout);
     expect(readout).toHaveTextContent('Zoom: 1.10×');
@@ -203,7 +266,7 @@ describe('panels/webview/ViewportEditor', () => {
 
     const preview = screen.getByTestId(viewportEditorTestIds.preview);
     // 4.9 * 1.1 = 5.39 -> clamped to 5.0.
-    fireEvent.wheel(preview, { deltaY: -100, clientX: 0, clientY: 0 });
+    wheelOver(preview, { deltaY: -100, clientX: 0, clientY: 0 });
 
     expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('Zoom: 5.00×');
     expect(onChange).toHaveBeenCalledWith(5);
@@ -246,7 +309,7 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const inputX = screen.getByTestId(viewportEditorTestIds.inputX);
-    fireEvent.change(inputX, { target: { value: '300' } });
+    typeAndCommit(inputX, '300');
 
     // Preview iframe transform should include the new X value
     const iframe = screen.getByTestId(viewportEditorTestIds.iframe);
@@ -263,7 +326,7 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const inputY = screen.getByTestId(viewportEditorTestIds.inputY);
-    fireEvent.change(inputY, { target: { value: '200' } });
+    typeAndCommit(inputY, '200');
 
     const iframe = screen.getByTestId(viewportEditorTestIds.iframe);
     expect(iframe).toHaveStyle({ transform: 'scale(1) translate(0px, -200px)' });
@@ -277,7 +340,7 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const inputZoom = screen.getByTestId(viewportEditorTestIds.inputZoom);
-    fireEvent.change(inputZoom, { target: { value: '2' } });
+    typeAndCommit(inputZoom, '2');
 
     const iframe = screen.getByTestId(viewportEditorTestIds.iframe);
     expect(iframe).toHaveStyle({ transform: 'scale(2) translate(0px, 0px)' });
@@ -291,7 +354,7 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const inputZoom = screen.getByTestId(viewportEditorTestIds.inputZoom);
-    fireEvent.change(inputZoom, { target: { value: '99' } });
+    typeAndCommit(inputZoom, '99');
 
     expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('Zoom: 5.00×');
     expect(options.viewportZoom).toBe(5);
@@ -303,7 +366,7 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const inputZoom = screen.getByTestId(viewportEditorTestIds.inputZoom);
-    fireEvent.change(inputZoom, { target: { value: '0.001' } });
+    typeAndCommit(inputZoom, '0.001');
 
     expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('Zoom: 0.10×');
     expect(options.viewportZoom).toBe(0.1);
@@ -314,9 +377,9 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const preview = screen.getByTestId(viewportEditorTestIds.preview);
-    fireEvent.mouseDown(preview, { clientX: 200, clientY: 150 });
-    fireEvent.mouseMove(window, { clientX: 230, clientY: 170 });
-    fireEvent.mouseUp(window);
+    pointerDown(preview, 200, 150);
+    pointerMove(preview, 230, 170);
+    pointerUp(preview);
 
     // After drag right+down by (30,20), X/Y decrease by that amount.
     const inputX = screen.getByTestId(viewportEditorTestIds.inputX);
@@ -330,7 +393,7 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const preview = screen.getByTestId(viewportEditorTestIds.preview);
-    fireEvent.wheel(preview, { deltaY: -100, clientX: 0, clientY: 0 });
+    wheelOver(preview, { deltaY: -100, clientX: 0, clientY: 0 });
 
     const inputZoom = screen.getByTestId(viewportEditorTestIds.inputZoom);
     // Zoom in by 1.1: 1 * 1.1 = 1.1
@@ -397,7 +460,7 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const inputWidth = screen.getByTestId(viewportEditorTestIds.inputWidth);
-    fireEvent.change(inputWidth, { target: { value: '1280' } });
+    typeAndCommit(inputWidth, '1280');
 
     const iframe = screen.getByTestId(viewportEditorTestIds.iframe);
     expect(iframe).toHaveStyle({ width: '1280px' });
@@ -409,33 +472,281 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     const inputHeight = screen.getByTestId(viewportEditorTestIds.inputHeight);
-    fireEvent.change(inputHeight, { target: { value: '720' } });
+    typeAndCommit(inputHeight, '720');
 
     const iframe = screen.getByTestId(viewportEditorTestIds.iframe);
     expect(iframe).toHaveStyle({ height: '720px' });
     expect(options.iframeHeight).toBe(720);
   });
 
-  test('non-positive width value is rejected and falls back to default 1920', () => {
-    const { props, options } = buildProps({ iframeWidth: 1280 });
+  test('a non-positive width is rejected on commit and the last valid width is restored', () => {
+    const { props, options, onChange } = buildProps({ iframeWidth: 1280 });
     render(<ViewportEditor {...props} />);
+    onChange.mockClear();
 
     const inputWidth = screen.getByTestId(viewportEditorTestIds.inputWidth);
-    fireEvent.change(inputWidth, { target: { value: '0' } });
+    typeAndCommit(inputWidth, '0');
 
-    expect(options.iframeWidth).toBe(1920);
-    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({ width: '1920px' });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(options.iframeWidth).toBe(1280);
+    expect(inputWidth).toHaveValue(1280);
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({ width: '1280px' });
   });
 
-  test('negative height value is rejected and falls back to default 1080', () => {
+  test('a negative height is rejected on commit and the last valid height is restored', () => {
     const { props, options } = buildProps({ iframeHeight: 720 });
     render(<ViewportEditor {...props} />);
 
     const inputHeight = screen.getByTestId(viewportEditorTestIds.inputHeight);
-    fireEvent.change(inputHeight, { target: { value: '-100' } });
+    typeAndCommit(inputHeight, '-100');
 
-    expect(options.iframeHeight).toBe(1080);
-    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({ height: '1080px' });
+    expect(options.iframeHeight).toBe(720);
+    expect(inputHeight).toHaveValue(720);
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({ height: '720px' });
+  });
+
+  // ---------------------------------------------------------------------------
+  // RV1-11 / RV1-29: fields keep the typed text and commit on blur or Enter
+  // ---------------------------------------------------------------------------
+
+  describe('typing into the numeric fields (RV1-11, RV1-29)', () => {
+    /** Types `text` one character at a time, as a user does. */
+    function typeChars(input: HTMLElement, text: string) {
+      for (let i = 1; i <= text.length; i++) {
+        fireEvent.change(input, { target: { value: text.slice(0, i) } });
+      }
+    }
+
+    test('zoom 0.5 can be typed one character at a time; nothing is committed before blur', () => {
+      const { props, options, onChange } = buildProps({ viewportZoom: 1 });
+      render(<ViewportEditor {...props} />);
+      onChange.mockClear();
+      const inputZoom = screen.getByTestId(viewportEditorTestIds.inputZoom);
+
+      typeChars(inputZoom, '0.5');
+
+      // The field shows what was typed (not 0.10 after the first "0") and nothing is committed yet.
+      expect(inputZoom).toHaveValue(0.5);
+      expect(onChange).not.toHaveBeenCalled();
+      expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('Zoom: 1.00×');
+
+      fireEvent.blur(inputZoom);
+
+      expect(onChange).toHaveBeenLastCalledWith(0.5);
+      expect(options.viewportZoom).toBe(0.5);
+      expect(inputZoom).toHaveValue(0.5);
+      expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('Zoom: 0.50×');
+    });
+
+    test('zoom 2.5 typed one character at a time commits 2.5 on Enter', () => {
+      const { props, options } = buildProps({ viewportZoom: 1 });
+      render(<ViewportEditor {...props} />);
+      const inputZoom = screen.getByTestId(viewportEditorTestIds.inputZoom);
+
+      typeChars(inputZoom, '2.5');
+      fireEvent.keyDown(inputZoom, { key: 'Enter' });
+
+      expect(options.viewportZoom).toBe(2.5);
+      expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({ transform: 'scale(2.5) translate(0px, 0px)' });
+    });
+
+    test('clearing the width while typing does not reset it to 1920; the new width commits on blur', () => {
+      const { props, options, onChange } = buildProps({ iframeWidth: 1280 });
+      render(<ViewportEditor {...props} />);
+      onChange.mockClear();
+      const inputWidth = screen.getByTestId(viewportEditorTestIds.inputWidth);
+
+      fireEvent.change(inputWidth, { target: { value: '' } });
+      expect(inputWidth).toHaveValue(null);
+      expect(options.iframeWidth).toBe(1280);
+
+      typeChars(inputWidth, '800');
+      expect(onChange).not.toHaveBeenCalled();
+      fireEvent.blur(inputWidth);
+
+      expect(options.iframeWidth).toBe(800);
+      expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({ width: '800px' });
+    });
+
+    test('an empty height restores the last valid height on blur', () => {
+      const { props, options } = buildProps({ iframeHeight: 900 });
+      render(<ViewportEditor {...props} />);
+      const inputHeight = screen.getByTestId(viewportEditorTestIds.inputHeight);
+
+      typeAndCommit(inputHeight, '');
+
+      expect(inputHeight).toHaveValue(900);
+      expect(options.iframeHeight).toBe(900);
+    });
+
+    test('a negative X offset can be typed (a lone "-" is kept while typing)', () => {
+      const { props, options } = buildProps({ viewportX: 0 });
+      render(<ViewportEditor {...props} />);
+      const inputX = screen.getByTestId(viewportEditorTestIds.inputX);
+
+      typeChars(inputX, '-25');
+      fireEvent.keyDown(inputX, { key: 'Enter' });
+
+      expect(options.viewportX).toBe(-25);
+      expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('X: -25');
+    });
+
+    test('Escape restores the committed value without committing', () => {
+      const { props, options, onChange } = buildProps({ viewportZoom: 2 });
+      render(<ViewportEditor {...props} />);
+      onChange.mockClear();
+      const inputZoom = screen.getByTestId(viewportEditorTestIds.inputZoom);
+
+      typeChars(inputZoom, '4');
+      fireEvent.keyDown(inputZoom, { key: 'Escape' });
+      fireEvent.blur(inputZoom);
+
+      expect(inputZoom).toHaveValue(2);
+      expect(options.viewportZoom).toBe(2);
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    test('a drag while text is typed replaces the typed text and the text is not committed later', () => {
+      const { props, options } = buildProps({ viewportX: 0, viewportY: 0, viewportZoom: 1 });
+      render(<ViewportEditor {...props} />);
+      const inputX = screen.getByTestId(viewportEditorTestIds.inputX);
+      const preview = screen.getByTestId(viewportEditorTestIds.preview);
+
+      typeChars(inputX, '300');
+      pointerDown(preview, 100, 100);
+      pointerMove(preview, 60, 100);
+      pointerUp(preview);
+
+      expect(inputX).toHaveValue(40);
+      fireEvent.blur(inputX);
+      expect(options.viewportX).toBe(40);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // RV1-27: pointer drag with capture, wheel only when the pointer is over the preview
+  // ---------------------------------------------------------------------------
+
+  describe('pointer and wheel handling (RV1-27)', () => {
+    test('pointerdown captures the pointer so the drag keeps tracking outside the preview', () => {
+      const { props } = buildProps();
+      render(<ViewportEditor {...props} />);
+      const preview = screen.getByTestId(viewportEditorTestIds.preview);
+
+      fireEvent.pointerDown(preview, { pointerId: 7, button: 0, buttons: 1, clientX: 10, clientY: 10 });
+
+      expect(Element.prototype.setPointerCapture).toHaveBeenLastCalledWith(7);
+    });
+
+    test.each([
+      ['pointerup', (el: Element) => fireEvent.pointerUp(el, { pointerId: 1, buttons: 0 })],
+      ['pointercancel', (el: Element) => fireEvent.pointerCancel(el, { pointerId: 1 })],
+      ['lostpointercapture', (el: Element) => fireEvent.lostPointerCapture(el, { pointerId: 1 })],
+    ])('%s ends the drag', (_name, end) => {
+      const { props, options } = buildProps({ viewportX: 0, viewportY: 0, viewportZoom: 1 });
+      render(<ViewportEditor {...props} />);
+      const preview = screen.getByTestId(viewportEditorTestIds.preview);
+
+      pointerDown(preview, 100, 100);
+      pointerMove(preview, 90, 100);
+      end(preview);
+      pointerMove(preview, 0, 0);
+
+      expect(options.viewportX).toBe(10);
+      expect(options.viewportY).toBe(0);
+    });
+
+    test('a move with no button held ends a drag whose release was missed (released outside the window)', () => {
+      const { props, options } = buildProps({ viewportX: 0, viewportY: 0, viewportZoom: 1 });
+      render(<ViewportEditor {...props} />);
+      const preview = screen.getByTestId(viewportEditorTestIds.preview);
+
+      pointerDown(preview, 100, 100);
+      pointerMove(preview, 90, 100);
+      // The button came up outside the window and no pointerup arrived.
+      pointerMove(preview, 50, 50, 0);
+      // A later move with a button held (a new gesture elsewhere) does not pan.
+      pointerMove(preview, 0, 0, 1);
+
+      expect(options.viewportX).toBe(10);
+      expect(options.viewportY).toBe(0);
+    });
+
+    test('a non-primary button does not start a drag', () => {
+      const { props, onChange } = buildProps();
+      render(<ViewportEditor {...props} />);
+      const preview = screen.getByTestId(viewportEditorTestIds.preview);
+      onChange.mockClear();
+
+      fireEvent.pointerDown(preview, { pointerId: 1, button: 2, buttons: 2, clientX: 100, clientY: 100 });
+      pointerMove(preview, 50, 50, 2);
+
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    test('the wheel zooms and is consumed only after the pointer moved over the preview', () => {
+      const { props, onChange } = buildProps({ viewportZoom: 1 });
+      render(<ViewportEditor {...props} />);
+      const preview = screen.getByTestId(viewportEditorTestIds.preview);
+      onChange.mockClear();
+
+      // The options pane scrolled the preview under a resting pointer: no pointermove.
+      const notPrevented = fireEvent.wheel(preview, { deltaY: -100, clientX: 10, clientY: 10 });
+      expect(notPrevented).toBe(true);
+      expect(onChange).not.toHaveBeenCalled();
+
+      // The author moves the pointer onto the preview: the wheel now zooms.
+      expect(wheelOver(preview, { deltaY: -100, clientX: 10, clientY: 10 })).toBe(false);
+      expect(onChange).toHaveBeenCalledTimes(1);
+    });
+
+    test('a page scroll disarms the wheel until the pointer moves again', () => {
+      const { props, onChange } = buildProps({ viewportZoom: 1 });
+      render(<ViewportEditor {...props} />);
+      const preview = screen.getByTestId(viewportEditorTestIds.preview);
+      fireEvent.pointerMove(preview, { pointerId: 1, buttons: 0, clientX: 10, clientY: 10 });
+      onChange.mockClear();
+
+      fireEvent.scroll(document.body);
+
+      expect(fireEvent.wheel(preview, { deltaY: -100, clientX: 10, clientY: 10 })).toBe(true);
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    test('leaving the preview disarms the wheel', () => {
+      const { props, onChange } = buildProps({ viewportZoom: 1 });
+      render(<ViewportEditor {...props} />);
+      const preview = screen.getByTestId(viewportEditorTestIds.preview);
+      fireEvent.pointerMove(preview, { pointerId: 1, buttons: 0, clientX: 10, clientY: 10 });
+      fireEvent.pointerLeave(preview, { pointerId: 1 });
+      onChange.mockClear();
+
+      expect(fireEvent.wheel(preview, { deltaY: -100, clientX: 10, clientY: 10 })).toBe(true);
+      expect(onChange).not.toHaveBeenCalled();
+    });
+
+    test('the preview is a labelled group, not an application, and points to the keyboard alternative', () => {
+      const { props } = buildProps();
+      render(<ViewportEditor {...props} />);
+
+      expect(screen.queryByRole('application')).not.toBeInTheDocument();
+      const preview = screen.getByRole('group', { name: 'Viewport preview' });
+      expect(preview).toHaveAccessibleDescription(/use the X, Y and Zoom fields/);
+    });
+
+    test.each([
+      ['Viewport X offset', 'X'],
+      ['Viewport Y offset', 'Y'],
+      ['Viewport zoom', 'Zoom (0.1–5)'],
+      ['Virtual iframe width', 'Page width (px)'],
+      ['Virtual iframe height', 'Page height (px)'],
+    ])('the %s field has an accessible name and its visible label is associated', (name, label) => {
+      const { props } = buildProps();
+      render(<ViewportEditor {...props} />);
+
+      const input = screen.getByRole('spinbutton', { name });
+      expect(screen.getByText(label).closest('label')).toHaveAttribute('for', input.id);
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -481,7 +792,7 @@ describe('panels/webview/ViewportEditor', () => {
     onChange.mockClear();
     const inputX = screen.getByTestId(viewportEditorTestIds.inputX);
     // An empty string parses to NaN — the handler must bail out, not write NaN.
-    fireEvent.change(inputX, { target: { value: '' } });
+    typeAndCommit(inputX, '');
 
     // Readout still shows the previous valid value; nothing was persisted.
     expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('X: 120');
@@ -498,7 +809,7 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     onChange.mockClear();
-    fireEvent.change(screen.getByTestId(viewportEditorTestIds.inputY), { target: { value: 'abc' } });
+    typeAndCommit(screen.getByTestId(viewportEditorTestIds.inputY), 'abc');
 
     expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('Y: 77');
     expect(options.viewportY).toBe(77);
@@ -510,7 +821,7 @@ describe('panels/webview/ViewportEditor', () => {
     render(<ViewportEditor {...props} />);
 
     onChange.mockClear();
-    fireEvent.change(screen.getByTestId(viewportEditorTestIds.inputZoom), { target: { value: '' } });
+    typeAndCommit(screen.getByTestId(viewportEditorTestIds.inputZoom), '');
 
     // Must remain at the prior valid zoom (not clamped to MIN via NaN).
     expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('Zoom: 2.00×');
@@ -561,13 +872,14 @@ describe('panels/webview/ViewportEditor', () => {
     });
   });
 
-  test('a window mousemove with no active drag is ignored (no pan)', () => {
+  test('a pointer move with no active drag is ignored (no pan)', () => {
     const { props, options } = buildProps({ viewportX: 5, viewportY: 6, viewportZoom: 1 });
     render(<ViewportEditor {...props} />);
+    const preview = screen.getByTestId(viewportEditorTestIds.preview);
 
-    // No mousedown first: the window move handler must bail (drag ref is null)
-    // and leave the viewport untouched.
-    fireEvent.mouseMove(window, { clientX: 500, clientY: 500 });
+    // No pointerdown first: the move handler must bail (drag ref is null) and
+    // leave the viewport untouched, even with a button held.
+    pointerMove(preview, 500, 500);
 
     const readout = screen.getByTestId(viewportEditorTestIds.readout);
     expect(readout).toHaveTextContent('X: 5');
@@ -576,15 +888,54 @@ describe('panels/webview/ViewportEditor', () => {
     expect(options.viewportY).toBe(6);
   });
 
+  test('dragging past the origin keeps the negative offsets after Grafana re-renders (RV1-10, no snap-back)', () => {
+    const { props, options } = buildProps({ viewportX: 10, viewportY: 10, viewportZoom: 1 });
+    const { rerender } = render(<ViewportEditor {...props} />);
+
+    const preview = screen.getByTestId(viewportEditorTestIds.preview);
+    pointerDown(preview, 100, 100);
+    pointerMove(preview, 150, 140);
+    pointerUp(preview);
+
+    expect(options.viewportX).toBe(-40);
+    expect(options.viewportY).toBe(-30);
+
+    // Grafana re-renders the editor with the committed options.
+    rerender(<ViewportEditor {...props} />);
+
+    const readout = screen.getByTestId(viewportEditorTestIds.readout);
+    expect(readout).toHaveTextContent('X: -40');
+    expect(readout).toHaveTextContent('Y: -30');
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveStyle({
+      transform: 'scale(1) translate(40px, 30px)',
+    });
+  });
+
+  test('cursor-anchored zoom-out near the top-left edge keeps its negative offsets', () => {
+    const { props, options } = buildProps({ viewportX: 0, viewportY: 0, viewportZoom: 1 });
+    const { rerender } = render(<ViewportEditor {...props} />);
+
+    const preview = screen.getByTestId(viewportEditorTestIds.preview);
+    // Zoom out at (200, 100): the point under the cursor stays put, so X/Y go negative.
+    wheelOver(preview, { deltaY: 100, clientX: 200, clientY: 100 });
+    rerender(<ViewportEditor {...props} />);
+
+    expect(options.viewportX).toBeLessThan(0);
+    expect(options.viewportY).toBeLessThan(0);
+    expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent(
+      `X: ${Math.round(options.viewportX)}`
+    );
+  });
+
   test('a re-render with UNCHANGED options does not clobber live interaction state', () => {
     const { props, options } = buildProps({ viewportX: 0, viewportY: 0, viewportZoom: 1 });
     const { rerender } = render(<ViewportEditor {...props} />);
 
     // Drive a local interaction (drag) that this editor commits.
     const preview = screen.getByTestId(viewportEditorTestIds.preview);
-    fireEvent.mouseDown(preview, { clientX: 200, clientY: 150 });
-    fireEvent.mouseMove(window, { clientX: 230, clientY: 170 });
-    fireEvent.mouseUp(window);
+    pointerDown(preview, 200, 150);
+    pointerMove(preview, 230, 170);
+    pointerUp(preview);
     expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('X: -30');
 
     // Grafana re-renders with options reflecting our own committed write — the
@@ -676,9 +1027,9 @@ describe('panels/webview/ViewportEditor', () => {
       respondHtml(proxyFetch.calls[0], '<p>x</p>');
 
       const preview = screen.getByTestId(viewportEditorTestIds.preview);
-      fireEvent.mouseDown(preview, { clientX: 100, clientY: 100 });
-      fireEvent.mouseMove(window, { clientX: 50, clientY: 50 });
-      fireEvent.mouseUp(window);
+      pointerDown(preview, 100, 100);
+      pointerMove(preview, 50, 50);
+      pointerUp(preview);
 
       expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('X: 50');
       expect(proxyFetch.fetch).toHaveBeenCalledTimes(1);

@@ -3,16 +3,41 @@
   "type": "panel",
   "name": "Web View",
   "id": "wilsonwaters-webview-panel",
+  "skipDataQuery": true,
   "info": {
     "description": "Embed an external web page in a dashboard panel with a controllable viewport.",
     "author": {
-      "name": "Wilsonwaters"
+      "name": "Wilsonwaters",
+      "url": "https://github.com/wilsonwaters"
     },
     "logos": {
       "small": "img/logo.svg",
       "large": "img/logo.svg"
     },
-    "screenshots": [],
+    "links": [
+      {
+        "name": "Documentation",
+        "url": "https://github.com/wilsonwaters/grafana-webview-app#readme"
+      },
+      {
+        "name": "Repository",
+        "url": "https://github.com/wilsonwaters/grafana-webview-app"
+      },
+      {
+        "name": "Issues",
+        "url": "https://github.com/wilsonwaters/grafana-webview-app/issues"
+      }
+    ],
+    "screenshots": [
+      {
+        "name": "Web View panels in a dashboard",
+        "path": "img/screenshots/dashboard.png"
+      },
+      {
+        "name": "Panel editor with the viewport preview",
+        "path": "img/screenshots/panel-editor.png"
+      }
+    ],
     "version": "%VERSION%",
     "updated": "%TODAY%",
     "keywords": ["webview", "iframe", "embed"]

@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/grafana/grafana/main/docs/sources/developers/plugins/plugin.schema.json",
   "type": "app",
-  "name": "Webview",
+  "name": "Web View",
   "id": "wilsonwaters-webview-app",
   "backend": true,
   "executable": "gpx_webview",
@@ -9,13 +9,41 @@
     "keywords": ["app", "webview", "iframe", "embed", "proxy"],
     "description": "Embed external web pages in Grafana dashboard panels via a sandboxed iframe, with a controllable viewport and a security-hardened, SSRF-protected backend proxy for sites that block direct framing.",
     "author": {
-      "name": "Wilsonwaters"
+      "name": "Wilsonwaters",
+      "url": "https://github.com/wilsonwaters"
     },
     "logos": {
       "small": "img/logo.svg",
       "large": "img/logo.svg"
     },
-    "screenshots": [],
+    "links": [
+      {
+        "name": "Documentation",
+        "url": "https://github.com/wilsonwaters/grafana-webview-app#readme"
+      },
+      {
+        "name": "Repository",
+        "url": "https://github.com/wilsonwaters/grafana-webview-app"
+      },
+      {
+        "name": "Issues",
+        "url": "https://github.com/wilsonwaters/grafana-webview-app/issues"
+      }
+    ],
+    "screenshots": [
+      {
+        "name": "Web View panels in a dashboard",
+        "path": "img/screenshots/dashboard.png"
+      },
+      {
+        "name": "Panel editor with the viewport preview",
+        "path": "img/screenshots/panel-editor.png"
+      },
+      {
+        "name": "Configuration page with the domain allowlist",
+        "path": "img/screenshots/configuration.png"
+      }
+    ],
     "version": "%VERSION%",
     "updated": "%TODAY%"
   },

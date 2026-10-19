@@ -1,10 +1,5 @@
+import { PLUGIN_ID } from '../../constants';
 import type { PanelOptions } from '../../types';
-
-/**
- * Plugin id of the host app plugin. Single source of truth for building
- * plugin resource URLs (mirrors src/plugin.json `id`).
- */
-export const PLUGIN_ID = 'wilsonwaters-webview-app';
 
 /**
  * Base path for the backend proxy resource handler.
@@ -23,12 +18,33 @@ export const PROXY_RESOURCE_BASE = `/api/plugins/${PLUGIN_ID}/resources/proxy`;
 export type ResolvedLoadMode = 'direct' | 'proxy';
 
 /**
+ * The stored Test URL verdict, if it applies to the current URL.
+ *
+ * - No verdict (`detectedMode` is null): null.
+ * - The verdict was measured for another URL (`detectedForUrl` differs from the
+ *   trimmed `url`): null. The author changed the URL without testing it again,
+ *   so the old verdict says nothing about the new site.
+ * - `detectedForUrl` is null: the panel was saved before the field existed. The
+ *   verdict is kept, so existing dashboards render as before. The panel
+ *   migration (`migratePanelOptions`) records the saved URL on load, so a later
+ *   URL edit is detected.
+ *
+ * Pure function.
+ */
+export function detectedModeForUrl(opts: PanelOptions): PanelOptions['detectedMode'] {
+  if (opts.detectedMode === null || opts.detectedForUrl === null) {
+    return opts.detectedMode;
+  }
+  return opts.detectedForUrl.trim() === opts.url.trim() ? opts.detectedMode : null;
+}
+
+/**
  * Resolves the effective load mode for the view-mode render.
  *
  * - `'direct'` / `'proxy'` are honoured verbatim (manual override).
- * - `'auto'` defers to the mode detected at config time (`detectedMode`); when
- *   nothing was detected (`null`) it falls back to `'direct'`. View mode never
- *   re-detects.
+ * - `'auto'` defers to the mode detected at config time for this URL (see
+ *   {@link detectedModeForUrl}); when there is none it falls back to
+ *   `'direct'`. View mode never re-detects.
  *
  * Pure function — safe to unit test in isolation.
  */
@@ -39,8 +55,8 @@ export function resolveLoadMode(opts: PanelOptions): ResolvedLoadMode {
   if (opts.loadMode === 'proxy') {
     return 'proxy';
   }
-  // 'auto' — use the stored detection result, defaulting to direct.
-  return opts.detectedMode ?? 'direct';
+  // 'auto' — use the stored detection result for this URL, defaulting to direct.
+  return detectedModeForUrl(opts) ?? 'direct';
 }
 
 /**

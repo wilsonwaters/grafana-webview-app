@@ -12,10 +12,9 @@ import { setWebViewVisualization, FRAMABLE_URL } from './tc4Helpers';
  * is never an iframe `src`, because Grafana sends `X-Frame-Options: deny` and
  * `Content-Security-Policy: sandbox` on plugin resource responses.
  *
- * `example.com` is allowlisted by provisioning/plugins/apps.yaml. If the
- * instance has no such allowlist entry (for example after appConfig.spec.ts
- * saved the settings), the proxy answers 403 and the test skips itself rather
- * than flake.
+ * `example.com` is allowlisted by provisioning/plugins/apps.yaml, and
+ * appConfig.spec.ts keeps that entry when it saves the settings, so a proxy
+ * error for example.com is a real failure.
  */
 
 /** Selects "Proxy" in the Load mode radio group. */
@@ -28,17 +27,15 @@ async function selectProxyMode(page: Page): Promise<void> {
 }
 
 /**
- * Waits for the proxied frame or the proxy error state inside `scope`. Skips
- * the test when the host is not allowlisted on this instance.
+ * Waits for the proxied frame inside `scope`. Fails at once, with the error
+ * text, when the proxy error state appears instead.
  */
 async function waitForProxyFrame(scope: Locator, ids: { iframe: string; proxyError: string }): Promise<Locator> {
   const iframe = scope.getByTestId(ids.iframe);
   const error = scope.getByTestId(ids.proxyError);
   await expect(iframe.or(error)).toBeVisible({ timeout: 30000 });
   if (await error.isVisible()) {
-    const text = (await error.textContent()) ?? '';
-    test.skip(/allowlist/i.test(text), 'example.com is not allowlisted on this instance — provisioned in CI');
-    throw new Error(`proxy render failed: ${text}`);
+    throw new Error(`proxy render failed: ${(await error.textContent()) ?? ''}`);
   }
   return iframe;
 }
@@ -94,6 +91,28 @@ test.describe('FR5 proxy render (fetch then srcdoc)', () => {
     const previewFrame = await waitForProxyFrame(preview, viewportEditorTestIds);
     await expectSandboxedSrcdocFrame(previewFrame);
     await expectProxiedExampleDomain(previewFrame);
+  });
+
+  test('the Hide elements option hides matching elements of the proxied page (RV1-17)', async ({
+    panelEditPage,
+    page,
+  }) => {
+    test.setTimeout(180000);
+    await setWebViewVisualization(panelEditPage, page);
+
+    await page.getByRole('textbox', { name: 'URL' }).fill(FRAMABLE_URL);
+    await page.keyboard.press('Tab');
+    await selectProxyMode(page);
+
+    // The example.com page is one <p> paragraph. One selector per line.
+    const hide = page.getByRole('textbox', { name: 'Hide elements (proxy mode)' });
+    await hide.scrollIntoViewIfNeeded();
+    await hide.fill('p\n#not-on-the-page');
+    await hide.blur();
+
+    const panelFrame = await waitForProxyFrame(panelEditPage.panel.locator, webViewPanelTestIds);
+    await expect(panelFrame).toHaveAttribute('srcdoc', /<p[^>]*style="[^"]*display:\s*none/);
+    await expect(panelFrame.contentFrame().locator('p').first()).toBeHidden();
   });
 
   test('a non-allowlisted host shows the proxy error state and no iframe', async ({ panelEditPage, page }) => {

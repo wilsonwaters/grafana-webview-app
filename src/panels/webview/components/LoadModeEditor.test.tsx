@@ -85,9 +85,8 @@ describe('panels/webview/LoadModeEditor', () => {
   // DF2: backend unavailable — Proxy/Auto disabled, note shown, clamped Direct
   // ---------------------------------------------------------------------------
 
-  test('omits backend-dependent options, clamps to Direct and shows a note when unavailable', () => {
+  test('omits backend-dependent options and shows a note when unavailable', () => {
     setBackend({ loading: false, backendAvailable: false });
-    // A previously-saved proxy panel: the displayed selection clamps to Direct.
     const { props } = buildProps({ loadMode: 'proxy' });
     render(<LoadModeEditor {...props} />);
 
@@ -95,9 +94,36 @@ describe('panels/webview/LoadModeEditor', () => {
     expect(queryRadio('Auto')).not.toBeInTheDocument();
     expect(queryRadio('Proxy')).not.toBeInTheDocument();
     expect(radio('Direct')).toBeInTheDocument();
-    // Effective mode is Direct (display-only clamp).
-    expect(radio('Direct')).toBeChecked();
     expect(screen.getByTestId(loadModeEditorTestIds.backendUnavailableNote)).toBeInTheDocument();
+  });
+
+  test.each(['proxy', 'auto'] as const)(
+    'degraded with a stored %s mode: Direct is unselected and a click persists direct (RV1-28)',
+    (stored) => {
+      setBackend({ loading: false, backendAvailable: false });
+      const { props, options, onChange } = buildProps({ loadMode: stored });
+      render(<LoadModeEditor {...props} />);
+
+      expect(radio('Direct')).not.toBeChecked();
+      expect(screen.getByTestId(loadModeEditorTestIds.backendUnavailableNote)).toHaveTextContent(
+        `saved with the ${stored === 'auto' ? 'Auto' : 'Proxy'} load mode`
+      );
+
+      fireEvent.click(radio('Direct'));
+
+      expect(onChange).toHaveBeenCalledTimes(1);
+      expect(onChange).toHaveBeenCalledWith('direct');
+      expect(options.loadMode).toBe('direct');
+    }
+  );
+
+  test('degraded with a stored direct mode: Direct is selected and the note does not ask for a change', () => {
+    setBackend({ loading: false, backendAvailable: false });
+    const { props } = buildProps({ loadMode: 'direct' });
+    render(<LoadModeEditor {...props} />);
+
+    expect(radio('Direct')).toBeChecked();
+    expect(screen.getByTestId(loadModeEditorTestIds.backendUnavailableNote)).not.toHaveTextContent(/saved with/);
   });
 
   test('does NOT persist a clamp on mount when unavailable (saved value untouched)', () => {

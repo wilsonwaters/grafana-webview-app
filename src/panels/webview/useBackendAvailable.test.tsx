@@ -1,7 +1,8 @@
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { getBackendSrv } from '@grafana/runtime';
 
 import {
+  BACKEND_RETRY_DELAYS_MS,
   HEALTH_RESOURCE_PATH,
   useBackendAvailable,
   __resetBackendAvailableCacheForTests,
@@ -138,6 +139,16 @@ describe('panels/webview/useBackendAvailable', () => {
     expect(get).toHaveBeenCalledTimes(1);
   });
 
+  test('a later mount starts from the cached positive result (no loading state)', async () => {
+    mockGet(jest.fn().mockResolvedValue({ status: 'ok' }));
+    const first = renderHook(() => useBackendAvailable());
+    await waitFor(() => expect(first.result.current.loading).toBe(false));
+
+    const second = renderHook(() => useBackendAvailable());
+
+    expect(second.result.current).toEqual({ loading: false, backendAvailable: true });
+  });
+
   test('does not re-probe on a subsequent mount within the same session', async () => {
     const get = mockGet(jest.fn().mockResolvedValue({ status: 'ok' }));
 
@@ -151,5 +162,110 @@ describe('panels/webview/useBackendAvailable', () => {
 
     expect(second.result.current.backendAvailable).toBe(true);
     expect(get).toHaveBeenCalledTimes(1);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// RV1-13: a negative result is retried with backoff; a positive one is cached
+// -----------------------------------------------------------------------------
+
+describe('panels/webview/useBackendAvailable retry after a negative result (RV1-13)', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    __resetBackendAvailableCacheForTests();
+    jest.useRealTimers();
+  });
+
+  /** Advances fake time and lets the probe's promise chain settle. */
+  async function advance(ms: number) {
+    await act(async () => {
+      jest.advanceTimersByTime(ms);
+      for (let i = 0; i < 10; i++) {
+        await Promise.resolve();
+      }
+    });
+  }
+
+  test('the retry delays are 30 s, 60 s, then 120 s as the cap', () => {
+    expect(BACKEND_RETRY_DELAYS_MS).toEqual([30000, 60000, 120000]);
+  });
+
+  test('a negative result is retried, and the hook recovers when the backend comes back', async () => {
+    const get = mockGet(
+      jest
+        .fn()
+        .mockRejectedValueOnce({ status: 503, statusText: 'Service Unavailable' })
+        .mockResolvedValue({ status: 'ok' })
+    );
+
+    const { result } = renderHook(() => useBackendAvailable());
+    await advance(0);
+    expect(result.current).toEqual({ loading: false, backendAvailable: false });
+    expect(get).toHaveBeenCalledTimes(1);
+
+    await advance(29999);
+    expect(get).toHaveBeenCalledTimes(1);
+
+    await advance(1);
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(result.current).toEqual({ loading: false, backendAvailable: true });
+
+    // A positive result is final for the session: no more probes.
+    await advance(10 * 60_000);
+    expect(get).toHaveBeenCalledTimes(2);
+  });
+
+  test('retries back off 30 s, 60 s, 120 s, then stay at 120 s', async () => {
+    const get = mockGet(jest.fn().mockResolvedValue({ status: 'degraded' }));
+    renderHook(() => useBackendAvailable());
+    await advance(0);
+    expect(get).toHaveBeenCalledTimes(1);
+
+    const expectProbeAfter = async (ms: number, calls: number) => {
+      await advance(ms - 1);
+      expect(get).toHaveBeenCalledTimes(calls - 1);
+      await advance(1);
+      expect(get).toHaveBeenCalledTimes(calls);
+    };
+
+    await expectProbeAfter(30_000, 2);
+    await expectProbeAfter(60_000, 3);
+    await expectProbeAfter(120_000, 4);
+    await expectProbeAfter(120_000, 5);
+  });
+
+  test('all mounted hooks share one retry request and all see the recovery', async () => {
+    const get = mockGet(jest.fn().mockResolvedValueOnce({ status: 'degraded' }).mockResolvedValue({ status: 'ok' }));
+    const first = renderHook(() => useBackendAvailable());
+    const second = renderHook(() => useBackendAvailable());
+    await advance(0);
+    expect(get).toHaveBeenCalledTimes(1);
+
+    await advance(30_000);
+
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(first.result.current.backendAvailable).toBe(true);
+    expect(second.result.current.backendAvailable).toBe(true);
+  });
+
+  test('no retries run while no hook is mounted; a later mount resumes the schedule', async () => {
+    const get = mockGet(jest.fn().mockResolvedValueOnce({ status: 'degraded' }).mockResolvedValue({ status: 'ok' }));
+    const first = renderHook(() => useBackendAvailable());
+    await advance(0);
+    first.unmount();
+
+    await advance(10 * 60_000);
+    expect(get).toHaveBeenCalledTimes(1);
+
+    // The retry is overdue, so a new mount shows the last result and probes at once.
+    const second = renderHook(() => useBackendAvailable());
+    expect(second.result.current).toEqual({ loading: false, backendAvailable: false });
+    await advance(0);
+
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(second.result.current).toEqual({ loading: false, backendAvailable: true });
   });
 });
