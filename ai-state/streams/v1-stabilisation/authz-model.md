@@ -73,3 +73,9 @@ URL through it. Admins must allowlist only hosts that every user of the org may 
   `Content-Encoding: gzip` passes through; `/check-frameable` and `/proxy` return only a reason
   (never the dial error with resolved IPs) for an unreachable upstream; the audit `url` field has
   its query values redacted; the parse limits and memory sizing are in `memory-sizing.md`.
+- `pkg/plugin/proxy.go` no longer exists: RV2-be split it, with no code change, into
+  `proxy_pipeline.go` (handler, security pipeline, reverse proxy, outbound headers, error mapping),
+  `proxy_response.go` (size limit, gzip, HTML rewrite step, response header policy),
+  `proxy_redirect.go` and `audit.go`. `docs/architecture.md` still names `proxy.go` (and a
+  `proxyHandler.serve` method that is now `ServeHTTP`); `pkg/internal/htmlparse` is new (the bounded
+  copy of the x/net/html tree builder).
