@@ -6,6 +6,19 @@ import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../../types';
 import { webViewPanelTestIds } from './testIds';
 import { PROXY_RESOURCE_BASE } from '../loadMode';
 import { useBackendAvailable, type BackendAvailability } from '../useBackendAvailable';
+import {
+  installProxyFetchMock,
+  respondError,
+  respondHtml,
+  respondHttpError,
+  type ProxyFetchMock,
+} from '../testing/proxyFetchMock';
+
+// FR5: proxy mode fetches the rewritten HTML with getBackendSrv().fetch. The
+// mock lets each test decide when and in which order requests respond.
+jest.mock('@grafana/runtime', () => ({
+  getBackendSrv: jest.fn(),
+}));
 
 // DF3: mock the backend-availability hook so each test drives the
 // available / unavailable / loading states deterministically. Default is a
@@ -21,12 +34,22 @@ function setBackend(state: BackendAvailability) {
   mockedUseBackendAvailable.mockReturnValue(state);
 }
 
+let proxyFetch: ProxyFetchMock;
+
 beforeEach(() => {
   // Default: backend settled and available. Direct-mode tests are unaffected by
   // this; proxy-mode tests that predate DF3 expect the proxy iframe, which now
   // requires an available backend.
   setBackend({ loading: false, backendAvailable: true });
+  proxyFetch = installProxyFetchMock();
 });
+
+/** The decoded query of the n-th proxy fetch. */
+function fetchParams(n = 0): URLSearchParams {
+  const url = proxyFetch.calls[n].options.url;
+  expect(url.startsWith(`${PROXY_RESOURCE_BASE}?`)).toBe(true);
+  return new URLSearchParams(url.split('?')[1]);
+}
 
 function buildProps(options: Partial<PanelOptions> = {}, dims: { width?: number; height?: number } = {}): PanelProps<PanelOptions> {
   return {
@@ -100,14 +123,17 @@ describe('panels/webview/WebViewPanel', () => {
   // detectedMode).
   // ---------------------------------------------------------------------------
 
-  describe('load-mode src wiring (FR4)', () => {
-    test('proxy mode → iframe src is the backend proxy resource URL', () => {
+  describe('load-mode wiring (FR4, FR5)', () => {
+    test('proxy mode → fetches the backend proxy resource and renders the HTML with srcdoc', () => {
       render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />);
 
+      expect(fetchParams().get('url')).toBe('https://example.com');
+      respondHtml(proxyFetch.calls[0], '<h1>Example Domain</h1>');
+
       const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
-      const src = iframe.getAttribute('src')!;
-      expect(src.startsWith(`${PROXY_RESOURCE_BASE}?`)).toBe(true);
-      expect(src).toContain(`url=${encodeURIComponent('https://example.com')}`);
+      expect(iframe).toHaveAttribute('srcdoc', '<h1>Example Domain</h1>');
+      // The resource route is never an iframe src (Grafana sends XFO deny + CSP sandbox).
+      expect(iframe).not.toHaveAttribute('src');
     });
 
     test('proxy mode → hideSelectors are carried as repeated hide= params (CR5)', () => {
@@ -117,29 +143,28 @@ describe('panels/webview/WebViewPanel', () => {
         />
       );
 
-      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
-      const src = iframe.getAttribute('src')!;
-      const params = new URLSearchParams(src.split('?')[1]);
-      expect(params.getAll('hide')).toEqual(['.ad', '#banner']);
+      expect(fetchParams().getAll('hide')).toEqual(['.ad', '#banner']);
     });
 
-    test('direct mode → iframe src is the raw URL (no proxy base)', () => {
+    test('direct mode → iframe src is the raw URL (no proxy fetch)', () => {
       render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
 
       const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
       expect(iframe).toHaveAttribute('src', 'https://example.com');
-      expect(iframe.getAttribute('src')).not.toContain(PROXY_RESOURCE_BASE);
+      expect(iframe).not.toHaveAttribute('srcdoc');
+      expect(proxyFetch.fetch).not.toHaveBeenCalled();
     });
 
-    test('auto mode + detectedMode=proxy → proxy src', () => {
+    test('auto mode + detectedMode=proxy → proxy fetch + srcdoc', () => {
       render(
         <WebViewPanel
           {...buildProps({ url: 'https://example.com', loadMode: 'auto', detectedMode: 'proxy' })}
         />
       );
 
-      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
-      expect(iframe.getAttribute('src')!.startsWith(`${PROXY_RESOURCE_BASE}?`)).toBe(true);
+      expect(proxyFetch.fetch).toHaveBeenCalledTimes(1);
+      respondHtml(proxyFetch.calls[0], '<p>proxied</p>');
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('srcdoc', '<p>proxied</p>');
     });
 
     test('auto mode + detectedMode=direct → raw URL src', () => {
@@ -482,6 +507,123 @@ describe('panels/webview/WebViewPanel', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // S1: URL safety (VR-1) and per-mode sandbox (VR-2)
+  // ---------------------------------------------------------------------------
+
+  describe('URL safety (VR-1)', () => {
+    const unsafeUrls = [
+      'javascript:alert(document.cookie)',
+      'JaVaScRiPt:alert(1)',
+      '  javascript:alert(1)',
+      'java\tscript:alert(1)',
+      'data:text/html,<script>alert(1)</script>',
+      'blob:https://example.com/0b8f1c1e',
+      'vbscript:msgbox(1)',
+      'file:///etc/passwd',
+      '/api/user',
+      '//example.com/',
+      'https://user:secret@example.com/',
+    ];
+
+    test.each(unsafeUrls)('direct mode: %j renders an accessible error and NO iframe', (url) => {
+      const { container } = render(<WebViewPanel {...buildProps({ url, loadMode: 'direct' })} />);
+
+      const error = screen.getByTestId(webViewPanelTestIds.invalidUrl);
+      expect(error).toHaveAttribute('role', 'alert');
+      expect(error).toHaveTextContent(/cannot be displayed/i);
+      expect(container.querySelector('iframe')).toBeNull();
+    });
+
+    test.each(unsafeUrls)('proxy mode: %j renders an accessible error and NO iframe', (url) => {
+      const { container } = render(<WebViewPanel {...buildProps({ url, loadMode: 'proxy' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.invalidUrl)).toBeInTheDocument();
+      expect(container.querySelector('iframe')).toBeNull();
+      // The URL check runs before the backend guard.
+      expect(screen.queryByTestId(webViewPanelTestIds.backendLoading)).not.toBeInTheDocument();
+    });
+
+    test('auto mode + detectedMode=proxy with an unsafe URL renders NO iframe', () => {
+      const { container } = render(
+        <WebViewPanel {...buildProps({ url: 'javascript:alert(1)', loadMode: 'auto', detectedMode: 'proxy' })} />
+      );
+
+      expect(screen.getByTestId(webViewPanelTestIds.invalidUrl)).toBeInTheDocument();
+      expect(container.querySelector('iframe')).toBeNull();
+    });
+
+    test('the error message does not echo the unsafe URL', () => {
+      render(<WebViewPanel {...buildProps({ url: 'javascript:alert(document.cookie)' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.invalidUrl)).not.toHaveTextContent('document.cookie');
+    });
+
+    test('changing a safe URL to an unsafe one removes the iframe', () => {
+      const { rerender, container } = render(<WebViewPanel {...buildProps({ url: 'https://example.com' })} />);
+      expect(container.querySelector('iframe')).not.toBeNull();
+
+      rerender(<WebViewPanel {...buildProps({ url: 'javascript:alert(1)' })} />);
+
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(screen.getByTestId(webViewPanelTestIds.invalidUrl)).toBeInTheDocument();
+    });
+
+    test('surrounding whitespace is trimmed from the iframe src', () => {
+      render(<WebViewPanel {...buildProps({ url: '  https://example.com  ' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('src', 'https://example.com');
+    });
+
+    test('the debug overlay still shows on the invalid-URL state', () => {
+      render(<WebViewPanel {...buildProps({ url: 'javascript:alert(1)', showDebugOverlay: true })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.invalidUrl)).toBeInTheDocument();
+      expect(screen.getByTestId(webViewPanelTestIds.debugOverlay)).toHaveTextContent('mode: direct');
+    });
+  });
+
+  describe('per-mode sandbox (VR-2)', () => {
+    test('direct mode + cross-origin URL → allow-scripts allow-same-origin', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute(
+        'sandbox',
+        'allow-scripts allow-same-origin'
+      );
+    });
+
+    test('direct mode + URL on the Grafana origin → allow-scripts only', () => {
+      // jsdom serves the test page from http://localhost.
+      render(<WebViewPanel {...buildProps({ url: 'http://localhost/api/user', loadMode: 'direct' })} />);
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('sandbox', 'allow-scripts');
+    });
+
+    test('proxy mode → allow-scripts only (never allow-same-origin)', () => {
+      render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />);
+      respondHtml(proxyFetch.calls[0], '<p>x</p>');
+
+      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(iframe).toHaveAttribute('sandbox', 'allow-scripts');
+      expect(iframe.getAttribute('sandbox')).not.toContain('allow-same-origin');
+    });
+
+    test('every iframe keeps referrerPolicy="no-referrer"', () => {
+      const { container } = render(
+        <>
+          <WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'direct' })} />
+          <WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />
+        </>
+      );
+      respondHtml(proxyFetch.calls[0], '<p>x</p>');
+
+      const iframes = container.querySelectorAll('iframe');
+      expect(iframes).toHaveLength(2);
+      iframes.forEach((iframe) => expect(iframe).toHaveAttribute('referrerpolicy', 'no-referrer'));
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // DF3: view-mode backend-availability guard (proxy only)
   // ---------------------------------------------------------------------------
 
@@ -495,19 +637,19 @@ describe('panels/webview/WebViewPanel', () => {
       expect(fallback).toBeInTheDocument();
       // Real text, not just an icon (accessibility).
       expect(fallback).toHaveTextContent(/backend proxy/i);
-      // The proxy iframe must NOT be rendered at all.
+      // The proxy iframe must NOT be rendered at all, and nothing is fetched.
       expect(screen.queryByTestId(webViewPanelTestIds.iframe)).not.toBeInTheDocument();
+      expect(proxyFetch.fetch).not.toHaveBeenCalled();
     });
 
-    test('proxy + backend available → proxy iframe rendered with buildProxySrc src', () => {
+    test('proxy + backend available → proxied HTML fetched and rendered with srcdoc', () => {
       setBackend({ loading: false, backendAvailable: true });
 
       render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />);
 
-      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
-      const src = iframe.getAttribute('src')!;
-      expect(src.startsWith(`${PROXY_RESOURCE_BASE}?`)).toBe(true);
-      expect(src).toContain(`url=${encodeURIComponent('https://example.com')}`);
+      expect(fetchParams().get('url')).toBe('https://example.com');
+      respondHtml(proxyFetch.calls[0], '<p>ok</p>');
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('srcdoc', '<p>ok</p>');
       // No fallback / loading placeholder when available.
       expect(screen.queryByTestId(webViewPanelTestIds.proxyUnavailable)).not.toBeInTheDocument();
       expect(screen.queryByTestId(webViewPanelTestIds.backendLoading)).not.toBeInTheDocument();
@@ -519,8 +661,9 @@ describe('panels/webview/WebViewPanel', () => {
       render(<WebViewPanel {...buildProps({ url: 'https://example.com', loadMode: 'proxy' })} />);
 
       expect(screen.getByTestId(webViewPanelTestIds.backendLoading)).toBeInTheDocument();
-      // Never a broken proxy iframe while the probe is in flight.
+      // Never a broken proxy iframe while the probe is in flight, and no fetch yet.
       expect(screen.queryByTestId(webViewPanelTestIds.iframe)).not.toBeInTheDocument();
+      expect(proxyFetch.fetch).not.toHaveBeenCalled();
       // Not yet the settled fallback either.
       expect(screen.queryByTestId(webViewPanelTestIds.proxyUnavailable)).not.toBeInTheDocument();
     });
@@ -584,6 +727,213 @@ describe('panels/webview/WebViewPanel', () => {
 
       expect(screen.getByTestId(webViewPanelTestIds.proxyUnavailable)).toBeInTheDocument();
       expect(screen.getByTestId(webViewPanelTestIds.debugOverlay)).toHaveTextContent('mode: proxy');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // FR5: proxy mode renders the fetched HTML with srcdoc
+  // ---------------------------------------------------------------------------
+
+  describe('proxy render: fetch then srcdoc (FR5)', () => {
+    const proxyProps = (overrides: Partial<PanelOptions> = {}) =>
+      buildProps({ url: 'https://example.com', loadMode: 'proxy', ...overrides });
+
+    test('fetches as text with Grafana error toasts off', () => {
+      render(<WebViewPanel {...proxyProps()} />);
+
+      expect(proxyFetch.calls[0].options).toMatchObject({
+        method: 'GET',
+        responseType: 'text',
+        showErrorAlert: false,
+      });
+    });
+
+    test('shows an accessible loading state until the HTML arrives', () => {
+      render(<WebViewPanel {...proxyProps()} />);
+
+      const loading = screen.getByTestId(webViewPanelTestIds.proxyLoading);
+      expect(loading).toHaveAttribute('role', 'status');
+      expect(loading).toHaveTextContent(/loading/i);
+      expect(screen.queryByTestId(webViewPanelTestIds.iframe)).not.toBeInTheDocument();
+
+      respondHtml(proxyFetch.calls[0], '<p>done</p>');
+
+      expect(screen.queryByTestId(webViewPanelTestIds.proxyLoading)).not.toBeInTheDocument();
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toBeInTheDocument();
+    });
+
+    test('the srcdoc iframe has sandbox="allow-scripts", no-referrer, the viewport transform and no src', () => {
+      render(<WebViewPanel {...proxyProps({ viewportX: 10, viewportY: 20, viewportZoom: 2 })} />);
+      respondHtml(proxyFetch.calls[0], '<html><body><script>1</script></body></html>');
+
+      const iframe = screen.getByTestId(webViewPanelTestIds.iframe);
+      expect(iframe).toHaveAttribute('srcdoc', '<html><body><script>1</script></body></html>');
+      expect(iframe).toHaveAttribute('sandbox', 'allow-scripts');
+      expect(iframe).toHaveAttribute('referrerpolicy', 'no-referrer');
+      expect(iframe).toHaveAttribute('title', 'Web View');
+      expect(iframe).not.toHaveAttribute('src');
+      expect(iframe).toHaveStyle({
+        width: '1920px',
+        height: '1080px',
+        transform: 'scale(2) translate(-10px, -20px)',
+        transformOrigin: 'top left',
+        pointerEvents: 'none',
+      });
+    });
+
+    test('a non-2xx response shows the status and backend message, and NO iframe', () => {
+      const { container } = render(<WebViewPanel {...proxyProps()} />);
+
+      respondHttpError(proxyFetch.calls[0], 403, 'Forbidden', 'target host is not allowlisted');
+
+      const error = screen.getByTestId(webViewPanelTestIds.proxyError);
+      expect(error).toHaveAttribute('role', 'alert');
+      expect(error).toHaveTextContent('HTTP 403');
+      expect(error).toHaveTextContent('target host is not allowlisted');
+      expect(container.querySelector('iframe')).toBeNull();
+    });
+
+    test('an HTML error body is never rendered as a document or shown', () => {
+      const body = '<html><body><script>window.pwned = 1</script>Bad gateway</body></html>';
+      const { container } = render(<WebViewPanel {...proxyProps()} />);
+
+      respondHttpError(proxyFetch.calls[0], 502, 'Bad Gateway', body);
+
+      expect(container.querySelector('iframe')).toBeNull();
+      expect(container.querySelector('[srcdoc]')).toBeNull();
+      const error = screen.getByTestId(webViewPanelTestIds.proxyError);
+      expect(error).toHaveTextContent('HTTP 502');
+      expect(error).toHaveTextContent('Bad Gateway');
+      expect(error).not.toHaveTextContent('pwned');
+    });
+
+    test('a network failure shows the error state without a status', () => {
+      render(<WebViewPanel {...proxyProps()} />);
+
+      respondError(proxyFetch.calls[0], new TypeError('Failed to fetch'));
+
+      const error = screen.getByTestId(webViewPanelTestIds.proxyError);
+      expect(error).toHaveTextContent('Failed to fetch');
+      expect(error).not.toHaveTextContent('HTTP');
+    });
+
+    test('stale-response race: an older URL that responds last never overwrites the newer page', () => {
+      const { rerender } = render(<WebViewPanel {...proxyProps({ url: 'https://a.example.com' })} />);
+      rerender(<WebViewPanel {...proxyProps({ url: 'https://b.example.com' })} />);
+
+      expect(proxyFetch.calls).toHaveLength(2);
+      expect(fetchParams(1).get('url')).toBe('https://b.example.com');
+      expect(proxyFetch.calls[0].unsubscribed).toBe(true);
+
+      respondHtml(proxyFetch.calls[1], '<p>B</p>');
+      respondHtml(proxyFetch.calls[0], '<p>A</p>');
+
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('srcdoc', '<p>B</p>');
+    });
+
+    test('changing the URL drops the old page and shows loading', () => {
+      const { rerender } = render(<WebViewPanel {...proxyProps({ url: 'https://a.example.com' })} />);
+      respondHtml(proxyFetch.calls[0], '<p>A</p>');
+
+      rerender(<WebViewPanel {...proxyProps({ url: 'https://b.example.com' })} />);
+
+      expect(screen.queryByTestId(webViewPanelTestIds.iframe)).not.toBeInTheDocument();
+      expect(screen.getByTestId(webViewPanelTestIds.proxyLoading)).toBeInTheDocument();
+    });
+
+    test('changing hideSelectors refetches with the new hide params', () => {
+      const { rerender } = render(<WebViewPanel {...proxyProps({ hideSelectors: '.a' })} />);
+      rerender(<WebViewPanel {...proxyProps({ hideSelectors: '.a\n.b' })} />);
+
+      expect(proxyFetch.calls).toHaveLength(2);
+      expect(fetchParams(1).getAll('hide')).toEqual(['.a', '.b']);
+    });
+
+    test('a viewport-only change does not refetch', () => {
+      const { rerender } = render(<WebViewPanel {...proxyProps()} />);
+      respondHtml(proxyFetch.calls[0], '<p>x</p>');
+
+      rerender(<WebViewPanel {...proxyProps({ viewportX: 300, viewportZoom: 1.5 })} />);
+
+      expect(proxyFetch.calls).toHaveLength(1);
+      expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('srcdoc', '<p>x</p>');
+    });
+
+    test('unmount cancels the in-flight request', () => {
+      const { unmount } = render(<WebViewPanel {...proxyProps()} />);
+
+      unmount();
+
+      expect(proxyFetch.calls[0].unsubscribed).toBe(true);
+    });
+
+    describe('auto-refresh', () => {
+      beforeEach(() => {
+        jest.useFakeTimers();
+      });
+
+      afterEach(() => {
+        jest.useRealTimers();
+      });
+
+      test('each tick refetches the HTML and keeps the current page until the new one arrives', () => {
+        render(<WebViewPanel {...proxyProps({ refreshIntervalSec: 10 })} />);
+        respondHtml(proxyFetch.calls[0], '<p>v1</p>');
+
+        act(() => {
+          jest.advanceTimersByTime(10000);
+        });
+
+        expect(proxyFetch.calls).toHaveLength(2);
+        expect(proxyFetch.calls[1].options.url).toBe(proxyFetch.calls[0].options.url);
+        // The current page stays on screen while the refetch is in flight.
+        expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('srcdoc', '<p>v1</p>');
+
+        respondHtml(proxyFetch.calls[1], '<p>v2</p>');
+        expect(screen.getByTestId(webViewPanelTestIds.iframe)).toHaveAttribute('srcdoc', '<p>v2</p>');
+
+        act(() => {
+          jest.advanceTimersByTime(10000);
+        });
+        expect(proxyFetch.calls).toHaveLength(3);
+      });
+
+      test('the iframe is remounted on each successful refresh, even with unchanged HTML', () => {
+        render(<WebViewPanel {...proxyProps({ refreshIntervalSec: 5 })} />);
+        respondHtml(proxyFetch.calls[0], '<p>same</p>');
+        const before = screen.getByTestId(webViewPanelTestIds.iframe);
+
+        act(() => {
+          jest.advanceTimersByTime(5000);
+        });
+        respondHtml(proxyFetch.calls[1], '<p>same</p>');
+
+        const after = screen.getByTestId(webViewPanelTestIds.iframe);
+        expect(after).not.toBe(before);
+        expect(after).toHaveAttribute('srcdoc', '<p>same</p>');
+      });
+
+      test('a failed refresh shows the error state', () => {
+        render(<WebViewPanel {...proxyProps({ refreshIntervalSec: 5 })} />);
+        respondHtml(proxyFetch.calls[0], '<p>v1</p>');
+
+        act(() => {
+          jest.advanceTimersByTime(5000);
+        });
+        respondHttpError(proxyFetch.calls[1], 429, 'Too Many Requests', 'rate limit exceeded');
+
+        expect(screen.getByTestId(webViewPanelTestIds.proxyError)).toHaveTextContent('HTTP 429');
+        expect(screen.queryByTestId(webViewPanelTestIds.iframe)).not.toBeInTheDocument();
+      });
+    });
+
+    test('the panel never listens for message events from the frame', () => {
+      const addListener = jest.spyOn(window, 'addEventListener');
+      render(<WebViewPanel {...proxyProps()} />);
+      respondHtml(proxyFetch.calls[0], '<script>parent.postMessage("x", "*")</script>');
+
+      expect(addListener.mock.calls.map(([type]) => type)).not.toContain('message');
+      addListener.mockRestore();
     });
   });
 });

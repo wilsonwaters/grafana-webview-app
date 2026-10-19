@@ -21,7 +21,7 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
     .addTextInput({
       path: 'url',
       name: 'URL',
-      description: 'The external web page to display in the panel.',
+      description: 'The external web page to display in the panel. Enter a full http:// or https:// URL.',
       defaultValue: DEFAULT_PANEL_OPTIONS.url,
     })
     // DF2: load-mode selector. Converted from a standard `addRadio` to a custom

@@ -4,6 +4,30 @@ import { StandardEditorProps } from '@grafana/data';
 import { ViewportEditor } from './ViewportEditor';
 import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../../types';
 import { viewportEditorTestIds } from './viewportEditorTestIds';
+import { useBackendAvailable } from '../useBackendAvailable';
+import {
+  installProxyFetchMock,
+  respondHtml,
+  respondHttpError,
+  type ProxyFetchMock,
+} from '../testing/proxyFetchMock';
+
+// FR5: in proxy mode the preview fetches the rewritten HTML (getBackendSrv) and
+// waits for the backend probe (DF3), exactly like the view-mode panel.
+jest.mock('@grafana/runtime', () => ({
+  getBackendSrv: jest.fn(),
+}));
+jest.mock('../useBackendAvailable', () => ({
+  useBackendAvailable: jest.fn(),
+}));
+
+const mockedUseBackendAvailable = useBackendAvailable as jest.MockedFunction<typeof useBackendAvailable>;
+let proxyFetch: ProxyFetchMock;
+
+beforeEach(() => {
+  mockedUseBackendAvailable.mockReturnValue({ loading: false, backendAvailable: true });
+  proxyFetch = installProxyFetchMock();
+});
 
 type Props = StandardEditorProps<number, unknown, PanelOptions>;
 
@@ -55,6 +79,61 @@ describe('panels/webview/ViewportEditor', () => {
     expect(iframe).toHaveAttribute('src', 'https://example.com');
     expect(iframe).toHaveStyle({ transform: 'scale(1.5) translate(-100px, -200px)' });
     expect(iframe).toHaveStyle({ pointerEvents: 'none' });
+  });
+
+  // ---------------------------------------------------------------------------
+  // S1: URL safety (VR-1) and sandbox (VR-2) in the editor preview
+  // ---------------------------------------------------------------------------
+
+  test.each([
+    'javascript:alert(document.cookie)',
+    'JAVASCRIPT:alert(1)',
+    ' javascript:alert(1)',
+    'data:text/html,<script>alert(1)</script>',
+    'vbscript:msgbox(1)',
+    'file:///etc/passwd',
+    '/relative/path',
+  ])('an unsafe URL %j shows an accessible error and NO iframe in the preview', (url) => {
+    const { props } = buildProps({ url });
+    const { container } = render(<ViewportEditor {...props} />);
+
+    const error = screen.getByTestId(viewportEditorTestIds.invalidUrl);
+    expect(error).toHaveAttribute('role', 'alert');
+    expect(error).toHaveTextContent(/cannot be displayed/i);
+    expect(container.querySelector('iframe')).toBeNull();
+    // The empty-URL hint is for an empty URL only.
+    expect(screen.queryByTestId(viewportEditorTestIds.hint)).not.toBeInTheDocument();
+  });
+
+  test('an unsafe URL disables drag panning in the preview', () => {
+    const { props, onChange } = buildProps({ url: 'javascript:alert(1)' });
+    render(<ViewportEditor {...props} />);
+
+    const preview = screen.getByTestId(viewportEditorTestIds.preview);
+    fireEvent.mouseDown(preview, { clientX: 100, clientY: 100 });
+    fireEvent.mouseMove(window, { clientX: 50, clientY: 50 });
+    fireEvent.mouseUp(window);
+
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  test('preview iframe of a cross-origin URL gets allow-scripts allow-same-origin', () => {
+    const { props } = buildProps({ url: 'https://example.com' });
+    render(<ViewportEditor {...props} />);
+
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute(
+      'sandbox',
+      'allow-scripts allow-same-origin'
+    );
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute('referrerpolicy', 'no-referrer');
+  });
+
+  test('preview iframe of a URL on the Grafana origin gets allow-scripts only', () => {
+    // jsdom serves the test page from http://localhost.
+    const { props } = buildProps({ url: 'http://localhost/d/abc' });
+    render(<ViewportEditor {...props} />);
+
+    expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute('sandbox', 'allow-scripts');
   });
 
   test('readout reflects the current X / Y / zoom values', () => {
@@ -514,5 +593,104 @@ describe('panels/webview/ViewportEditor', () => {
 
     expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('X: -30');
     expect(options.viewportX).toBe(-30);
+  });
+
+  // ---------------------------------------------------------------------------
+  // FR5: the preview renders proxy mode the same way as the panel
+  // ---------------------------------------------------------------------------
+
+  describe('proxy-mode preview (FR5)', () => {
+    test('fetches the proxied HTML and renders it with srcdoc and sandbox="allow-scripts"', () => {
+      const { props } = buildProps({ loadMode: 'proxy', viewportX: 10, viewportY: 20, viewportZoom: 2 });
+      render(<ViewportEditor {...props} />);
+
+      expect(screen.getByTestId(viewportEditorTestIds.proxyLoading)).toHaveAttribute('role', 'status');
+      expect(proxyFetch.fetch).toHaveBeenCalledTimes(1);
+      const params = new URLSearchParams(proxyFetch.calls[0].options.url.split('?')[1]);
+      expect(params.get('url')).toBe('https://example.com');
+
+      respondHtml(proxyFetch.calls[0], '<h1>Example Domain</h1>');
+
+      const iframe = screen.getByTestId(viewportEditorTestIds.iframe);
+      expect(iframe).toHaveAttribute('srcdoc', '<h1>Example Domain</h1>');
+      expect(iframe).toHaveAttribute('sandbox', 'allow-scripts');
+      expect(iframe).toHaveAttribute('referrerpolicy', 'no-referrer');
+      expect(iframe).toHaveAttribute('title', 'Viewport preview');
+      expect(iframe).not.toHaveAttribute('src');
+      expect(iframe).toHaveStyle({ transform: 'scale(2) translate(-10px, -20px)', pointerEvents: 'none' });
+    });
+
+    test('auto mode + detectedMode=proxy also previews through the proxy', () => {
+      const { props } = buildProps({ loadMode: 'auto', detectedMode: 'proxy' });
+      render(<ViewportEditor {...props} />);
+
+      respondHtml(proxyFetch.calls[0], '<p>proxied</p>');
+
+      expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute('srcdoc', '<p>proxied</p>');
+    });
+
+    test('a proxy error shows an accessible error and NO iframe', () => {
+      const { props } = buildProps({ loadMode: 'proxy' });
+      const { container } = render(<ViewportEditor {...props} />);
+
+      respondHttpError(proxyFetch.calls[0], 403, 'Forbidden', 'target host is not allowlisted');
+
+      const error = screen.getByTestId(viewportEditorTestIds.proxyError);
+      expect(error).toHaveAttribute('role', 'alert');
+      expect(error).toHaveTextContent('HTTP 403');
+      expect(error).toHaveTextContent('target host is not allowlisted');
+      expect(container.querySelector('iframe')).toBeNull();
+    });
+
+    test('backend unavailable → fallback, no fetch, no iframe (DF3)', () => {
+      mockedUseBackendAvailable.mockReturnValue({ loading: false, backendAvailable: false });
+      const { props } = buildProps({ loadMode: 'proxy' });
+      const { container } = render(<ViewportEditor {...props} />);
+
+      expect(screen.getByTestId(viewportEditorTestIds.proxyUnavailable)).toHaveTextContent(/backend proxy/i);
+      expect(proxyFetch.fetch).not.toHaveBeenCalled();
+      expect(container.querySelector('iframe')).toBeNull();
+    });
+
+    test('backend probe in flight → neutral placeholder, no fetch (DF3)', () => {
+      mockedUseBackendAvailable.mockReturnValue({ loading: true, backendAvailable: false });
+      const { props } = buildProps({ loadMode: 'proxy' });
+      render(<ViewportEditor {...props} />);
+
+      expect(screen.getByTestId(viewportEditorTestIds.backendLoading)).toBeInTheDocument();
+      expect(proxyFetch.fetch).not.toHaveBeenCalled();
+    });
+
+    test('an unsafe URL in proxy mode is never fetched and renders NO iframe', () => {
+      const { props } = buildProps({ loadMode: 'proxy', url: 'javascript:alert(1)' });
+      const { container } = render(<ViewportEditor {...props} />);
+
+      expect(screen.getByTestId(viewportEditorTestIds.invalidUrl)).toBeInTheDocument();
+      expect(proxyFetch.fetch).not.toHaveBeenCalled();
+      expect(container.querySelector('iframe')).toBeNull();
+    });
+
+    test('panning the preview does not refetch the page', () => {
+      const { props } = buildProps({ loadMode: 'proxy' });
+      render(<ViewportEditor {...props} />);
+      respondHtml(proxyFetch.calls[0], '<p>x</p>');
+
+      const preview = screen.getByTestId(viewportEditorTestIds.preview);
+      fireEvent.mouseDown(preview, { clientX: 100, clientY: 100 });
+      fireEvent.mouseMove(window, { clientX: 50, clientY: 50 });
+      fireEvent.mouseUp(window);
+
+      expect(screen.getByTestId(viewportEditorTestIds.readout)).toHaveTextContent('X: 50');
+      expect(proxyFetch.fetch).toHaveBeenCalledTimes(1);
+      expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute('srcdoc', '<p>x</p>');
+    });
+
+    test('direct mode preview never fetches', () => {
+      const { props } = buildProps({ loadMode: 'direct' });
+      render(<ViewportEditor {...props} />);
+
+      expect(screen.getByTestId(viewportEditorTestIds.iframe)).toHaveAttribute('src', 'https://example.com');
+      expect(proxyFetch.fetch).not.toHaveBeenCalled();
+    });
   });
 });
