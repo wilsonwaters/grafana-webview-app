@@ -176,6 +176,14 @@ func TestCheckFrameableSuccessAudited(t *testing.T) {
 	if got := testutil.CollectAndCount(p.metrics.denials); got != 0 {
 		t.Errorf("successful check recorded %d denial series, want 0", got)
 	}
+	// RV1-38: /check-frameable is counted in the shared webview_proxy_*
+	// collectors like /proxy.
+	if got := requestsTotalFor(t, p, http.StatusOK); got != 1 {
+		t.Errorf("webview_proxy_requests_total{status=200} = %v, want 1", got)
+	}
+	if got := testutil.CollectAndCount(p.metrics.duration); got != 1 {
+		t.Errorf("duration histogram series = %d, want 1", got)
+	}
 }
 
 // TestProxyOpenToAnyOrgRole covers the VR-3 decision for /proxy: the proxy has
