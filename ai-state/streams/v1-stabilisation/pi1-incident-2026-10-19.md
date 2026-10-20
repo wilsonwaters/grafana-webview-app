@@ -44,3 +44,14 @@ The Web View plugin needs Grafana >= 12.4, so it cannot run after a rollback.
   roughly 3× the memory of 9.5.
 - On a host without swap, an OOM loop shows up as I/O thrash (high load, high iowait, hung SSH), not as low
   free memory.
+
+## Result so far (2026-10-20)
+
+- Grafana kept OOM-looping overnight while the maintainer's decision was pending: `NRestarts` went from 6 to 18
+  between 10-19 17:26 and 10-20 13:43 UTC (last OOM kill 07:51 UTC).
+- Drop-in applied 13:43 UTC; Grafana restarted 13:44:29 UTC. At 13:47: healthy, 120 MB RSS (184 MB at the same
+  point before), 360 MB available, load ~3, only 2 plugin processes (Zabbix, Web View).
+- NOT yet proven: the first OOM came ~10 h after a fresh start. Re-check `systemctl show grafana-server -p NRestarts`
+  and Grafana's RSS at the next session. If it OOMs again: stop Grafana and ask the maintainer (their instruction).
+- Workstation note: Claude Code's low-memory reaper killed two background watchers on the workstation; long
+  monitoring of pi1 has to be spot checks.

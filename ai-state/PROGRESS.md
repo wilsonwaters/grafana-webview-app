@@ -36,6 +36,13 @@ Done so far:
   untested upstream with plugin 6.x) — maintainer asked to confirm Zabbix dashboards show data.
   pi1 rules: touch only Grafana; confirm every state-changing command with the maintainer first.
 
+Update 2026-10-20 — ALL v1.0.0 work merged on `release/v1.0.0`; final CI on c891cb7 fully green (5 e2e versions,
+security suite 46 required tests). Reviews: RV2-be APPROVE-WITH-NITS (nits fixed), hide-selector REQUEST-CHANGES →
+fixed. README gained "Which sites work" (maintainer request). Version 1.0.0 set. PR #146 to be marked ready.
+pi1: Web View 1.0.0 (CI-signed c891cb7) installed in `/var/lib/grafana/plugins/wilsonwaters-webview-app` and
+registered. Separately, Grafana 13 itself OOM-loops on the 1 GB Pi — see `streams/v1-stabilisation/pi1-incident-2026-10-19.md`
+(mitigation applied 10-20 13:43 UTC; RE-CHECK NRestarts at the next session).
+
 Update 2026-10-19 (later):
 - S2 + FR5 backend merged (adversarial security review: APPROVE-WITH-NITS, no blocking). M1 review:
   APPROVE-WITH-NITS, CI fully green. FE review found one blocking issue (iframe kept old sandbox flags
