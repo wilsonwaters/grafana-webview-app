@@ -49,6 +49,21 @@ see [`docs/signing.md`](./signing.md). For the architecture and threat model, se
 | **Backend-plugin support** | This is an **app plugin with a Go backend** (`"backend": true`, executable `gpx_webview`). The Grafana host must be able to **run the plugin binary** as a subprocess. Hosted/managed Grafana that does not permit backend plugins can only use **Direct mode** (see below). |
 | **Platform binary** | The released archive bundles the backend executable. Install on a host whose OS/architecture matches the packaged binary, or build from source for your platform (see [§3.4](#34-build-from-source)). |
 | **Install permission** | Filesystem access to Grafana's plugins directory and the ability to restart Grafana (or your orchestration equivalent). |
+| **Memory** | The plugin's backend idles at a few MB; see the [Administration guide](administration.md) for its worst case. Grafana 12.4+ itself needs much more memory than older versions (see the small-host note below). |
+
+> **Small hosts (for example a 1 GB Raspberry Pi).** Grafana 13 on its own can
+> grow to about 300 MB, roughly three times Grafana 9, and starts one process per
+> bundled data-source plugin. On a host that also runs databases and has no swap,
+> that can trigger the out-of-memory killer in a loop. The plugin's backend is not
+> the cause. On a 1 GB Pi, two Grafana settings cut Grafana's start-up memory
+> from about 184 MB to 120 MB and its plugin processes from 15 to 2:
+>
+> - Disable the bundled data-source plugins you do not use, for example
+>   `GF_PLUGINS_DISABLE_PLUGINS=elasticsearch,loki,tempo,mssql,…` (or
+>   `[plugins] disable_plugins` in `grafana.ini`). Keep any data source a
+>   dashboard uses.
+> - Set `GOMEMLIMIT` for the Grafana server process, for example
+>   `Environment=GOMEMLIMIT=220MiB` in a systemd drop-in for `grafana-server`.
 
 **Proxy mode needs the backend; Direct mode does not.** The plugin degrades
 gracefully: if no backend is available (for example a Grafana deployment without
