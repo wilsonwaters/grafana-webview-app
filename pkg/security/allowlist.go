@@ -50,7 +50,8 @@ type EntryOptions struct {
 	// the configured domain (e.g. "example.com" also covers "api.example.com").
 	AllowSubdomains bool
 	// AllowPrivateIP is an explicit opt-in permitting the resolved IP to fall
-	// within private/link-local/loopback ranges (consumed by SF4).
+	// within the RFC 1918 private IPv4 ranges only (consumed by SF4); loopback,
+	// link-local and every other blocked range stay blocked (see Policy).
 	AllowPrivateIP bool
 	// RateLimitPerMin overrides the global per-domain rate limit for this domain
 	// (consumed by SF5). 0 means "use the global default".

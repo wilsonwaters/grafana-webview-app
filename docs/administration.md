@@ -5,7 +5,7 @@ app plugin (`wilsonwaters-webview-app`).
 
 The plugin ships a backend proxy that fetches external pages on behalf of
 dashboard viewers, strips framing headers, and rewrites HTML so the page renders
-inside a panel. Because the backend can reach whatever the Grafana host can reach,
+inside a panel, in an isolated sandboxed frame. Because the backend can reach whatever the Grafana host can reach,
 operating it safely is an administrative responsibility. This document is the
 operational **how**: setup, configuration, tuning, monitoring, and incident
 response.
@@ -15,8 +15,8 @@ the residual-risk analysis — see
 [`docs/architecture.md`](./architecture.md). This guide deliberately does **not**
 duplicate the threat model; it references it. See also the top-level
 [`SECURITY.md`](../SECURITY.md) for the security posture summary and vulnerability
-reporting, [`docs/installation.md`](./installation.md) for install methods
-(forthcoming), and [`docs/signing.md`](./signing.md) for signing and secrets.
+reporting, [`docs/installation.md`](./installation.md) for install methods,
+and [`docs/signing.md`](./signing.md) for signing and secrets.
 
 ---
 
@@ -24,21 +24,21 @@ reporting, [`docs/installation.md`](./installation.md) for install methods
 
 1. **Install the plugin** and restart Grafana. Because this is a backend app
    plugin, Grafana loads it at startup. See
-   [`docs/installation.md`](./installation.md) (forthcoming) for install methods
-   and [`docs/signing.md`](./signing.md) for signed-build requirements.
-2. **Enable the app.** Go to **Administration → Plugins and data → Plugins → Web
-   View** and enable it.
+   [`docs/installation.md`](./installation.md) for install methods and
+   [`docs/signing.md`](./signing.md) for signed-build requirements.
+2. **Enable the app.** Go to **Administration → Plugins and data → Plugins →
+   Webview** and enable it.
 3. **Understand the fail-closed default: nothing works until you allowlist
    domains.** On a fresh install the allowlist (`jsonData.allowedDomains`) is
    **empty**, and an empty allowlist **denies every proxy request** (HTTP 403).
    This is intentional containment, not a bug — the plugin proxies nothing until
    you explicitly add the domains you trust.
-4. **Add your allowed domains** (see [§2](#2-allowlist-management)).
-5. **Verify.** Use the panel's **Test URL** control (or call
-   `/check-frameable?url=…` directly) against an allowlisted host and confirm you
-   get a verdict (HTTP 200) rather than a 403 allowlist denial. This is the single
-   most reliable confirmation that your configuration actually reached the
-   backend — see the provisioning caveat in [§10](#10-known-operational-caveats).
+4. **Add your allowed domains** on the app's **Configuration** page (see
+   [§2](#2-allowlist-management)). Only add sites that every user of the
+   organisation may see (see [Who can use the proxy](#who-can-use-the-proxy)).
+5. **Verify.** As an Editor or Admin, use the panel's **Test URL** control
+   against an allowlisted host and confirm you get a verdict (Direct or Proxied)
+   rather than a 403 allowlist denial.
 6. **Review the tuning defaults** ([§4](#4-tuning)) and the monitoring setup
    ([§6](#6-metrics--suggested-alerts)) before putting the plugin in front of
    users.
@@ -54,36 +54,72 @@ are operational settings, not secrets, so they intentionally live in `jsonData`
 
 ### Where configuration lives
 
-Settings are parsed **once**, when the plugin instance starts, from the plugin's
-`jsonData` (`LoadSettings` in `pkg/plugin/config.go`, called from `NewApp`).
+Manage the allowlist and the limits on the app's **Configuration** page:
+**Administration → Plugins and data → Plugins → Web View → Configuration**. Only
+organisation Admins see this page.
 
-> **⚠️ The bundled Configuration page does NOT manage the allowlist.** The app's
-> **Configuration** page (Administration → Plugins → Web View → Configuration) is
-> currently the scaffold default — it edits only `apiUrl` / `apiKey`, and **saving
-> it rewrites `jsonData` to just those fields, silently dropping any
-> `allowedDomains` you have configured.** Do not use it to manage the allowlist,
-> and avoid saving it on an instance whose allowlist was configured another way. (A
-> dedicated allowlist-editor UI is tracked as a separate enhancement.)
+![The Configuration page: one allowlist entry and the six global limits](screenshots/issue-129/config-13.2.4-light.png)
 
-Populate `jsonData.allowedDomains` by **one** of:
+- **Domain allowlist** — **Add domain** adds an entry. Each entry has a
+  **Domain**, a **Rate limit override**, **Additional ports**, and the
+  **Allow subdomains** and **Allow private IP addresses** check boxes (see
+  [Per-domain options](#per-domain-options)). **Remove** deletes an entry.
+- **Global limits** — the six limits in [§4](#4-tuning). Leave a field empty to
+  use the default.
+- **Save settings** checks every field first. If a field is invalid (for
+  example a domain with a scheme or path, a port out of range, or `0` for a
+  limit that must be at least 1), nothing is saved and the field shows the
+  error.
+- **Changes apply without a restart.** Saving stores the settings in the
+  plugin's `jsonData`. Grafana then gives the backend a new plugin instance that
+  reads them (`LoadSettings` in `pkg/plugin/config.go`, called from `NewApp`),
+  so the next proxy request uses the new allowlist and limits.
+- Saving keeps any other `jsonData` keys and removes the unused `apiUrl` key
+  left over from the plugin scaffold.
 
-- **The Grafana plugin-settings API, directly** —
-  `POST /api/plugins/wilsonwaters-webview-app/settings` with a `jsonData` body that
-  contains the **complete** settings object (including the full `allowedDomains`
-  list — the API replaces `jsonData` wholesale, so always send every setting you
-  want to keep). This is the supported way to manage the allowlist today.
-- **Provisioning** via a YAML file under `provisioning/plugins/` (see
-  [§10](#10-known-operational-caveats) for an important caveat about whether
-  provisioned `allowedDomains` reach the backend).
+![The empty-allowlist notice on a new install](screenshots/issue-129/empty-allowlist-13.2.4-light.png)
 
-> **Changing settings requires the plugin instance to reload.** The backend reads
-> settings once at startup; after editing configuration (especially via
-> provisioning) restart Grafana (or reload the plugin) so the new settings take
-> effect, then re-verify with a Test URL.
+You can also manage the settings through the Grafana plugin-settings API:
+`POST /api/plugins/wilsonwaters-webview-app/settings` with a body that contains
+`enabled`, `pinned` and the **complete** `jsonData` object. The API replaces
+`jsonData` as a whole, so send every setting you want to keep.
+
+> **Provisioning is for development and CI only.** The repository's
+> `provisioning/plugins/apps.yaml` adds `example.com` to the allowlist for the
+> local development container and the end-to-end tests. Do not copy it to a
+> production Grafana: a production install starts with an empty allowlist
+> (deny all), and an administrator adds domains on the Configuration page.
+> Grafana applies a provisioning file at every start, and it replaces the
+> settings saved on the Configuration page.
+
+### Who can use the proxy
+
+Grafana requires a signed-in user for every call to the plugin backend. Beyond
+that, the plugin applies these rules:
+
+| What | Who |
+| --- | --- |
+| Load a proxy-mode panel (`/proxy`) | Every user of the organisation, including Viewers. If Grafana's anonymous access is on, anonymous viewers too. |
+| **Test URL** in the panel editor (`/check-frameable`) | Users whose organisation role is **Editor** or **Admin**. |
+| Configuration page | Organisation **Admins**. |
+
+The proxy has no role check because dashboard viewers must be able to load
+proxy-mode panels. **The allowlist and the rate limits are the access control
+for the proxy.** Any signed-in user can fetch any allowlisted URL through it,
+and can find out whether a given host is on the allowlist, so:
+
+- Allowlist only sites that every user of the organisation may see.
+- Do not treat the allowlist as confidential.
+- If you turn on Grafana's anonymous access, anyone who can reach Grafana can
+  use the proxy for the allowlisted sites, within the rate limits.
+
+Each request is audit-logged with the user's Grafana login (see
+[§5](#5-audit-logging)).
 
 ### Allowlist shape
 
-Each allowlist entry is a domain plus a per-domain `options` object:
+The Configuration page writes these keys for you. For the settings API, each
+allowlist entry is a domain plus a per-domain `options` object:
 
 ```yaml
 jsonData:
@@ -106,21 +142,26 @@ The equivalent JSON (`jsonData`) uses the same keys:
 
 ### Per-domain options
 
-- **`domain`** — the bare hostname (e.g. `status.example.com`). No scheme, port,
-  or path. An entry whose domain cannot be canonicalised is **skipped**, never
-  matched loosely.
-- **`allowSubdomains`** (default `false`) — when `false`, only the exact hostname
-  matches. When `true`, subdomains also match, but only on a real label boundary
-  (`api.example.com` matches `example.com`; the suffix trick
-  `example.com.evil.com` does **not**). Prefer exact matches; broad apex +
+The Configuration page label for each key is shown in brackets.
+
+- **`domain`** (**Domain**) — the bare hostname (e.g. `status.example.com`). No
+  scheme, port, path or wildcard. The Configuration page rejects such values; an
+  entry sent through the API whose domain cannot be canonicalised is
+  **skipped**, never matched loosely.
+- **`allowSubdomains`** (**Allow subdomains**, default `false`) — when `false`,
+  only the exact hostname matches. When `true`, subdomains also match, but only
+  on a real label boundary (`api.example.com` matches `example.com`; the suffix
+  trick `example.com.evil.com` does **not**). Prefer exact matches; broad apex +
   subdomain entries widen the SSRF surface.
-- **`allowedPorts`** (default empty) — only ports **80 and 443** are permitted by
-  default. List any additional TCP ports this domain may be reached on (e.g.
-  `[8443]`). Keep this minimal.
-- **`rateLimitPerMin`** (default `0`) — overrides the global per-domain rate limit
-  for this domain only. `0` means "use the global default"
-  (`rateLimitPerDomainPerMin`). See [§4](#4-tuning).
-- **`allowPrivateIP`** (default `false`) — a deliberate, scoped SSRF opt-in.
+- **`allowedPorts`** (**Additional ports**, default empty) — only ports **80 and
+  443** are permitted by default. List any additional TCP ports this domain may
+  be reached on (e.g. `[8443]`, or `8443` on the page). Keep this minimal.
+- **`rateLimitPerMin`** (**Rate limit override**, default `0`) — overrides the
+  global per-domain rate limit for this domain only. `0` (or an empty field)
+  means "use the global default" (`rateLimitPerDomainPerMin`). See
+  [§4](#4-tuning).
+- **`allowPrivateIP`** (**Allow private IP addresses**, default `false`) — a
+  deliberate, scoped SSRF opt-in. The page shows a warning while it is selected.
   Covered in detail in [§3](#3-the-allowprivateip-opt-in).
 
 ---
@@ -142,6 +183,8 @@ for that one domain.
   (`169.254.0.0/16`, `fe80::/10`)
 - **CGNAT** (`100.64.0.0/10`), **IPv6 ULA** (`fc00::/7`), unspecified, multicast,
   reserved/documentation ranges, and the fail-closed unparseable sentinel.
+- An RFC 1918 address wrapped in a 6to4 (`2002::/16`) or NAT64
+  (`64:ff9b::/96`) IPv6 address.
 
 Because loopback, link-local, and the metadata IP are never relaxed, this opt-in
 cannot be used to reach cloud-metadata endpoints.
@@ -166,19 +209,24 @@ metric and the `Warn` audit line. For the full residual-risk analysis, see
 
 ## 4. Tuning
 
-All of the following live in `jsonData`. Every security-relevant numeric field is
-**fail-closed**: a missing, zero, or negative value is replaced with the safe
+Set these six limits in the **Global limits** section of the Configuration page
+(leave a field empty for the default), or as `jsonData` keys through the API.
+The page rejects values that the backend would replace (for example `0` for a
+limit that must be at least 1). The backend itself is also **fail-closed**: a missing, zero, or negative value is replaced with the safe
 default below (`applyDefaults` in `pkg/plugin/config.go`), so you cannot
 accidentally disable a limit by zeroing it — the default is reapplied.
 
-| `jsonData` key | Default | What it controls |
-| --- | --- | --- |
-| `rateLimitPerInstancePerMin` | `60` | Max proxy requests per minute across the whole Grafana instance (token bucket). Over-limit → **429**. |
-| `rateLimitPerDomainPerMin` | `30` | Max proxy requests per minute to any single target domain. Over-limit → **429**. Overridable per domain via `options.rateLimitPerMin`. |
-| `maxConcurrentRequests` | `10` | Max in-flight proxy requests at once. Exceeded → **429**. |
-| `maxResponseBytes` | `5242880` (5 MiB) | Max upstream response body size. Oversize → **413**. Also bounds the **gzip-decoded** size (decompression-bomb guard). |
-| `requestTimeoutSec` | `10` | Per-request timeout in seconds covering the **whole** round-trip and body copy. Expiry → **504**. |
-| `maxRedirects` | `3` | Max HTTP redirects followed for one request; each hop is re-validated against the allowlist and IP blocklist. **`0` disables redirect following** entirely. Exceeded → **502**. |
+| Configuration page label | `jsonData` key | Default | What it controls |
+| --- | --- | --- | --- |
+| Rate limit per organisation | `rateLimitPerInstancePerMin` | `60` | Max proxy requests per minute for one Grafana **organisation** (token bucket). Each organisation has its own budget. Over-limit → **429**. |
+| Rate limit per domain | `rateLimitPerDomainPerMin` | `30` | Max proxy requests per minute to any single target domain. Over-limit → **429**. Overridable per domain via `options.rateLimitPerMin`. |
+| Maximum concurrent requests | `maxConcurrentRequests` | `10` | Max in-flight proxy requests at once. Exceeded → **429**. |
+| Maximum response size | `maxResponseBytes` | `5242880` (5 MiB) | Max upstream response body size. Oversize → **413**. Also bounds the **gzip-decoded** size (decompression-bomb guard) and the size of the rewritten HTML. |
+| Request timeout | `requestTimeoutSec` | `10` | Per-request timeout in seconds covering the **whole** round-trip and body copy. Expiry → **504**. |
+| Maximum redirects | `maxRedirects` | `3` | Max HTTP redirects followed for one request; each hop is re-validated against the allowlist and IP blocklist. **`0` disables redirect following** entirely. Exceeded → **502**. |
+
+The rate limits and the concurrency cap apply to `/proxy` and `/check-frameable`
+together.
 
 Notes:
 
@@ -189,6 +237,12 @@ Notes:
   `maxConcurrentRequests`, any value `<= 0` is treated as invalid and reset to the
   default — so the way to make a limit *looser* is to raise it, never to zero it.
 
+**Sizing the rate limits:** one proxy-mode panel load is one proxy request,
+because the page's images, scripts and stylesheets load directly from the site.
+Each open dashboard repeats that request for every proxy-mode panel at every
+auto-refresh interval. For example, 10 viewers with a dashboard of 3 proxy
+panels that refresh every 60 seconds make 30 requests per minute.
+
 **Tuning guidance:** start from the defaults. Raise `maxResponseBytes` only if you
 proxy legitimately large pages; raise `requestTimeoutSec` for slow upstreams, but
 keep it low enough that stalled fetches do not pile up against
@@ -196,17 +250,41 @@ keep it low enough that stalled fetches do not pile up against
 prefer a per-domain `rateLimitPerMin` override to a global bump when only one busy
 domain needs headroom.
 
+**Memory:** rewriting an HTML page builds a parse tree that is several times the
+size of the page, so the plugin bounds it:
+
+- At most **2** HTML pages per plugin process are parsed and rewritten at once,
+  whatever `maxConcurrentRequests` is. Other requests wait for a slot until their
+  timeout (then **504**).
+- The parser stops at fixed limits: one tag or text run at most 2 MiB, an
+  estimated tree of at most 48 MiB. A page over a limit gets **413**. Ordinary
+  pages up to about 7 MiB fit.
+- A page the parser cannot read (for example, more than 512 nested elements) gets
+  **502**. The unrewritten page is never served.
+- The plugin process sets a Go soft memory limit of 256 MiB. To change it, set
+  `GOMEMLIMIT` (for example `512MiB`, or `off`) in Grafana's environment and add
+  `wilsonwaters-webview-app` to `[plugins] forward_host_env_vars`, so Grafana
+  passes it to the plugin process.
+
+Worst-case plugin memory is roughly
+`2 × maxConcurrentRequests × maxResponseBytes + 240 MiB`. With the defaults
+(10 × 5 MiB) it measured about 205 MiB under hostile pages. On a small host such
+as a 1 GB Raspberry Pi, keep the defaults or lower `maxResponseBytes` or
+`maxConcurrentRequests`.
+
+
 ---
 
 ## 5. Audit logging
 
-The proxy emits **exactly one structured audit entry per request** (an `Info`
-line, message `proxy request`) through the plugin backend's standard logger, with
-these fields:
+The proxy emits **exactly one structured audit entry per request** to `/proxy`
+and `/check-frameable` (an `Info` line, message `proxy request`) through the
+plugin backend's standard logger, including for denied requests, with these
+fields:
 
 | Field | Meaning |
 | --- | --- |
-| `endpoint` | `proxy` or `proxy-resource` |
+| `endpoint` | `proxy` (panel loads) or `check-frameable` (**Test URL**) |
 | `url` | The validated, normalised target (or a placeholder such as `<missing>` / `<invalid>` on an early denial) |
 | `user` | The requesting Grafana login, or `anonymous` when no user is identifiable |
 | `status` | Final HTTP status returned to the client |
@@ -236,7 +314,7 @@ as any plugin backend's metrics.
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `webview_proxy_requests_total` | counter | `status` | All proxy requests, by final HTTP status. |
+| `webview_proxy_requests_total` | counter | `status` | All `/proxy` and `/check-frameable` requests, by final HTTP status. |
 | `webview_proxy_denials_total` | counter | `reason` | Denied requests, by denial reason (see below). |
 | `webview_proxy_requests_in_flight` | gauge | — | Requests currently in flight. |
 | `webview_proxy_request_duration_seconds` | histogram | — | Request handling duration. |
@@ -256,8 +334,9 @@ as any plugin backend's metrics.
 | `bad-request` | 400 | Missing `url` / unbuildable target |
 | `method` | 405 | Non-GET method |
 | `timeout` | 504 | Per-request budget expired |
-| `upstream` | 502 | Upstream resolve/transport/gateway failure |
+| `upstream` | 502 | Upstream resolve/transport/gateway failure, or an unsupported `Content-Encoding` |
 | `redirect-loop` | 502 | Redirect depth cap exceeded |
+| `role` | 403 | **Test URL** (`/check-frameable`) called by a user whose org role is below Editor |
 
 ### Suggested alerts (PromQL)
 
@@ -304,15 +383,17 @@ If you suspect abuse or an SSRF attempt:
 2. **Tighten the allowlist.** Remove any domain you did not intend to allow,
    remove `allowSubdomains` where exact matches suffice, and drop extra
    `allowedPorts`.
-3. **Disable risky opt-ins.** Set `allowPrivateIP: false` on any domain that does
-   not strictly require it; the private-IP surface closes immediately on the next
-   instance reload.
+3. **Disable risky opt-ins.** Clear **Allow private IP addresses**
+   (`allowPrivateIP: false`) on any domain that does not strictly require it.
 4. **Throttle.** Lower `rateLimitPerInstancePerMin` / `rateLimitPerDomainPerMin`
    and `maxConcurrentRequests` to contain volume while you investigate.
-5. **Contain hard if needed.** Disable the app (Administration → Plugins → Web
-   View) to stop all proxying, or empty `allowedDomains` to fall back to deny-all.
-6. **Apply and verify** — reload the plugin so new settings take effect, then
-   re-verify with a Test URL.
+5. **Contain hard if needed.** Disable the app (Administration → Plugins and
+   data → Plugins → Web View) to stop all proxying, or remove every allowlist
+   entry to fall back to deny-all.
+6. **Apply and verify** — **Save settings** on the Configuration page. The next
+   request uses the new settings; no restart is needed. If a provisioning file
+   manages the settings, change it too, or the next Grafana start restores the
+   old values. Then re-verify with a Test URL.
 
 Remember the hardcoded IP blocklist (loopback, link-local, the metadata IP, CGNAT,
 ULA, reserved) **cannot be disabled or extended at runtime** and is not reachable
@@ -332,7 +413,15 @@ at runtime. It blocks:
 - Link-local, including the `169.254.169.254` cloud-metadata address
   (`169.254/16`, `fe80::/10`)
 - CGNAT (`100.64/10`), IPv6 ULA (`fc00::/7`), unspecified, multicast, and
-  reserved/documentation ranges
+  reserved/documentation ranges, including the NAT64 local-use prefix
+  `64:ff9b:1::/48`
+
+6to4 (`2002::/16`) and NAT64 well-known-prefix (`64:ff9b::/96`) addresses are
+classified by the IPv4 address they carry, so an internal IPv4 target stays
+blocked in either form. A NAT64 address that carries a public IPv4 address is
+allowed, so the proxy works on IPv6-only hosts that use DNS64. NAT64 prefixes
+that an operator chooses (RFC 6052 network-specific prefixes) cannot be
+detected; if your network uses one, block it with your network egress policy.
 
 Unparseable or unclassifiable addresses **fail closed** (treated as blocked). The
 blocklist runs as part of a resolve-then-dial flow that also re-validates the
@@ -367,6 +456,9 @@ though the plugin would permit it. See the non-goals in
 
 - **Plugin upgrades / downgrades:** install the target version and restart
   Grafana. Settings in `jsonData` carry across versions (same keys).
+- **Upgrading from a 0.0.1 build:** the scaffold **API URL** and **API Key** fields are
+  gone. The first save on the new Configuration page removes the unused
+  `apiUrl` key; the plugin never read either value.
 - **`plugin.json` changes require a Grafana server restart.** Any change to the
   plugin manifest only takes effect after restarting Grafana.
 - **Signed builds:** installs must satisfy Grafana's plugin-signing requirements.
@@ -381,24 +473,36 @@ though the plugin would permit it. See the non-goals in
 
 ## 11. Known operational caveats
 
-- **Provisioned `allowedDomains` may not reach the backend in all setups (#113).**
-  Provisioning the allowlist through `jsonData.allowedDomains` in a
-  `provisioning/plugins/*.yaml` file does **not** reliably deliver the allowlist to
-  the backend in every Grafana setup. **Prefer configuring the allowlist through the
-  plugin settings API** (`POST /api/plugins/wilsonwaters-webview-app/settings`; note
-  the bundled Configuration page cannot edit the allowlist and overwrites `jsonData`
-  if saved — see [§2](#2-allowlist-management)), which the backend reads at instance
-  start, and **always verify** afterwards: run
-  a **Test URL** against an allowlisted host, or call `/check-frameable?url=…`, and
-  confirm you get a verdict (HTTP 200) rather than a `403` allowlist denial. A
-  403 on a host you believe you allowlisted is the signature of this caveat — the
-  configuration did not reach the backend.
+- **A provisioning file overrides the Configuration page.** If a file under
+  `provisioning/plugins/` sets this plugin's `jsonData`, Grafana applies it at
+  every start and replaces what was saved on the Configuration page. Use one
+  method per instance. Production installs should not provision the allowlist
+  (see [§2](#2-allowlist-management)).
 
-- **In-panel proxy rendering is deferred for v1 (FR5 / #102).** The backend proxy
-  pipeline (`/proxy`, `/proxy-resource`, `/check-frameable`) is complete and
-  security-tested, but **in-panel rendering of proxy-mode content** is deferred:
-  Grafana serves plugin resource routes with `X-Frame-Options: deny` and a
-  sandboxing CSP, which prevents the panel iframe from framing the `/proxy` URL
-  directly. **Direct mode is unaffected.** Do not rely on in-panel proxy-mode
-  rendering in v1. See
-  [`docs/architecture.md`](./architecture.md#7-known-limitation-in-panel-proxy-rendering-fr5--102).
+- **Grafana's Content Security Policy blocks proxied scripts.** With
+  `[security] content_security_policy = true`, proxy-mode panels show markup and
+  images only; scripts and external stylesheets are blocked. Direct mode is not
+  affected.
+
+- **Viewers' browsers must reach the proxied sites.** Proxy mode sends only the
+  HTML page through Grafana; images, scripts and stylesheets load from the site
+  in each viewer's browser. Allowlisting a site that only the Grafana server can
+  reach gives a page without styles or images.
+
+- **The allowlist is not confidential**, and every signed-in user (including
+  anonymous viewers, if anonymous access is on) can use the proxy for
+  allowlisted sites. See [Who can use the proxy](#who-can-use-the-proxy).
+
+- **Test URL uses the basic org role.** A user whose basic role is Viewer but who
+  can edit dashboards through a custom RBAC role cannot run **Test URL**. They
+  can still choose the load mode by hand.
+
+- **The repository's Docker Compose setup is for local development only.** It
+  signs every visitor in as an anonymous Admin, runs Grafana in development
+  mode and loads the unsigned plugin. Never expose it to an untrusted network or
+  copy its environment variables to a production Grafana. Install the signed
+  release archive in production (see [`installation.md`](./installation.md)).
+
+For the other limits of proxy mode (isolated origin, single-page apps, bot
+protection) see
+[`docs/architecture.md`](./architecture.md#7-proxy-mode-rendering-fr5).

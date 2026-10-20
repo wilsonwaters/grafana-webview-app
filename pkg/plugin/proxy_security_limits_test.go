@@ -109,7 +109,7 @@ func TestSecurityTC2_AC23_RedirectAllowlistedHostRewritten(t *testing.T) {
 		t.Fatalf("redirect to allowlisted host: got status %d, want 302", rec.Code)
 	}
 	loc := rec.Header().Get("Location")
-	if !strings.HasPrefix(loc, resourceBase+proxyPath+"?") {
+	if !strings.HasPrefix(loc, redirectProxyRef+"?") {
 		t.Fatalf("Location = %q, want a re-entrant /proxy URL", loc)
 	}
 }

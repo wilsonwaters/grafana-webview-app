@@ -2,7 +2,65 @@
 
 Narrative log of project status, maintained primarily by the orchestrator agent.
 
-## ⇒ HANDOFF (2026-10-18) — release work handed to another agent (target: 1.0.0)
+## v1.0.0 stabilisation (started 2026-10-18) — CURRENT
+
+**Resume here.** Plan, decisions and task table: `ai-state/streams/v1-stabilisation/master-plan.md`.
+All work is on branch `release/v1.0.0`, draft PR **#146** into `main` (the maintainer merges it).
+Task branches are sub-agent worktrees merged into `release/v1.0.0` after review.
+
+**Headline:** in-panel proxy mode works on stock Grafana (no patch). R1 (#138) proved it in Chromium,
+Firefox and WebKit on 12.4.13 and 13.2.4: the panel fetches `/proxy` as text and renders it in
+`<iframe srcdoc sandbox="allow-scripts">`. Subresources load directly from the upstream site, because
+sandboxed (opaque-origin) frames do not send the Grafana session cookie in Chromium and Firefox.
+Findings: `streams/v1-stabilisation/R1-proxy-render-findings.md`.
+
+Done so far:
+- M1 (#139) merged: create-plugin 7.13.0, `@grafana/*` 13.2.4 + React 19, Go 1.27.2, SDK v0.297.0,
+  `grafanaDependency >=12.4.0`, every action SHA-pinned, Levitate gate back on, e2e fixed on 13.2+,
+  osv-scanner clean (one `basic-ftp` override). Independent review in progress.
+- R1 (#138) findings merged.
+- S1 (#141) + FR5 frontend (#102) merged: URL scheme validation, one sandbox helper (proxy never gets
+  `allow-same-origin`), shared `WebViewFrame` renderer, `useProxyDocument` fetch hook. Review in progress.
+- AU1 (#129, #113) merged: Configuration page manages the allowlist and all six limits; saving merges
+  `jsonData` (the clobber bug is gone); provisioning is DEV/CI ONLY with no secret. #113 root cause was
+  the clobber bug in the old page, not the backend. Review in progress.
+- GH1 (#143) done: 11 dependabot PRs closed (superseded), 53 merged branches deleted (SHAs in
+  `streams/v1-stabilisation/deleted-branches.md`), `delete_branch_on_merge` on. The branch
+  `claude/grafana-security-review-etruqm` is kept until #146 merges (its report is now
+  `reference/security-review-2026-06-10.md`).
+- DEV1 (#144) Grafana part done (2026-10-19): pi1 upgraded 9.5.1 → 13.2.4 via apt (Grafana source only),
+  after refreshing Grafana's expired apt key (`/usr/share/keyrings/grafana.key`; old key in
+  `/var/backups/grafana.key.expired-20261018`). Zabbix app 4.1.2 → 6.9.1, Clock panel 1.3.1 → 3.2.4.
+  Backup: `/var/backups/grafana-9.5.1-backup-20261018.tgz` (`/etc/grafana`, `/var/lib/grafana`).
+  Rollback: stop, `apt-get install grafana=9.5.1`, restore the tarball. Zabbix server is 4.2.8 (old;
+  untested upstream with plugin 6.x) — maintainer asked to confirm Zabbix dashboards show data.
+  pi1 rules: touch only Grafana; confirm every state-changing command with the maintainer first.
+
+Update 2026-10-20 — ALL v1.0.0 work merged on `release/v1.0.0`; final CI on c891cb7 fully green (5 e2e versions,
+security suite 46 required tests). Reviews: RV2-be APPROVE-WITH-NITS (nits fixed), hide-selector REQUEST-CHANGES →
+fixed. README gained "Which sites work" (maintainer request). Version 1.0.0 set. PR #146 to be marked ready.
+pi1: Web View 1.0.0 (CI-signed c891cb7) installed in `/var/lib/grafana/plugins/wilsonwaters-webview-app` and
+registered. Separately, Grafana 13 itself OOM-loops on the 1 GB Pi — see `streams/v1-stabilisation/pi1-incident-2026-10-19.md`
+(mitigation applied 10-20 13:43 UTC; RE-CHECK NRestarts at the next session).
+
+Update 2026-10-19 (later):
+- S2 + FR5 backend merged (adversarial security review: APPROVE-WITH-NITS, no blocking). M1 review:
+  APPROVE-WITH-NITS, CI fully green. FE review found one blocking issue (iframe kept old sandbox flags
+  on an in-place URL edit) — fixed in RV2-fe. AU1 review: APPROVE-WITH-NITS.
+- Integrated runtime verification: ALL 9 scenarios pass on 13.2.4 and 12.4.13 in Chromium, Firefox and
+  WebKit (BOM legacy radar animates in proxy mode as a Viewer; results in
+  `streams/v1-stabilisation/runtime-verification.md`, curated screenshots in `docs/screenshots/v1-runtime/`).
+- RV2-fe (15 items) and DOC1 merged. RV1 dispositions in `streams/v1-stabilisation/RV1-findings.md`.
+- `main` gained a handoff commit from the earlier cloud orchestrator (8e65e58); merged into the release
+  branch. LESSON: a PR that conflicts with `main` gets NO `pull_request` CI — check mergeability after
+  every push.
+- In flight: RV2-be (sub-path redirects, parse-failure fail-closed, rewrite memory bound, rate-bucket
+  keying, error sanitising, linters, proxy.go split, CI token scoping).
+- Next: merge RV2-be → fill the memory-sizing note in `docs/administration.md` (TODO(orchestrator)) →
+  REL1 (version 1.0.0) → final CI green → install the CI-signed build on pi1 (maintainer confirms) →
+  mark PR #146 ready.
+
+## ⇒ HANDOFF (2026-10-18) — release work handed to another agent (target: 1.0.0) — superseded by the v1.0.0 section above (M1 did items 1–3 except tagging)
 
 **Stakeholder decision (2026-10-18):** a DIFFERENT agent will resolve the dependency-CVE /
 13.x issues and push forward to a **1.0.0** release. This orchestrator has STOPPED release
@@ -36,7 +94,7 @@ supported range (Grafana 12.3–13.1). The release WORKFLOW is fixed and works u
 #129 (allowlist editor UI + the config-page jsonData-clobber + proxy fixes), #113 (provisioning→backend
 allowlist delivery), #133 (stale `AllowPrivateIP`/`hideSelectors` code comments), #102 (in-panel proxy render / FR5).
 
-## Status summary
+## Status summary (v0.0.1 era — historical)
 
 Setup complete and the **execution loop is running** (task branch → PR → review → CI-green →
 squash-merge into `main`). **foundation (F1–F4), panel-core (PC1–PC5), security-foundation (SF1–SF5),

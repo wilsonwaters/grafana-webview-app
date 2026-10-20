@@ -35,15 +35,18 @@ A page is loaded one of two ways, decided at config time:
 - **Direct iframe** — for sites that permit framing; the iframe `src` is the
   target URL and the backend is never involved.
 - **Backend proxy** — for sites that block framing (`X-Frame-Options` / CSP
-  `frame-ancestors`); the Go backend fetches the page server-side, strips
-  framing-control headers, rewrites HTML so subresources resolve, and serves it
-  same-origin to Grafana.
+  `frame-ancestors`); the Go backend fetches the HTML page server-side, strips
+  framing-control headers and rewrites every URL in the page to an absolute
+  upstream URL. The panel reads that HTML with `getBackendSrv().fetch` and
+  renders it in `<iframe srcdoc sandbox="allow-scripts">`. The frame has an
+  opaque origin, so the page's scripts cannot reach Grafana. Subresources
+  (images, scripts, stylesheets) load directly from the upstream site in the
+  viewer's browser. See [§7](#7-proxy-mode-rendering-fr5).
 
-**The backend proxy is the security-critical component.** It is a stateless,
-unauthenticated fetcher: it forwards no cookies, no `Authorization`, no
-`X-Grafana-*` identity, maintains no sessions, and executes no proxied
-JavaScript server-side. Every security control is on by default and fails
-closed.
+**The backend proxy is the security-critical component.** It is a stateless
+fetcher: it forwards no cookies, no `Authorization`, no `X-Grafana-*` identity
+to the upstream, maintains no sessions, and executes no proxied JavaScript
+server-side. Every security control is on by default and fails closed.
 
 ```mermaid
 flowchart TD
@@ -56,15 +59,16 @@ flowchart TD
 
     Author --> Panel
     Viewer --> Panel
-    Panel -->|"Test URL / proxy fetch<br/>(getBackendSrv)"| Grafana
-    Panel -.->|"direct mode:<br/>iframe src = target URL"| Upstream
+    Panel -->|"Test URL / proxy HTML fetch<br/>(getBackendSrv)"| Grafana
+    Panel -.->|"direct mode: iframe src = target URL<br/>proxy mode: subresources only"| Upstream
     Grafana -->|"CallResource"| Backend
     Backend -->|"validated fetch<br/>(resolve-then-dial)"| Upstream
 ```
 
 In **direct** mode the viewer's browser talks to the upstream directly (dotted
-line) and the backend is bypassed entirely. In **proxy** mode every byte flows
-through the backend security pipeline.
+line) and the backend is bypassed entirely. In **proxy** mode the HTML document
+flows through the backend security pipeline; the subresources that the page
+references load from the upstream in the viewer's browser (dotted line).
 
 ---
 
@@ -119,12 +123,14 @@ leaf blocks together, read settings, and own audit logging and metrics.
 
 ## 3. Request pipeline order
 
-`/proxy`, `/proxy-resource`, and `/check-frameable` all run the **identical
-pre-fetch pipeline** (`proxyHandler.serve` in `pkg/plugin/proxy.go`;
-`checkFrameable` in `pkg/plugin/frameable.go`). The order is load-bearing: the
-allowlist is matched **before** the final port check so a per-domain non-standard
-port can be honoured, and the IP blocklist runs at connect time inside the
-transport so it cannot be skipped.
+`/proxy` and `/check-frameable` run the **identical pre-fetch pipeline**
+(`proxyHandler.ServeHTTP` in `pkg/plugin/proxy.go`; `checkFrameable` in
+`pkg/plugin/frameable.go`). The order is load-bearing: the allowlist is matched
+**before** the final port check so a per-domain non-standard port can be
+honoured, and the IP blocklist runs at connect time inside the transport so it
+cannot be skipped. `/check-frameable` adds one gate in front of the pipeline:
+the caller's org role must be Editor or Admin (see
+[Access control](#access-control)).
 
 ```mermaid
 flowchart TD
@@ -134,14 +140,14 @@ flowchart TD
     hostn["Derive & normalise hostname<br/>(SF2 NormalizeHostname)"]
     sf3{"SF3 allowlist match?<br/>(empty ⇒ deny)"}
     sf2["SF2 ValidateURL<br/>scheme / userinfo / host / port<br/>(+ matched domain's extra ports)"]
-    sf5rate{"SF5 rate tiers?<br/>(per-instance, per-domain)"}
+    sf5rate{"SF5 rate tiers?<br/>(per-org, per-domain)"}
     sf5conc{"SF5 concurrency slot?"}
     build["Build upstream URL +<br/>per-request Policy (AllowPrivateIP)"]
     rp["ReverseProxy round-trip"]
     sf4["SF4 resolve-then-dial<br/>(transport DialContext + Control)"]
-    modresp["ModifyResponse:<br/>size guard → framing/header strip →<br/>redirect handling → HTML rewrite"]
+    modresp["ModifyResponse:<br/>size guard → framing/header strip →<br/>redirect handling → bounded read + HTML rewrite"]
     deny["Mapped denial<br/>(reason → status)"]
-    audit["Single deferred audit log + metrics"]
+    audit["Single audit log + metrics (endAudit)"]
 
     start --> method
     method -->|no| deny
@@ -171,8 +177,8 @@ Pre-upstream denials are written by `writeDenial`; post-upstream
 (transport/ReverseProxy) denials by `proxyErrorHandler`. Both derive the client
 status **and** the metric reason from the single `reasonStatus` table in
 `metrics.go`, so the status and the recorded reason can never drift. Exactly one
-audit log line and one metrics emission happen per request, in a single deferred
-block.
+audit log line and one metrics emission happen per request, from a single Go
+`defer` (`endAudit`).
 
 ---
 
@@ -201,12 +207,19 @@ ranges, with their stable reason tokens:
 | `cgnat`       | `100.64.0.0/10` (RFC 6598) |
 | `ula`         | `fc00::/7` (IPv6 unique-local) |
 | `multicast`   | `224.0.0.0/4`, `ff00::/8` |
-| `reserved`    | `0.0.0.0/8`, `192.0.0.0/24`, `192.0.2.0/24`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `240.0.0.0/4`, `::/8`, `2001:db8::/32`, `100::/64`, `2001::/23` |
+| `reserved`    | `0.0.0.0/8`, `192.0.0.0/24`, `192.0.2.0/24`, `198.18.0.0/15`, `198.51.100.0/24`, `203.0.113.0/24`, `240.0.0.0/4`, `64:ff9b:1::/48` (NAT64 local-use), `::/8`, `2001:db8::/32`, `100::/64`, `2001::/23` |
 
 Key properties:
 
 - **IPv4-mapped IPv6 unwrap** — `::ffff:a.b.c.d` is collapsed to its IPv4 form
   before classification, so a mapped address cannot bypass the IPv4 ranges.
+- **6to4 and NAT64 unwrap** — a 6to4 address (`2002::/16`) or a NAT64
+  well-known-prefix address (`64:ff9b::/96`) is classified by the IPv4 address
+  it embeds (`embeddedIPv4`). An internal IPv4 target stays blocked in either
+  form; a well-known-prefix address that wraps a public IPv4 address is allowed,
+  so the proxy works on IPv6-only hosts with DNS64. The NAT64 local-use prefix
+  `64:ff9b:1::/48` is always blocked. Operator-specific NAT64 prefixes (RFC 6052)
+  cannot be detected and are classified as ordinary IPv6 addresses.
 - **Fail-closed sentinel** — a `nil` or unparseable IP is treated as blocked with
   reason `reserved`. Callers must never dial an address they cannot classify.
 - **Opt-in relaxation boundary** — `ClassifyIPPolicy` with `Policy{AllowPrivate:
@@ -214,7 +227,8 @@ Key properties:
   boundary is `isRelaxablePrivate`, which returns true **only** for
   `ReasonPrivate`. Loopback, link-local (incl. metadata), CGNAT, ULA,
   unspecified, multicast, reserved, and the fail-closed sentinel are **never**
-  relaxable. See §6 for the threat-model treatment of this opt-in.
+  relaxable, and neither is an RFC 1918 address wrapped in a 6to4 or NAT64
+  address. See §6 for the threat-model treatment of this opt-in.
 
 ### SF2 — Scheme / port / URL validation
 
@@ -293,18 +307,23 @@ never reach `Control`.
 in `pkg/plugin/proxy.go` (`enforceResponseSize`, `limitedBody`,
 `decodeGzipBounded`, the per-request timeout context).
 
-- **Two token-bucket tiers** per request: per-Grafana-instance and per-target-
-  domain (with optional per-domain overrides). A non-positive limit **disables**
-  that tier (fail-closed: every request of that tier denied). Reasons:
-  `rate-instance`, `rate-domain` → HTTP 429.
+- **Two token-bucket tiers** per request: the "instance" tier and the
+  per-target-domain tier (with optional per-domain overrides). The instance tier
+  is keyed on the Grafana organisation (the plugin context's namespace,
+  `instanceIDFromContext`), so each organisation has its own budget. A
+  non-positive limit **disables** that tier (fail-closed: every request of that
+  tier denied). Limiter reasons: `rate-instance`, `rate-domain` → HTTP 429.
 - **Concurrency cap** on in-flight requests (`Acquire`/release); a non-positive
   cap rejects every acquire. Reason `concurrency` → 429.
 - **Response-size limit** (`MaxResponseBytes`, default 5 MiB): a declared
-  `Content-Length` over the limit short-circuits to a clean 413 before any body
-  is streamed; chunked/undeclared/under-reported bodies are capped mid-stream by
-  `limitedBody`. **Gzip-bomb guard:** the *decoded* size is bounded by the same
-  limit via a capped `io.LimitReader`, so a decompression bomb cannot exhaust
-  memory.
+  `Content-Length` over the limit short-circuits to a clean 413. Otherwise
+  `prepareHTMLBody` reads the whole body (bounded by `limitedBody`) **before**
+  the proxy sends a status, so an oversize chunked or under-reported body is
+  also a 413 and is never delivered as a truncated 200. **Gzip-bomb guard:** the
+  *decoded* size of a gzip body is bounded by the same limit, for HTML and for
+  every other content type, and the rewritten HTML must fit the limit too. A
+  `Content-Encoding` other than gzip is refused with 502, because its decoded
+  size cannot be bounded.
 - **Per-request timeout** (`RequestTimeoutSec`, default 10s): one budget wraps the
   entire round-trip **and** the body copy, so a slow/stalled upstream body trips
   it too (not just connection setup). Expiry → 504.
@@ -325,29 +344,96 @@ transparently (and unboundedly) auto-decompress before the size guard runs.
 `Set-Cookie` (all values), `Strict-Transport-Security`, `Public-Key-Pins`
 (+ report-only), and `Clear-Site-Data` are removed so the upstream cannot set
 cookies on, or pin origin-level security policy onto, the Grafana origin the
-response is served from. `X-Frame-Options` is deleted and the CSP
-`frame-ancestors` directive is stripped (other CSP directives preserved) — this
-is what makes a framing-hostile page embeddable.
+response is served from. `Refresh` is removed, because a browser follows it like
+a redirect without the per-hop re-validation that `Location` gets. Every
+`Access-Control-*` header is removed: the panel calls the proxy from the same
+origin, so the proxy sends no CORS headers and passes none through.
+`X-Frame-Options` is deleted and the CSP `frame-ancestors` directive is stripped
+(other CSP directives preserved).
 
 **Content rewriting** (`pkg/plugin/rewrite.go`): top-level HTML is parsed with
-`goquery` (never regex) and rewritten so subresources route through
-`/proxy-resource` and navigation through `/proxy`; `<base href>` is injected;
-`<meta http-equiv>` CSP and `refresh` metas are removed; and **frame-buster
-scripts** (inline scripts that compare `top`/`self` and navigate `top.location`)
-are neutralised. The connection pool also matters: `DisableKeepAlives` is set on
-the transport so a connection validated under one domain's policy is never reused
-for another request — see §6.
+`goquery` (never regex) and prepared for the panel's `srcdoc` frame:
 
-**View iframe sandbox** (`src/panels/webview/components/WebViewPanel.tsx`,
-`ViewportEditor.tsx`): the iframe always uses
-`sandbox="allow-scripts allow-same-origin"` and is **never broadened** (enforced
-by a frontend test, AC 30).
+- a `<base href>` with the absolute upstream base becomes the first child of
+  `<head>`, so URLs built at runtime and CSS `url()` resolve against the
+  upstream;
+- every URL attribute (`src`, `href`, `srcset`, `poster`, `action`, …) becomes
+  an absolute upstream URL, so nothing routes back through Grafana;
+- `<meta name="referrer" content="no-referrer">` is injected (and the page's own
+  referrer policies removed), so the upstream never receives the Grafana
+  dashboard URL in a `Referer` header;
+- a small compatibility script gives the page in-memory `document.cookie`,
+  `localStorage` and `sessionStorage`, only where the real ones throw inside the
+  opaque-origin frame. It grants no access to Grafana;
+- `<meta http-equiv>` CSP and `refresh` metas are removed, and **frame-buster
+  scripts** (inline scripts that compare `top`/`self` and navigate
+  `top.location`) are neutralised.
 
-**Author hide-selectors** (`applyHideSelectors`, `rewrite.go`): author-supplied
-CSS selectors are validated (length + count caps, `cascadia` compilation) and
+The connection pool also matters: `DisableKeepAlives` is set on the transport so
+a connection validated under one domain's policy is never reused for another
+request — see §6.
+
+**Panel URL validation** (`src/panels/webview/url.ts`, `validateWebViewUrl`):
+the panel accepts only an absolute `http:` or `https:` URL with a host and no
+credentials. `javascript:`, `data:`, `blob:`, relative URLs and URLs with
+control characters render an error instead of an iframe, in view mode and in
+the editor preview.
+
+**Per-mode iframe sandbox** (`src/panels/webview/sandbox.ts`, `iframeSandbox`,
+used by `WebViewFrame.tsx` for the panel and the editor preview):
+
+| Frame | `sandbox` value | Why |
+| ----- | --------------- | --- |
+| Proxy mode (`srcdoc`) | `allow-scripts` | A `srcdoc` document would otherwise have the Grafana origin. Without `allow-same-origin` its scripts run in an opaque origin and cannot read the Grafana session or call the Grafana API. |
+| Direct mode, cross-origin URL | `allow-scripts allow-same-origin` | The page keeps its own origin (and its own cookies). That origin is not Grafana's. |
+| Direct mode, URL on the Grafana origin | `allow-scripts` | Prevents Grafana-origin access through a same-origin URL. |
+
+`allow-popups`, `allow-forms`, `allow-modals` and `allow-top-navigation*` are
+never set. Both iframes use `referrerPolicy="no-referrer"` and
+`pointer-events: none`, and the panel never listens for `message` events from
+the frame. Unit tests in `sandbox.test.ts` and the panel tests enforce this.
+
+**Author hide-selectors** (`hide_selectors.go`): `/proxy` refuses (400) more
+than 20 selectors, a selector over 256 bytes, and `cascadia`'s expensive
+features (`:has()`, `:contains()`, `:matches()`, `#=`, `:not()` with
+combinators); combinators are resolved in one linear pass and the matching
+work per page is capped (413 beyond it). Selectors are
 applied by **finding matched elements and setting a fixed
 `display:none!important` style attribute** — the selector text never enters the
 rendered markup, so markup injection is impossible by construction (AC 31).
+
+### Access control
+
+Grafana authenticates every call to
+`/api/plugins/wilsonwaters-webview-app/resources/*` and checks basic plugin
+access. It does **not** apply the `role` of an `includes[]` entry in
+`plugin.json` to these calls; that role only controls who sees the Configuration
+page in the navigation. Any further check is the plugin's job. The plugin reads
+the caller's basic org role from the plugin context
+(`backend.PluginConfigFromContext(ctx).User`).
+
+| Route | Who can call it | Why |
+| ----- | --------------- | --- |
+| `GET /proxy` | Any signed-in org user (Viewer and up; anonymous viewers when Grafana's anonymous access is on) | Dashboard viewers must be able to render proxy-mode panels. |
+| `GET /check-frameable` | Org role **Editor** or **Admin** (`hasEditorRole`) | Only the panel editor's **Test URL** button uses it. |
+| `GET /health` | Any signed-in org user | Liveness only; reads no settings and contacts no upstream. |
+
+- `/check-frameable` checks the role **first**, before the method, URL,
+  allowlist and rate-limit gates. A missing user, an empty role, `Viewer`,
+  `None` or an unknown role gets **403** with a JSON body
+  (`{"error":"Forbidden","reason":"role",…}`). The denial is audited and counted
+  (`webview_proxy_denials_total{reason="role"}`).
+- The check uses the **basic** org role. A user whose basic role is Viewer but
+  who can edit dashboards through a custom RBAC role cannot use **Test URL**.
+- `/proxy` has no role gate. Its controls are the admin-managed allowlist (empty
+  by default), the IP blocklist with resolve-then-dial, the scheme and port
+  checks, the rate limits, the concurrency cap, the response-size limit and the
+  audit log (the `user` field records the Grafana login). Any signed-in user can
+  fetch any allowlisted URL through it, so admins must allowlist only hosts that
+  every user of the organisation may read.
+- **The allowlist is not confidential.** `/proxy` answers a non-allowlisted host
+  with a distinct `403 target host is not allowlisted`, so any signed-in user can
+  learn whether a given host is on the list.
 
 ---
 
@@ -356,11 +442,12 @@ rendered markup, so markup injection is impossible by construction (AC 31).
 - **Non-skippable security test suite (AC 17–31, 36).** The backend security
   behaviours are covered by dedicated Go tests (`pkg/plugin/proxy_security_*`,
   `proxy_denial_matrix_test.go`, `proxy_audit_test.go`, `pkg/security/*_test.go`,
-  and the frontend sandbox test). CI runs the security suite on every PR and it
-  **cannot be skipped** — a regression in any layered control fails the build.
-- **Audit logging (AC 28).** Every request emits exactly one structured audit
-  entry: endpoint, target URL, user (Grafana login or `anonymous`), status, body
-  bytes, duration, and the `allowPrivateIP` flag.
+  and the frontend `url.test.ts` and `sandbox.test.ts`). CI runs the security
+  suite on every PR and it **cannot be skipped** — a regression in any layered
+  control fails the build.
+- **Audit logging (AC 28).** Every `/proxy` and `/check-frameable` request emits
+  exactly one structured audit entry: endpoint, target URL, user (Grafana login
+  or `anonymous`), status, body bytes, duration, and the `allowPrivateIP` flag.
 - **Prometheus metrics (AC 29).** `webview_proxy_requests_total{status}`,
   `webview_proxy_denials_total{reason}`, `webview_proxy_requests_in_flight`,
   `webview_proxy_request_duration_seconds`, and the dedicated
@@ -378,8 +465,10 @@ rendered markup, so markup injection is impossible by construction (AC 31).
   controls protect.
 - **Viewer and Grafana identity.** Session cookies, bearer tokens, and
   `X-Grafana-*` identity context that must never leak to an arbitrary upstream.
-- **The Grafana origin.** Responses are served same-origin to Grafana, so an
-  upstream must not be able to set cookies on it or pin origin-level policy.
+- **The Grafana origin.** The viewer's Grafana session and the Grafana API must
+  stay out of reach of any embedded page. Proxy responses also come from the
+  Grafana origin, so an upstream must not be able to set cookies on it or pin
+  origin-level policy.
 - **Service availability.** The backend must not be turnable into a DoS amplifier
   or be exhausted by large/slow/compressed responses.
 
@@ -389,7 +478,9 @@ rendered markup, so markup injection is impossible by construction (AC 31).
   configured — returning hostile HTML, framing-busting scripts, oversized or
   decompression-bomb bodies, or rebinding DNS.
 - **A dashboard author** attempting to use the proxy as an SSRF primitive or open
-  proxy to reach internal/metadata endpoints.
+  proxy to reach internal/metadata endpoints, or setting a panel URL that would
+  run script in the Grafana origin for every viewer.
+- **Any signed-in user** calling `/proxy` directly, outside a panel.
 - **A network attacker controlling DNS** for an allowlisted name, attempting a
   rebind to an internal address.
 
@@ -401,11 +492,15 @@ rendered markup, so markup injection is impossible by construction (AC 31).
 | **Open proxy / egress abuse** | SF3 allowlist (empty by default), SF2 scheme/port limits, SF5 rate + concurrency caps, GET-only | Admin who allowlists a broad/wildcard-subdomain domain widens the surface; tune per `docs/administration.md`. |
 | **DNS rebinding** | SF4 resolve-all → validate-all → dial-validated-IP → connect-time `Control` re-check; multi-record fail-closed | TOCTOU is closed at the socket layer; residual risk only if a caller pre-parses an obfuscated literal into a real IP without re-classifying (not a path this code takes). |
 | **Cloud metadata exfiltration** | SF1 blocks `169.254.169.254`/link-local (not relaxable); SF4 blocks metadata names pre-resolution | None for the IP path; GCP names are enumerated, AWS/Azure/Alibaba rely on the IP block (no DNS name exists). |
-| **Clickjacking / framing hostility** | `stripFramingHeaders` (XFO + CSP `frame-ancestors`), frame-buster neutralisation, CSP/refresh-meta removal; fixed iframe sandbox | Client-side JS the proxied page runs could still attempt navigation within its sandbox; mitigated by the never-broadened sandbox. |
-| **Credential / identity leakage to upstream** | `stripRequestHeaders` removes cookies, auth, forwarding and all `X-Grafana-*`; proxy is stateless/unauthenticated | None by design — no credential is ever forwarded. |
-| **Response-driven DoS (large/slow/bomb)** | SF5 size limit (wire + decoded), per-request timeout, concurrency cap, gzip-bomb guard | A flood within the rate/concurrency caps is possible; tune limits per deployment. |
-| **State-setting / policy-pinning via response** | `stripFramingHeaders` removes `Set-Cookie`, HSTS, HPKP, `Clear-Site-Data` | None for the enumerated set. |
+| **Clickjacking / framing hostility** | `stripFramingHeaders` (XFO + CSP `frame-ancestors`), frame-buster neutralisation, CSP/refresh-meta removal, `Refresh` header removal; per-mode iframe sandbox without `allow-top-navigation*` | Client-side JS the proxied page runs could still navigate within its own frame. |
+| **Proxied page script reaching Grafana** | `srcdoc` frame with `sandbox="allow-scripts"` only (opaque origin); no `message` listener in the panel; `X-Frame-Options: deny` stays on the resource route | None known. The page can still read its own in-memory cookies and storage. |
+| **Unsafe panel URL (`javascript:`, `data:`, …)** | `validateWebViewUrl` allows only absolute `http(s)` URLs; checked at render time in the panel and the editor preview | None known. |
+| **Credential / identity leakage to upstream** | `stripRequestHeaders` removes cookies, auth, forwarding and all `X-Grafana-*`; injected `no-referrer` policy for subresources | The upstream sees the viewer's IP address for subresources the browser loads directly. |
+| **Response-driven DoS (large/slow/bomb)** | SF5 size limit (wire, decoded and rewritten size), whole-body read before the reply (413, never a truncated 200), unsupported encodings refused (502), per-request timeout, concurrency cap | A flood within the rate/concurrency caps is possible; tune limits per deployment. Rewriting large HTML pages is memory-intensive; see the sizing note in [`administration.md`](./administration.md#4-tuning). |
+| **State-setting / policy-pinning via response** | `stripFramingHeaders` removes `Set-Cookie`, HSTS, HPKP, `Clear-Site-Data`, `Refresh` and every `Access-Control-*` header | None for the enumerated set. |
+| **Proxy use by any signed-in user** | Allowlist (empty by default), rate limits, concurrency cap, audit log with the Grafana login; `/check-frameable` limited to Editor and Admin | Any signed-in user, including Viewers, can fetch allowlisted URLs and can learn whether a host is allowlisted. Allowlist only hosts that every user of the organisation may read. |
 | **Malicious hide-selector markup injection** | `applyHideSelectors` matches elements and sets a fixed style attribute; selector text never serialised | None by construction. |
+| **Hide-selector CPU and memory exhaustion** | `checkHideSelectors` refuses (400) over 20 selectors, over 256 bytes, and `:has()`/`:contains()`/`:matches()`/`#=`/`:not()` with combinators; linear combinator matching; a per-page matching budget (413) that charges every simple selector, attribute byte and sibling a test reads; each element hidden at most once | Selectors within the limits can still use the whole budget on each request: 0.05 to 0.8 s of CPU on a desktop (up to 10 times that on a Raspberry Pi), inside one of the two rewrite slots. |
 
 ### Residual risk: the `AllowPrivateIP` opt-in (scoped SSRF surface)
 
@@ -418,8 +513,9 @@ and treated as a deliberate risk:
   The single relax boundary is `isRelaxablePrivate` in `ipblocklist.go`.
 - **What it never relaxes:** loopback, link-local (**including the
   `169.254.169.254` metadata address**), CGNAT, IPv6 ULA, unspecified, multicast,
-  reserved, and the fail-closed nil/unparseable sentinel — all stay blocked even
-  when a domain is opted in.
+  reserved, the fail-closed nil/unparseable sentinel, and any RFC 1918 address
+  wrapped in a 6to4 or NAT64 address — all stay blocked even when a domain is
+  opted in.
 - **Applied narrowly:** the opt-in enters the dial path only via the matched
   domain's `EntryOptions`, recomputed per request and per redirect hop. It is
   threaded through the request context as a `security.Policy` and enforced by the
@@ -441,24 +537,58 @@ for that specific domain. See `docs/administration.md` for guidance.
 
 ---
 
-## 7. Known limitation: in-panel proxy rendering (FR5 / #102)
+## 7. Proxy-mode rendering (FR5)
 
-The backend proxy pipeline is **complete and security-tested** — `/proxy`,
-`/proxy-resource`, and `/check-frameable` all run the full pipeline above and are
-covered by the non-skippable security suite. However, **in-panel rendering of
-proxy-mode content is deferred for v1** (tracked as #102).
+Grafana adds two headers to every plugin resource response:
+`X-Frame-Options: deny` (from its default response headers) and
+`Content-Security-Policy: sandbox` (set when it calls the plugin's resource
+handler; a plugin cannot remove it). Together they stop a resource route from
+rendering, with working scripts, as an iframe `src`. Neither header applies to a
+`fetch()` read, and neither applies to subresources the page loads.
 
-The cause is Grafana's own resource-route response headers: Grafana serves plugin
-resource routes with `X-Frame-Options: deny` and a `CSP: sandbox`, which forbid
-the panel's iframe from framing the `/proxy` URL directly (even same-origin) and
-prevent proxied JS from running. This is a **front-end rendering** limitation,
-not a proxy-pipeline or security gap: the backend correctly fetches, sanitises,
-and rewrites content. The planned fix (fetch-then-`srcdoc`: the panel fetches the
-proxied HTML — a `fetch` is not subject to `X-Frame-Options` — and injects it via
-the iframe's own controlled `sandbox`) is deferred post-v1.
+The panel therefore renders proxy mode in three steps (`WebViewFrame.tsx`,
+`useProxyDocument.ts`):
 
-For v1, **direct mode is unaffected**, and proxy mode remains fully usable via the
-backend endpoints. Do not rely on in-panel proxy rendering in v1.
+1. It waits for the shared `/health` probe. If the backend is unavailable it
+   shows a message and never falls back to a direct iframe.
+2. It reads `GET /proxy?url=…[&hide=…]` as text with `getBackendSrv().fetch`.
+   The request carries the viewer's session and resolves under Grafana's
+   sub-path, so proxy mode also works when Grafana is served under a sub-path.
+   A non-2xx response shows an error state with the status and a short
+   plain-text reason; an error body is never rendered as a document.
+3. It renders the rewritten HTML with `<iframe srcdoc sandbox="allow-scripts"
+   referrerPolicy="no-referrer">`. Auto-refresh refetches the HTML.
+
+Because the frame has an opaque origin, Chromium and Firefox send no Grafana
+cookie on its requests, so a subresource route through Grafana cannot work. The
+rewriter therefore emits absolute upstream URLs, and the browser loads images,
+scripts and stylesheets directly from the upstream. The former
+`/proxy-resource` route was removed. No Grafana setting (`allow_embedding`,
+`cookie_samesite`) needs to change.
+
+This design was verified on stock Grafana 12.4.13 and 13.2.4 in Chromium,
+Firefox and WebKit (`ai-state/streams/v1-stabilisation/R1-proxy-render-findings.md`).
+
+**Limitations that follow from the design:**
+
+1. With `[security] content_security_policy = true` in Grafana, the `srcdoc`
+   document inherits Grafana's CSP. Proxied pages then show markup and images
+   only; scripts and external stylesheets are blocked.
+2. Only the HTML document goes through Grafana. The viewer's browser must be
+   able to reach the upstream, and the upstream sees the viewer's IP address
+   (with no `Referer`). If Grafana is on a public address and the upstream on a
+   private one, the browser's local-network protections may also block these
+   loads (not tested).
+3. The page runs in an isolated origin. Cookies and storage are in memory only.
+   Requests back to its own server are cross-origin (`Origin: null`), so
+   single-page apps that call their own APIs do not work. Module scripts and web
+   fonts load only if the upstream sends `Access-Control-Allow-Origin: *`.
+4. Sites with bot protection (Akamai, reCAPTCHA) can block the server-side fetch
+   or the browser's subresource loads.
+5. The new Bureau of Meteorology radar page is a single-page app with bot
+   protection and does not work in proxy mode. The legacy loop
+   (`https://reg.bom.gov.au/products/IDR663.loop.shtml`) works in proxy mode,
+   and in direct mode too because it sends no framing headers.
 
 ---
 
@@ -466,49 +596,46 @@ backend endpoints. Do not rely on in-panel proxy rendering in v1.
 
 Resource routes are registered under the plugin resource base
 `/api/plugins/wilsonwaters-webview-app/resources` (`pkg/plugin/resources.go`).
-All proxying endpoints are **GET-only** and answer CORS preflight (`OPTIONS` →
-204). Denial status/reason pairs come from the authoritative `reasonStatus` table
-(`pkg/plugin/metrics.go`).
+Any other path returns 404. The proxying endpoints are **GET-only** and are for
+same-origin use: they send no CORS headers, and a CORS preflight (`OPTIONS`) is
+refused like any other non-GET method. Denial status/reason pairs come from the
+authoritative `reasonStatus` table (`pkg/plugin/metrics.go`).
 
 ### `GET /proxy?url=<encoded-target>`
 
-- **Purpose:** fetch a top-level page, sanitise it, and serve it same-origin with
-  HTML rewriting so it renders inside the panel.
+- **Who:** any signed-in org user (see [Access control](#access-control)).
+- **Purpose:** fetch a top-level page, sanitise it, and return the rewritten HTML
+  that the panel renders in its `srcdoc` frame.
 - **Inputs:** `url` (required, percent-encoded absolute http/https target);
   optional `hide` (repeated CSS hide-selectors, CR5); reserved internal
   `_wvredir` hop-depth (CR4, proxy-URL only, never forwarded upstream).
 - **Pipeline applied:** full pre-fetch pipeline (SF2 → SF3 → SF2 port → SF5) then
   SF4 at dial time; `ModifyResponse` = size guard → framing/header strip →
-  redirect handling → **HTML rewrite**.
+  redirect handling → bounded read of the whole body → **HTML rewrite**. A
+  non-HTML response passes through unchanged after the same size checks.
+- **Redirects:** a 3xx is not followed server-side. Its `Location` is rewritten
+  to a `/proxy` URL, so the panel's fetch re-enters the full pipeline for every
+  hop, up to `maxRedirects`.
 - **Responses:** `200` rewritten HTML (UTF-8); `400` bad/missing url, bad
   scheme/port/userinfo; `403` not allowlisted, blocked IP, metadata host, or
-  redirect into a non-allowlisted host; `405` non-GET; `413` oversize; `429` rate
-  limit / concurrency; `502` upstream failure / redirect-depth exceeded; `504`
-  timeout.
-
-### `GET /proxy-resource?url=<encoded-target>`
-
-- **Purpose:** fetch a **subresource** (CSS/JS/image/etc.) referenced by a rewritten
-  page. Shares the same handler state (pipeline, transport, rate limiter, audit,
-  metrics) as `/proxy`.
-- **Inputs:** `url` (required); `_wvredir` as above. `hide` is read but unused
-  (subresources are not HTML documents).
-- **Pipeline applied:** identical pre-fetch pipeline and SF4; `ModifyResponse` =
-  size guard → framing/header strip → redirect handling, then **passthrough** —
-  **no HTML rewrite**, Content-Type and body (including gzip `Content-Encoding`)
-  streamed through unchanged.
-- **Responses:** same status set as `/proxy`; `200` carries the upstream body and
-  Content-Type unchanged.
+  redirect into a non-allowlisted host; `405` non-GET; `413` oversize (wire,
+  decoded or rewritten size); `429` rate limit / concurrency; `502` upstream
+  failure, unsupported `Content-Encoding` or redirect-depth exceeded; `504`
+  timeout. Denials are plain text.
 
 ### `GET /check-frameable?url=<encoded-target>`
 
+- **Who:** org role Editor or Admin. Other callers get `403` with a JSON body
+  (`reason: "role"`) before any other check runs.
 - **Purpose:** decide whether a page can be framed directly or should be routed
   through the proxy (drives the panel's load-mode auto-detection).
 - **Inputs:** `url` (required).
 - **Pipeline applied:** the **identical** pre-fetch pipeline as `/proxy`, then a
   single non-following GET through the SF4 transport (so resolve-then-dial + IP
   blocklist still apply, and the matched domain's `AllowPrivateIP` opt-in applies
-  — but with no permit audit/metric, as it is a read-only probe).
+  — but with no permit audit/metric, as it is a read-only probe). Because the
+  allowlist gate runs first, the check denies every URL whose host is not
+  allowlisted (`403`), even a page that would frame directly.
 - **Responses:** on pipeline denial, the same proxy-style error codes
   (`400`/`403`/`405`/`429`). On success, **`200`** with JSON
   `{ "frameable": bool, "reason": string, "recommendedMode": "direct"|"proxy" }`.
@@ -539,5 +666,6 @@ All proxying endpoints are **GET-only** and answer CORS preflight (`OPTIONS` →
   standard metrics endpoint. Admins scrape it the same way as any plugin backend's
   metrics.
 
-> Example/scaffold routes `/ping` and `/echo` also exist on the resource mux;
-> they carry no security role and are not part of the proxy surface.
+> The create-plugin scaffold routes `/ping` and `/echo` were removed in v1.0.0
+> (they bypassed the pipeline), and so was the `/proxy-resource` subresource
+> route (see [§7](#7-proxy-mode-rendering-fr5)). All three now return 404.

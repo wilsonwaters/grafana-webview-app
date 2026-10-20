@@ -1,15 +1,45 @@
 # RUNBOOK — Development Environment
 
 How to build, run, and test the `wilsonwaters-webview-app` plugin locally. These
-steps were verified during project setup against Grafana 12.4.0.
+steps were verified during project setup against Grafana 12.4.0, and again for
+v1.0.0 (M1, 2026-10-18) against grafana-enterprise 12.4.13, 13.0.11, 13.1.8,
+13.2.4 and nightly.
 
 ## Prerequisites
 
 - **Node.js** >= 22 (`.nvmrc` pins the version)
-- **Go** >= 1.24
+- **Go** 1.27.2 (the `go` directive in `go.mod`). With the default
+  `GOTOOLCHAIN=auto`, an older local Go downloads 1.27.2 automatically.
 - **Mage** — `go install github.com/magefile/mage@latest` (ensure `$(go env GOPATH)/bin` is on `PATH`)
 - **Docker** + **Docker Compose v2** (the `docker compose` subcommand)
 - **Playwright Chromium** (for E2E / runtime verification)
+
+Toolchain versions as of v1.0.0 (M1): create-plugin scaffold 7.13.0,
+`@grafana/*` 13.2.4, React 19 (the code stays React 18 compatible, because
+Grafana 12.4-13.1 run React 18), `@grafana/plugin-e2e` 3.15.x, Playwright 1.64,
+Jest 30, grafana-plugin-sdk-go v0.297.0. Supported Grafana: `>=12.4.0`.
+
+## Windows workstation notes
+
+`@grafana/create-plugin` does not support Windows, and two scaffold parts break
+on a Windows checkout: `getEntries()` in `.config/bundler/utils.ts` builds a
+glob from a backslash path (the build emits no `module.js`), and Jest finds no
+tests when the path contains a dot directory (for example `.claude/worktrees`).
+Run the Node toolchain in a Linux container (or WSL). Keep `node_modules` in a
+named volume so the Linux binaries do not clash with a Windows install:
+
+```powershell
+docker run --rm -v "${PWD}:/work" -v "webview-node-modules:/work/node_modules" -w /work node:22 `
+  bash -c "npm ci && npm run typecheck && npm run lint && npm run test:ci && npm run build"
+```
+
+- `npx @grafana/create-plugin@latest update` also needs Linux. Run it in the
+  same kind of container on a clean checkout, then review the diff.
+- `go test -race` needs cgo. On Windows run it in `golang:1.27.2`
+  (`mage -v buildAll`, `go vet` and `bash scripts/security-suite.sh` work natively).
+- `.gitattributes` keeps `*.sh` at LF, so `.config/entrypoint.sh` works in the
+  dev container. If an old checkout still has CRLF, delete the file and
+  `git checkout -- <file>`.
 
 ## First-time setup
 
@@ -65,6 +95,41 @@ npm run typecheck    # tsc --noEmit
 
 Validate the packaged plugin before release with the build-plugin skill /
 `@grafana/plugin-validator` (see `.claude/skills/validate-plugin/`).
+
+### E2E against a specific Grafana version
+
+CI runs the suite against the versions that `grafana/plugin-actions/e2e-version`
+resolves from `grafanaDependency` (12.4.x, 13.0.x, 13.1.x, 13.2.x, nightly). To
+run one of them locally the way CI does:
+
+```bash
+ANONYMOUS_AUTH_ENABLED=false DEVELOPMENT=false GRAFANA_VERSION=13.2.4 docker compose up -d --build --force-recreate
+npx playwright test --retries=2
+```
+
+On Windows, run Playwright in the official image and share the Grafana
+container's network so `localhost:3000` resolves:
+
+```powershell
+docker run --rm --network container:wilsonwaters-webview-app -v "${PWD}:/work" `
+  -v "webview-node-modules:/work/node_modules" -w /work --ipc=host `
+  mcr.microsoft.com/playwright:v1.64.1-noble npx playwright test --retries=2
+```
+
+Use `--force-recreate` between runs. Since AU1 the Configuration page merges
+into `jsonData`, and `tests/appConfig.spec.ts` only adds and removes its own
+entry, so no spec depends on test order or skips because of another spec.
+
+### Dependency audit
+
+```bash
+npm audit --omit=dev                              # production deps
+osv-scanner scan -L package-lock.json             # what the validator checks
+osv-scanner scan -L go.mod
+```
+
+`go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest` installs
+osv-scanner. The release validator fails on high/critical findings.
 
 ## Headless tester (Playwright) notes
 

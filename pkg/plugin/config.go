@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"github.com/grafana/grafana-plugin-sdk-go/backend"
+	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
+	"github.com/wilsonwaters/webview/pkg/security"
 )
 
 // Default values for plugin settings (fail-closed safe defaults).
@@ -53,7 +55,11 @@ type DomainOptions struct {
 	AllowSubdomains bool `json:"allowSubdomains"`
 
 	// AllowPrivateIP is an explicit opt-in that permits the resolved IP address
-	// of this domain to fall within RFC 1918 / link-local / loopback ranges.
+	// of this domain to fall within the RFC 1918 IPv4 ranges (10.0.0.0/8,
+	// 172.16.0.0/12, 192.168.0.0/16) only. Loopback, link-local (including the
+	// 169.254.169.254 metadata address), CGNAT, IPv6 ULA, multicast, reserved
+	// ranges, and RFC 1918 addresses wrapped in 6to4 or NAT64 addresses stay
+	// blocked even when it is set (see security.isRelaxablePrivate).
 	// This MUST remain false in almost all deployments; it exists only for
 	// internal-status-board use cases where the admin has accepted the risk.
 	// Default: false.
@@ -204,7 +210,30 @@ func LoadSettings(settings backend.AppInstanceSettings) (PluginSettings, error) 
 	}
 
 	applyDefaults(&cfg)
+
+	// An entry that is not a valid host name never matches (the allowlist
+	// matcher skips it), so a typo would show up only as unexplained 403s.
+	for _, domain := range invalidAllowlistDomains(cfg.AllowedDomains) {
+		settingsLogger.Warn("Ignoring allowlist entry that is not a valid host name; use a bare host name such as example.com", "domain", domain)
+	}
 	return cfg, nil
+}
+
+// settingsLogger is the logger LoadSettings warns through. Tests replace it.
+var settingsLogger = log.DefaultLogger
+
+// invalidAllowlistDomains returns the configured Domain values that are not a
+// valid host name: empty, a URL ("https://example.com"), a host with a port
+// ("example.com:8443") or with characters a host name cannot contain. The
+// allowlist matcher skips such entries, so they never allow anything.
+func invalidAllowlistDomains(domains []AllowedDomain) []string {
+	var invalid []string
+	for _, d := range domains {
+		if _, err := security.NormalizeHostname(d.Domain); err != nil {
+			invalid = append(invalid, d.Domain)
+		}
+	}
+	return invalid
 }
 
 // applyDefaults fills in safe default values for any PluginSettings field that

@@ -59,3 +59,21 @@
 | — | #113 | [investigate] Provisioned jsonData.allowedDomains may not reach the backend (TC4 success-path skips) | testing-cicd | S | blocked (investigate; relevant to DR4/DR7) |
 | — | #129 | [gap] No AppConfig UI to manage the domain allowlist | panel-core | M | blocked (release-readiness decision) |
 | — | #131 | [13.x compat] Bump @grafana deps for 13.2+ (e2e harness + revert Levitate advisory #124) | testing-cicd | M | blocked (deferred to next cycle) |
+
+## v1.0.0 stabilisation (2026-10-18)
+
+| Task | Issue # | Title | Stream | Size |
+|------|---------|-------|--------|------|
+| R1 | #138 | Research spike: in-panel proxy render on stock Grafana | v1-stabilisation | L |
+| M1 | #139 | Scaffold, dependency and CI update | v1-stabilisation | L |
+| RV1/RV2 | #140 | Standards review and fixes | v1-stabilisation | M |
+| S1 | #141 | Frontend security: VR-1, VR-2 | v1-stabilisation | M |
+| S2 | #142 | Backend security: VR-3/5/6/7/8/11 | v1-stabilisation | M |
+| GH1 | #143 | Repository hygiene | v1-stabilisation | S |
+| DEV1 | #144 | Dev server Grafana upgrade + plugin install | v1-stabilisation | M |
+| DOC1 | #145 | Docs refresh for v1.0.0 | v1-stabilisation | M |
+| FR5 | #102 | In-panel proxy render (fetch + srcdoc) | v1-stabilisation | L |
+| AU1 | #129 | Settings page for allowlist and limits (+ #113, VR-4, VR-13) | v1-stabilisation | L |
+| REL1 | #56 | v1.0.0 release (private-signed) | v1-stabilisation | M |
+
+PR: #146 (`release/v1.0.0` → `main`).

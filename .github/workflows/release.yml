@@ -21,22 +21,26 @@ jobs:
     # access policy token is a repository secret.
     environment: QA-Alintech
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - uses: grafana/plugin-actions/build-plugin@build-plugin/v1.0.2
+      - uses: grafana/plugin-actions/build-plugin@b05ed88ddca828d4700149aeacab32fcaf10caa0 # build-plugin/v1.2.1
         id: build-plugin
         # Private signing for self-hosted distribution (Path 1). Reads the Grafana
         # Cloud access policy token from the GRAFANA_ACCESS_POLICY_TOKEN secret.
         # The action signs by running our package.json `sign` script, which carries
-        # the private-signing rootUrls (deployment host + localhost) itself -- the
-        # build-plugin action has NO rootUrls input, so the URLs live in the sign
-        # script (single source of truth, shared with ci.yml).
+        # the private-signing rootUrls (deployment host + localhost) itself, so the
+        # URLs have a single source of truth shared with ci.yml. Do NOT set the
+        # action's `sign_root_urls` input: the action would then append
+        # `-- --rootUrls ...` to `npm run sign` and sign-plugin would receive the
+        # flag twice.
         # node-version/go-version are pinned to match this repo's toolchain
-        # (package.json engines node>=22; go.mod go 1.26.3). The action defaults
-        # (node 20 / go 1.21) do NOT match and caused the v0.0.1 release to fail
+        # (package.json engines node>=22; go.mod go 1.27.2). The action defaults
+        # (node 20 / go 1.25) do NOT match and caused the v0.0.1 release to fail
         # (npm install crashed under Node 20; mage would build against the wrong Go).
+        # Supply-chain note: this action is SHA-pinned, but it calls
+        # grafana/plugin-actions/package-plugin@main internally, which we cannot pin.
         # `attestation: true` publishes a signed build-provenance attestation for
         # the packaged zip (clears the validator's provenance recommendation and
         # lets installers verify the artifact was built from this source).
@@ -46,7 +50,7 @@ jobs:
         with:
           policy_token: ${{ secrets.GRAFANA_ACCESS_POLICY_TOKEN }}
           node-version: '22'
-          go-version: '1.26.3'
+          go-version: '1.27.2'
           attestation: true
 
       # AC 32: @grafana/plugin-validator release GATE. Runs the full validator

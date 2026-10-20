@@ -10,11 +10,17 @@ on:
 # `pull requests: read and write`
 # `workflows: read and write`
 
+# The action writes with the PAT above; the workflow token only needs to read.
+permissions:
+  contents: read
+
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: grafana/plugin-actions/create-plugin-update@create-plugin-update/v2.0.1
+      - uses: grafana/plugin-actions/create-plugin-update@235f06405d28d2cce712543f2ad715a91fe3b32b # create-plugin-update/v2.1.0
         with:
           # Make sure to save the token in your repository secrets as `GH_PAT_TOKEN`
           token: ${{ secrets.GH_PAT_TOKEN }}
+          # The action defaults to Node 20; this repo requires Node >= 22.
+          node-version: '22'

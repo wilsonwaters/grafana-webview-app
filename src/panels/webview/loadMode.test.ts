@@ -1,15 +1,5 @@
-import { config } from '@grafana/runtime';
-
 import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../types';
-import { buildProxySrc, PROXY_RESOURCE_BASE, resolveLoadMode } from './loadMode';
-
-// Mock @grafana/runtime so `config.appSubUrl` is controllable per test. It
-// defaults to '' (the root-served case), matching real Grafana when no sub-url
-// is configured. Each test that needs a sub-path sets it and the afterEach
-// restores it so other suites are unaffected.
-jest.mock('@grafana/runtime', () => ({
-  config: { appSubUrl: '' },
-}));
+import { buildProxyFetchUrl, detectedModeForUrl, PROXY_RESOURCE_BASE, resolveLoadMode } from './loadMode';
 
 function opts(overrides: Partial<PanelOptions> = {}): PanelOptions {
   return { ...DEFAULT_PANEL_OPTIONS, ...overrides };
@@ -40,80 +30,118 @@ describe('panels/webview/loadMode', () => {
     test('auto + detectedMode=null → direct (default when nothing detected)', () => {
       expect(resolveLoadMode(opts({ loadMode: 'auto', detectedMode: null }))).toBe('direct');
     });
+
+    test('auto + a verdict measured for this URL → that verdict', () => {
+      expect(
+        resolveLoadMode(
+          opts({ loadMode: 'auto', url: 'https://a.example', detectedMode: 'proxy', detectedForUrl: 'https://a.example' })
+        )
+      ).toBe('proxy');
+    });
+
+    test('auto + a verdict measured for another URL → not tested → direct (RV1-6)', () => {
+      expect(
+        resolveLoadMode(
+          opts({ loadMode: 'auto', url: 'https://b.example', detectedMode: 'proxy', detectedForUrl: 'https://a.example' })
+        )
+      ).toBe('direct');
+    });
+
+    test('the URL comparison ignores surrounding whitespace', () => {
+      expect(
+        resolveLoadMode(
+          opts({ loadMode: 'auto', url: '  https://a.example ', detectedMode: 'proxy', detectedForUrl: 'https://a.example' })
+        )
+      ).toBe('proxy');
+    });
+
+    test('auto + a verdict saved before detectedForUrl existed (null) → the verdict is kept', () => {
+      expect(
+        resolveLoadMode(opts({ loadMode: 'auto', url: 'https://a.example', detectedMode: 'proxy', detectedForUrl: null }))
+      ).toBe('proxy');
+    });
+
+    test('manual proxy ignores a stale verdict', () => {
+      expect(
+        resolveLoadMode(
+          opts({ loadMode: 'proxy', url: 'https://b.example', detectedMode: 'direct', detectedForUrl: 'https://a.example' })
+        )
+      ).toBe('proxy');
+    });
+  });
+
+  describe('detectedModeForUrl', () => {
+    test('null when nothing was detected', () => {
+      expect(detectedModeForUrl(opts({ detectedMode: null, detectedForUrl: 'https://a.example' }))).toBeNull();
+    });
+
+    test('the verdict when it matches the URL, null when it does not', () => {
+      const base = opts({ detectedMode: 'direct', detectedForUrl: 'https://a.example' });
+      expect(detectedModeForUrl({ ...base, url: 'https://a.example' })).toBe('direct');
+      expect(detectedModeForUrl({ ...base, url: 'https://a.example/other' })).toBeNull();
+    });
   });
 
   // ---------------------------------------------------------------------------
-  // buildProxySrc — Completion Criterion: "View-mode renders with the correct
-  // src based on resolved mode" (proxy branch), incl. CR5 hide params.
+  // buildProxyFetchUrl — FR5: the request path for the proxied HTML, incl. CR5
+  // hide params. getBackendSrv() resolves it under config.appSubUrl.
   // ---------------------------------------------------------------------------
-  describe('buildProxySrc', () => {
-    // Restore the default ('' = root-served) after each test so a sub-path set
-    // here cannot leak into other tests or suites sharing the mocked config.
-    afterEach(() => {
-      config.appSubUrl = '';
-    });
-
-    test('builds the proxy resource URL with the target url encoded', () => {
-      const src = buildProxySrc(opts({ url: 'https://example.com/path?a=1&b=2' }));
-      expect(src).toBe(
-        `${PROXY_RESOURCE_BASE}?url=${encodeURIComponent('https://example.com/path?a=1&b=2')}`
-      );
+  describe('buildProxyFetchUrl', () => {
+    test('builds the proxy resource path with the target url encoded', () => {
+      const path = buildProxyFetchUrl('https://example.com/path?a=1&b=2', '');
+      expect(path).toBe(`${PROXY_RESOURCE_BASE}?url=${encodeURIComponent('https://example.com/path?a=1&b=2')}`);
       // The raw upstream query separators must be encoded, not leak into ours.
-      expect(src.startsWith(`${PROXY_RESOURCE_BASE}?url=https%3A%2F%2Fexample.com`)).toBe(true);
+      expect(path.startsWith(`${PROXY_RESOURCE_BASE}?url=https%3A%2F%2Fexample.com`)).toBe(true);
     });
 
     test('uses the single source-of-truth resource base', () => {
-      const src = buildProxySrc(opts({ url: 'https://example.com' }));
-      expect(src.startsWith(`${PROXY_RESOURCE_BASE}?`)).toBe(true);
+      const path = buildProxyFetchUrl('https://example.com', '');
+      expect(path.startsWith(`${PROXY_RESOURCE_BASE}?`)).toBe(true);
       expect(PROXY_RESOURCE_BASE).toBe('/api/plugins/wilsonwaters-webview-app/resources/proxy');
     });
 
-    test('default appSubUrl ("" = root-served) → root-relative resource path (unchanged)', () => {
-      // Guard: the mocked default must be '' so the root case is byte-identical.
-      expect(config.appSubUrl).toBe('');
-      const src = buildProxySrc(opts({ url: 'https://example.com' }));
-      expect(src).toBe(
-        `${PROXY_RESOURCE_BASE}?url=${encodeURIComponent('https://example.com')}`
-      );
-    });
-
-    test('appSubUrl set → resource path is prefixed with the sub-url (sub-path Grafana)', () => {
-      config.appSubUrl = '/grafana';
-      const src = buildProxySrc(opts({ url: 'https://example.com' }));
-      expect(
-        src.startsWith('/grafana/api/plugins/wilsonwaters-webview-app/resources/proxy?')
-      ).toBe(true);
-      expect(src).toBe(
-        `/grafana${PROXY_RESOURCE_BASE}?url=${encodeURIComponent('https://example.com')}`
-      );
+    test('the path is root-relative with no sub-url prefix (getBackendSrv adds config.appSubUrl)', () => {
+      const path = buildProxyFetchUrl('https://example.com', '');
+      expect(path.startsWith('/api/plugins/')).toBe(true);
     });
 
     test('empty hideSelectors → no hide params', () => {
-      const src = buildProxySrc(opts({ url: 'https://example.com', hideSelectors: '' }));
-      expect(src).not.toContain('hide=');
+      expect(buildProxyFetchUrl('https://example.com', '')).not.toContain('hide=');
     });
 
     test('multiple hideSelectors (newline-separated) → multiple hide params, blanks dropped and trimmed', () => {
-      const src = buildProxySrc(
-        opts({ url: 'https://example.com', hideSelectors: '.ad\n\n  #banner  \n   \n.cookie-bar' })
-      );
-      const params = new URLSearchParams(src.split('?')[1]);
+      const path = buildProxyFetchUrl('https://example.com', '.ad\n\n  #banner  \n   \n.cookie-bar');
+      const params = new URLSearchParams(path.split('?')[1]);
       expect(params.getAll('hide')).toEqual(['.ad', '#banner', '.cookie-bar']);
+      expect(params.get('url')).toBe('https://example.com');
+    });
+
+    test('selectors the proxy would refuse are not sent (CR5)', () => {
+      const tooLong = '.' + 'a'.repeat(256);
+      const hide = ['.ad', 'div:has(p)', 'p:contains(x)', '[href#=(ads)]', 'div:not(.a .b)', tooLong, '#banner'];
+      const path = buildProxyFetchUrl('https://example.com', hide.join('\n'));
+      const params = new URLSearchParams(path.split('?')[1]);
+      expect(params.getAll('hide')).toEqual(['.ad', '#banner']);
+    });
+
+    test('at most 20 selectors are sent (CR5)', () => {
+      const lines = Array.from({ length: 25 }, (_, i) => `.s${i + 1}`).join('\n');
+      const params = new URLSearchParams(buildProxyFetchUrl('https://example.com', lines).split('?')[1]);
+      expect(params.getAll('hide')).toHaveLength(20);
+      expect(params.getAll('hide')[19]).toBe('.s20');
     });
 
     test('special characters in selectors are encoded', () => {
       const selector = 'div[data-x="a b"] > .c&d';
-      const src = buildProxySrc(opts({ url: 'https://example.com', hideSelectors: selector }));
+      const path = buildProxyFetchUrl('https://example.com', selector);
       // Reserved characters (`&`, `=`, `>`, brackets, quotes) must be encoded so the
       // selector cannot break out of the query. URLSearchParams uses
       // application/x-www-form-urlencoded, so spaces become `+`.
-      expect(src).toContain(
-        `hide=${encodeURIComponent(selector).replace(/%20/g, '+')}`
-      );
+      expect(path).toContain(`hide=${encodeURIComponent(selector).replace(/%20/g, '+')}`);
       // The raw `&` separator from the selector must NOT leak as a query delimiter.
-      expect(src).toContain('.c%26d');
+      expect(path).toContain('.c%26d');
       // Round-trips back to the original selector (decoding handles `+` as space).
-      const params = new URLSearchParams(src.split('?')[1]);
+      const params = new URLSearchParams(path.split('?')[1]);
       expect(params.getAll('hide')).toEqual([selector]);
     });
   });

@@ -2,6 +2,8 @@ package plugin
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -62,156 +64,142 @@ func attr(t *testing.T, doc *goquery.Document, selector, name string) string {
 	return v
 }
 
+// isShim reports whether s is the injected sandbox compatibility script.
+func isShim(s *goquery.Selection) bool { return s.Text() == sandboxCompatShim }
+
+// pageScripts returns the document's <script> elements other than the
+// injected sandbox compatibility shim, i.e. the scripts that came from the
+// upstream page.
+func pageScripts(doc *goquery.Document) *goquery.Selection {
+	return doc.Find("script").FilterFunction(func(_ int, s *goquery.Selection) bool { return !isShim(s) })
+}
+
+// injectedShimMarkup is the exact markup the rewriter injects for the shim.
+const injectedShimMarkup = "<script>" + sandboxCompatShim + "</script>"
+
+// withoutInjectedShim returns the rendered HTML with the one injected shim
+// element removed, so string assertions about upstream scripts ignore it.
+func withoutInjectedShim(s string) string {
+	return strings.Replace(s, injectedShimMarkup, "", 1)
+}
+
 const examplePage = "http://example.com/dir/page.html"
 
-// wantResource is the /proxy-resource URL for an absolute upstream URL.
-func wantResource(target string) string {
-	return proxyResourceURL(target)
-}
+// --- FR5: URL attributes become absolute upstream URLs ------------------------
 
-// wantNav is the /proxy URL for an absolute upstream URL.
-func wantNav(target string) string {
-	return proxyNavURL(target)
-}
-
-// --- Completion Criterion: subresource URL rewriting (every URL form) ---------
-
-// TestRewriteSubresourceURLForms covers Completion Criterion "subresource src/href
-// rewritten to /proxy-resource" across absolute, root-relative, path-relative,
-// protocol-relative and query/fragment-bearing forms.
+// TestRewriteSubresourceURLForms covers FR5 / R1 D1: a subresource URL in any
+// form is rewritten to the absolute upstream URL, resolved against the page URL.
 func TestRewriteSubresourceURLForms(t *testing.T) {
 	cases := []struct {
 		name string
 		in   string // img src value
-		want string // absolute upstream URL we expect to be query-encoded
+		want string // absolute upstream URL
 	}{
 		{"absolute-http", "http://cdn.example.com/a.png", "http://cdn.example.com/a.png"},
 		{"absolute-https", "https://cdn.example.com/a.png", "https://cdn.example.com/a.png"},
 		{"root-relative", "/img/a.png", "http://example.com/img/a.png"},
 		{"path-relative", "a.png", "http://example.com/dir/a.png"},
+		{"dot-relative", "./a.png", "http://example.com/dir/a.png"},
 		{"dotdot-relative", "../up.png", "http://example.com/up.png"},
+		{"dotdot-past-root", "../../../up.png", "http://example.com/up.png"},
 		{"protocol-relative", "//cdn.example.com/a.png", "http://cdn.example.com/a.png"},
+		{"query-only", "?v=2", "http://example.com/dir/page.html?v=2"},
 		{"query-preserved", "/a.png?v=1&w=2", "http://example.com/a.png?v=1&w=2"},
-		{"fragment-stripped", "/a.png#frag", "http://example.com/a.png"},
+		{"fragment-kept", "/sprite.svg#icon", "http://example.com/sprite.svg#icon"},
+		{"surrounding-whitespace", "  /a.png  ", "http://example.com/a.png"},
+		{"upper-case-scheme", "HTTPS://cdn.example.com/a.png", "https://cdn.example.com/a.png"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			doc := rewriteDoc(t, `<img src="`+c.in+`">`, examplePage)
-			got := attr(t, doc, "img", "src")
-			if got != wantResource(c.want) {
-				t.Errorf("img src = %q, want %q", got, wantResource(c.want))
+			if got := attr(t, doc, "img", "src"); got != c.want {
+				t.Errorf("img src %q => %q, want %q", c.in, got, c.want)
 			}
 		})
 	}
 }
 
-// TestRewriteSubresourceAttributeSet covers Completion Criterion "the full
-// subresource attribute set routes through /proxy-resource".
-func TestRewriteSubresourceAttributeSet(t *testing.T) {
+// TestRewriteProtocolRelativeFollowsPageScheme confirms a protocol-relative
+// URL takes the scheme of the (final) page URL.
+func TestRewriteProtocolRelativeFollowsPageScheme(t *testing.T) {
+	doc := rewriteDoc(t, `<script src="//cdn.example.com/a.js"></script>`, "https://example.com/p")
+	if got := attr(t, doc, "script[src]", "src"); got != "https://cdn.example.com/a.js" {
+		t.Errorf("script src = %q, want https://cdn.example.com/a.js", got)
+	}
+}
+
+// TestRewriteURLAttributeSet covers FR5: every subresource and navigation
+// attribute in urlAttrs becomes an absolute upstream URL (no /proxy or
+// /proxy-resource paths, R1 D1 and D4).
+func TestRewriteURLAttributeSet(t *testing.T) {
 	cases := []struct {
 		name     string
 		html     string
 		selector string
 		attr     string
+		want     string
 	}{
-		{"img-src", `<img src="/a.png">`, "img", "src"},
-		{"script-src", `<script src="/a.js"></script>`, "script", "src"},
-		{"source-src", `<video><source src="/a.mp4"></video>`, "source", "src"},
-		{"video-src", `<video src="/a.mp4"></video>`, "video", "src"},
-		{"audio-src", `<audio src="/a.mp3"></audio>`, "audio", "src"},
-		{"track-src", `<video><track src="/a.vtt"></video>`, "track", "src"},
-		{"object-data", `<object data="/a.swf"></object>`, "object", "data"},
-		{"embed-src", `<embed src="/a.swf">`, "embed", "src"},
+		// Subresources.
+		{"img-src", `<img src="a.png">`, "img", "src", "http://example.com/dir/a.png"},
+		{"script-src", `<script src="/a.js"></script>`, "script[src]", "src", "http://example.com/a.js"},
+		{"link-stylesheet", `<link rel="stylesheet" href="s.css">`, "link", "href", "http://example.com/dir/s.css"},
+		{"source-src", `<video><source src="/a.mp4"></video>`, "source", "src", "http://example.com/a.mp4"},
+		{"video-src", `<video src="/a.mp4"></video>`, "video", "src", "http://example.com/a.mp4"},
+		{"video-poster", `<video poster="p.jpg"></video>`, "video", "poster", "http://example.com/dir/p.jpg"},
+		{"audio-src", `<audio src="/a.mp3"></audio>`, "audio", "src", "http://example.com/a.mp3"},
+		{"track-src", `<video><track src="/a.vtt"></video>`, "track", "src", "http://example.com/a.vtt"},
+		{"object-data", `<object data="/a.svg"></object>`, "object", "data", "http://example.com/a.svg"},
+		{"embed-src", `<embed src="/a.svg">`, "embed", "src", "http://example.com/a.svg"},
+		{"input-image-src", `<form><input type="image" src="go.png"></form>`, "input", "src", "http://example.com/dir/go.png"},
+		{"body-background", `<body background="bg.gif"></body>`, "body", "background", "http://example.com/dir/bg.gif"},
+		{"td-background", `<table><tr><td background="../c.gif">x</td></tr></table>`, "td", "background", "http://example.com/c.gif"},
+		// Navigation targets.
+		{"a-href", `<a href="/p.html">x</a>`, "a", "href", "http://example.com/p.html"},
+		{"area-href", `<map><area href="p.html"></map>`, "area", "href", "http://example.com/dir/p.html"},
+		{"iframe-src", `<iframe src="/frame.html"></iframe>`, "iframe", "src", "http://example.com/frame.html"},
+		{"frame-src", `<frameset><frame src="f.html"></frameset>`, "frame", "src", "http://example.com/dir/f.html"},
+		{"form-action-get", `<form action="/submit" method="get"></form>`, "form", "action", "http://example.com/submit"},
+		{"form-action-nomethod", `<form action="submit"></form>`, "form", "action", "http://example.com/dir/submit"},
+		{"form-action-post", `<form action="/submit" method="post"></form>`, "form", "action", "http://example.com/submit"},
+		{"button-formaction", `<form><button formaction="/b">x</button></form>`, "button", "formaction", "http://example.com/b"},
+		{"input-formaction", `<form><input type="submit" formaction="/i"></form>`, "input", "formaction", "http://example.com/i"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			doc := rewriteDoc(t, c.html, examplePage)
 			got := attr(t, doc, c.selector, c.attr)
-			if !strings.HasPrefix(got, resourceBase+proxyResourcePath+"?url=") {
-				t.Errorf("%s %s = %q, want /proxy-resource URL", c.selector, c.attr, got)
+			if got != c.want {
+				t.Errorf("%s[%s] = %q, want %q", c.selector, c.attr, got, c.want)
+			}
+			if strings.Contains(got, "/api/plugins/") {
+				t.Errorf("%s[%s] = %q still routes through Grafana", c.selector, c.attr, got)
 			}
 		})
 	}
 }
 
-// TestRewriteNavigationAttributeSet covers Completion Criterion "navigation refs
-// route through /proxy (re-enter top-level rewriting)".
-func TestRewriteNavigationAttributeSet(t *testing.T) {
-	cases := []struct {
-		name     string
-		html     string
-		selector string
-		attr     string
-	}{
-		{"a-href", `<a href="/p.html">x</a>`, "a", "href"},
-		{"area-href", `<map><area href="/p.html"></map>`, "area", "href"},
-		{"iframe-src", `<iframe src="/p.html"></iframe>`, "iframe", "src"},
-		{"form-action-get", `<form action="/submit" method="get"></form>`, "form", "action"},
-		{"form-action-nomethod", `<form action="/submit"></form>`, "form", "action"},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			doc := rewriteDoc(t, c.html, examplePage)
-			got := attr(t, doc, c.selector, c.attr)
-			if !strings.HasPrefix(got, resourceBase+proxyPath+"?url=") {
-				t.Errorf("%s %s = %q, want /proxy URL", c.selector, c.attr, got)
-			}
-		})
-	}
-}
-
-// TestRewritePostFormLeftVerbatim covers Completion Criterion "POST forms are NOT
-// rewritten" (out of scope — only GET/absent-method forms).
-func TestRewritePostFormLeftVerbatim(t *testing.T) {
-	doc := rewriteDoc(t, `<form action="/submit" method="post"></form>`, examplePage)
-	if got := attr(t, doc, "form", "action"); got != "/submit" {
-		t.Errorf("POST form action = %q, want untouched /submit", got)
-	}
-	// Case-insensitive: POST in any case is left.
-	doc2 := rewriteDoc(t, `<form action="/submit" method="POST"></form>`, examplePage)
-	if got := attr(t, doc2, "form", "action"); got != "/submit" {
-		t.Errorf("POST (upper) form action = %q, want untouched", got)
-	}
-}
-
-// TestRewriteNavFragmentPreserved covers Completion Criterion "a trailing #frag on
-// a navigation URL is preserved outside the url= param".
+// TestRewriteNavFragmentPreserved covers FR5: a #fragment on a navigation URL
+// stays on the absolute URL.
 func TestRewriteNavFragmentPreserved(t *testing.T) {
 	doc := rewriteDoc(t, `<a href="/p.html#section2">x</a>`, examplePage)
-	got := attr(t, doc, "a", "href")
-	want := wantNav("http://example.com/p.html") + "#section2"
-	if got != want {
-		t.Errorf("nav href = %q, want %q", got, want)
+	if got := attr(t, doc, "a", "href"); got != "http://example.com/p.html#section2" {
+		t.Errorf("nav href = %q, want http://example.com/p.html#section2", got)
 	}
 }
 
-// TestRewriteLinkRelGating covers Completion Criterion "link[href] rewritten only
-// for rewritable rels (or rel absent); other rels left verbatim".
-func TestRewriteLinkRelGating(t *testing.T) {
-	rewritten := []string{"stylesheet", "icon", "shortcut icon", "apple-touch-icon", "mask-icon", "preload", "modulepreload", "manifest"}
-	for _, rel := range rewritten {
+// TestRewriteLinkHrefAnyRel covers FR5: with absolute URLs there is no reason to
+// gate <link> on rel, so every link href is absolute.
+func TestRewriteLinkHrefAnyRel(t *testing.T) {
+	for _, rel := range []string{"stylesheet", "icon", "preload", "modulepreload", "manifest", "canonical", "alternate", "preconnect", ""} {
 		doc := rewriteDoc(t, `<link rel="`+rel+`" href="/r.css">`, examplePage)
-		got := attr(t, doc, "link", "href")
-		if !strings.HasPrefix(got, resourceBase+proxyResourcePath+"?url=") {
-			t.Errorf("link rel=%q href = %q, want rewritten", rel, got)
-		}
-	}
-	// rel absent ⇒ rewritten.
-	docAbsent := rewriteDoc(t, `<link href="/r.css">`, examplePage)
-	if got := attr(t, docAbsent, "link", "href"); !strings.HasPrefix(got, resourceBase+proxyResourcePath+"?url=") {
-		t.Errorf("link rel-absent href = %q, want rewritten", got)
-	}
-	// Non-rewritable rels left verbatim.
-	for _, rel := range []string{"canonical", "alternate", "dns-prefetch", "preconnect"} {
-		doc := rewriteDoc(t, `<link rel="`+rel+`" href="/r">`, examplePage)
-		if got := attr(t, doc, "link", "href"); got != "/r" {
-			t.Errorf("link rel=%q href = %q, want left verbatim", rel, got)
+		if got := attr(t, doc, "link", "href"); got != "http://example.com/r.css" {
+			t.Errorf("link rel=%q href = %q, want http://example.com/r.css", rel, got)
 		}
 	}
 }
 
-// TestRewriteNonHTTPSchemesVerbatim covers Completion Criterion "non-http(s) and
-// empty/fragment refs are left verbatim".
+// TestRewriteNonHTTPSchemesVerbatim covers "non-http(s) and empty/fragment refs
+// are left verbatim".
 func TestRewriteNonHTTPSchemesVerbatim(t *testing.T) {
 	cases := []string{
 		"data:image/png;base64,AAAA",
@@ -231,43 +219,77 @@ func TestRewriteNonHTTPSchemesVerbatim(t *testing.T) {
 	}
 }
 
-// TestRewriteSrcset covers Completion Criterion "srcset candidates rewritten,
-// descriptors preserved, non-rewritable URLs kept".
+// TestRewriteSrcset covers FR5 for srcset: each candidate URL becomes absolute
+// and descriptors are kept, following the HTML srcset grammar (commas inside a
+// URL, trailing commas, data: URLs, link imagesrcset).
 func TestRewriteSrcset(t *testing.T) {
-	doc := rewriteDoc(t, `<img srcset="/a.png 1x, /b.png 2x, c.png 640w">`, examplePage)
-	got := attr(t, doc, "img", "srcset")
-	wantParts := []string{
-		wantResource("http://example.com/a.png") + " 1x",
-		wantResource("http://example.com/b.png") + " 2x",
-		wantResource("http://example.com/dir/c.png") + " 640w",
+	cases := []struct {
+		name string
+		html string
+		sel  string
+		attr string
+		want string
+	}{
+		{
+			"relative candidates and descriptors",
+			`<img srcset="/a.png 1x, /b.png 2x, c.png 640w">`, "img", "srcset",
+			"http://example.com/a.png 1x, http://example.com/b.png 2x, http://example.com/dir/c.png 640w",
+		},
+		{
+			"protocol-relative and ../ candidates",
+			`<img srcset="//cdn.example.com/a.png 1x,../b.png 2x">`, "img", "srcset",
+			"http://cdn.example.com/a.png 1x, http://example.com/b.png 2x",
+		},
+		{
+			"comma inside a CDN URL",
+			`<img srcset="https://cdn.example.com/w_100,h_100/a.jpg 1x, /w_200,h_200/a.jpg 2x">`, "img", "srcset",
+			"https://cdn.example.com/w_100,h_100/a.jpg 1x, http://example.com/w_200,h_200/a.jpg 2x",
+		},
+		{
+			"data URL kept, http candidate rewritten",
+			`<img srcset="data:image/png;base64,AA,BB 1x, /b.png 2x">`, "img", "srcset",
+			"data:image/png;base64,AA,BB 1x, http://example.com/b.png 2x",
+		},
+		{
+			"non-http candidate kept",
+			`<img srcset="about:blank 1x, /b.png 2x">`, "img", "srcset",
+			"about:blank 1x, http://example.com/b.png 2x",
+		},
+		{
+			"candidate without descriptor and trailing commas",
+			`<img srcset="a.png,, b.png 2x,">`, "img", "srcset",
+			"http://example.com/dir/a.png, http://example.com/dir/b.png 2x",
+		},
+		{
+			"extra whitespace",
+			"<img srcset=\"  a.png \n 1x ,\tb.png   2x  \">", "img", "srcset",
+			"http://example.com/dir/a.png 1x, http://example.com/dir/b.png 2x",
+		},
+		{
+			"source srcset",
+			`<picture><source srcset="/s.png 1x"></picture>`, "source", "srcset",
+			"http://example.com/s.png 1x",
+		},
+		{
+			"link imagesrcset",
+			`<link rel="preload" as="image" imagesrcset="/p.png 1x, /p2.png 2x">`, "link", "imagesrcset",
+			"http://example.com/p.png 1x, http://example.com/p2.png 2x",
+		},
 	}
-	if got != strings.Join(wantParts, ", ") {
-		t.Errorf("srcset = %q, want %q", got, strings.Join(wantParts, ", "))
-	}
-
-	// A non-rewritable (about:) candidate is kept verbatim; http candidate
-	// alongside it is still rewritten. (srcset URLs cannot contain bare commas per
-	// the HTML spec, so a comma-bearing data: URI is out of scope.)
-	doc2 := rewriteDoc(t, `<img srcset="about:blank 1x, /b.png 2x">`, examplePage)
-	got2 := attr(t, doc2, "img", "srcset")
-	if !strings.Contains(got2, "about:blank 1x") {
-		t.Errorf("srcset non-rewritable candidate not preserved: %q", got2)
-	}
-	if !strings.Contains(got2, wantResource("http://example.com/b.png")+" 2x") {
-		t.Errorf("srcset http candidate not rewritten: %q", got2)
-	}
-
-	// source[srcset] also handled.
-	doc3 := rewriteDoc(t, `<picture><source srcset="/s.png 1x"></picture>`, examplePage)
-	if got := attr(t, doc3, "source", "srcset"); !strings.HasPrefix(got, resourceBase+proxyResourcePath) {
-		t.Errorf("source srcset = %q, want rewritten", got)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			doc := rewriteDoc(t, c.html, examplePage)
+			if got := attr(t, doc, c.sel, c.attr); got != c.want {
+				t.Errorf("%s[%s] = %q, want %q", c.sel, c.attr, got, c.want)
+			}
+		})
 	}
 }
 
-// --- Completion Criterion: base href inject + fix ----------------------------
+// --- Base href ----------------------------------------------------------------
 
-// TestBaseInjectedWhenAbsent covers Completion Criterion "a <base href> is
-// injected as the first head child when none exists".
+// TestBaseInjectedWhenAbsent covers "a <base href> is injected as the first
+// head child when none exists".
 func TestBaseInjectedWhenAbsent(t *testing.T) {
 	doc := rewriteDoc(t, `<html><head><title>t</title></head><body></body></html>`, examplePage)
 	base := doc.Find("head base").First()
@@ -283,8 +305,8 @@ func TestBaseInjectedWhenAbsent(t *testing.T) {
 	}
 }
 
-// TestBaseFixedWhenPresent covers Completion Criterion "an existing relative
-// <base href> is resolved to absolute against the page URL".
+// TestBaseFixedWhenPresent covers "an existing relative <base href> is resolved
+// to absolute against the page URL".
 func TestBaseFixedWhenPresent(t *testing.T) {
 	doc := rewriteDoc(t, `<html><head><base href="/app/"><title>t</title></head></html>`, examplePage)
 	bases := doc.Find("base")
@@ -296,20 +318,198 @@ func TestBaseFixedWhenPresent(t *testing.T) {
 	}
 }
 
-// TestBaseAffectsRelativeResolution covers Completion Criterion "refs resolve
-// against the effective base (page URL combined with existing <base>)".
-func TestBaseAffectsRelativeResolution(t *testing.T) {
-	doc := rewriteDoc(t, `<html><head><base href="http://other.com/x/"></head><body><img src="a.png"></body></html>`, examplePage)
-	got := attr(t, doc, "img", "src")
-	if got != wantResource("http://other.com/x/a.png") {
-		t.Errorf("img src = %q, want resolved against existing base", got)
+// TestBaseMovedToHeadStart covers FR5: an existing <base> anywhere in the
+// document is moved to the start of <head>, keeping its other attributes, so
+// the injected meta and shim can follow it.
+func TestBaseMovedToHeadStart(t *testing.T) {
+	for name, in := range map[string]string{
+		"after other head elements": `<html><head><title>t</title><script>var a=1</script><base href="/app/" target="_self"></head></html>`,
+		"in body":                   `<html><head><title>t</title></head><body><p>x</p><base href="/app/" target="_self"></body></html>`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			doc := rewriteDoc(t, in, examplePage)
+			if n := doc.Find("base").Length(); n != 1 {
+				t.Fatalf("base count = %d, want 1", n)
+			}
+			first := doc.Find("head").Children().First()
+			if goquery.NodeName(first) != "base" {
+				t.Fatalf("first head child = %q, want base", goquery.NodeName(first))
+			}
+			if href, _ := first.Attr("href"); href != "http://example.com/app/" {
+				t.Errorf("base href = %q, want http://example.com/app/", href)
+			}
+			if target, _ := first.Attr("target"); target != "_self" {
+				t.Errorf("base target = %q, want _self kept", target)
+			}
+		})
 	}
 }
 
-// --- Completion Criterion: meta removal --------------------------------------
+// TestBaseNonHTTPFallsBackToPage covers FR5: a <base href> that resolves to a
+// non-http(s) scheme (which browsers ignore) is reset to the page URL, so
+// relative refs still resolve against the upstream.
+func TestBaseNonHTTPFallsBackToPage(t *testing.T) {
+	doc := rewriteDoc(t, `<html><head><base href="javascript:alert(1)"></head><body><img src="a.png"></body></html>`, examplePage)
+	if href := attr(t, doc, "base", "href"); href != examplePage {
+		t.Errorf("base href = %q, want the page URL %q", href, examplePage)
+	}
+	if got := attr(t, doc, "img", "src"); got != "http://example.com/dir/a.png" {
+		t.Errorf("img src = %q, want http://example.com/dir/a.png", got)
+	}
+}
 
-// TestRemoveCSPAndRefreshMetas covers Completion Criterion "CSP and refresh meta
-// tags removed; charset/viewport/XFO-meta preserved".
+// TestBaseIgnoresTemplateAndForeignContent covers RV2: a <base href> inside
+// <template> contents or in SVG/MathML content does not set the document base
+// URL in a browser, so the rewriter ignores it. It stays where it is, the base
+// the rewriter uses is the page URL (or the first HTML-namespace base), and
+// relative refs resolve against that.
+func TestBaseIgnoresTemplateAndForeignContent(t *testing.T) {
+	cases := map[string]string{
+		"template in head": `<html><head><template><base href="http://evil.example/t/"></template></head><body><img src="a.png"></body></html>`,
+		"template in body": `<html><head></head><body><template><div><base href="http://evil.example/t/"></div></template><img src="a.png"></body></html>`,
+		"svg":              `<html><head></head><body><svg><base href="http://evil.example/s/"></base></svg><img src="a.png"></body></html>`,
+		"math":             `<html><head></head><body><math><base href="http://evil.example/m/"></base></math><img src="a.png"></body></html>`,
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			doc := rewriteDoc(t, in, examplePage)
+			first := doc.Find("head").Children().First()
+			if goquery.NodeName(first) != "base" {
+				t.Fatalf("first head child = %q, want the injected base", goquery.NodeName(first))
+			}
+			if href, _ := first.Attr("href"); href != examplePage {
+				t.Errorf("document base href = %q, want the page URL %q", href, examplePage)
+			}
+			if got := attr(t, doc, "img", "src"); got != "http://example.com/dir/a.png" {
+				t.Errorf("img src = %q, want it resolved against the page URL", got)
+			}
+			if n := doc.Find(`base[href^="http://evil.example/"]`).Length(); n != 1 {
+				t.Errorf("ignored base count = %d, want it left in place", n)
+			}
+		})
+	}
+
+	// A real HTML base after an ignored one is still used.
+	doc := rewriteDoc(t, `<html><head><template><base href="http://evil.example/t/"></template><base href="/app/"></head><body><img src="a.png"></body></html>`, examplePage)
+	if href := attr(t, doc, "head > base", "href"); href != "http://example.com/app/" {
+		t.Errorf("document base href = %q, want http://example.com/app/", href)
+	}
+	if got := attr(t, doc, "img", "src"); got != "http://example.com/app/a.png" {
+		t.Errorf("img src = %q, want http://example.com/app/a.png", got)
+	}
+}
+
+// TestBaseAffectsRelativeResolution covers "refs resolve against the effective
+// base (page URL combined with existing <base>)".
+func TestBaseAffectsRelativeResolution(t *testing.T) {
+	doc := rewriteDoc(t, `<html><head><base href="http://other.com/x/"></head><body><img src="a.png"></body></html>`, examplePage)
+	if got := attr(t, doc, "img", "src"); got != "http://other.com/x/a.png" {
+		t.Errorf("img src = %q, want http://other.com/x/a.png", got)
+	}
+}
+
+// --- FR5: referrer meta and sandbox compatibility shim -------------------------
+
+// TestInjectReferrerMetaAndShim covers FR5: <meta name="referrer"
+// content="no-referrer"> and the verbatim sandbox shim are injected exactly
+// once, directly after <base> at the start of <head>, for documents with and
+// without their own <head>/<base>.
+func TestInjectReferrerMetaAndShim(t *testing.T) {
+	cases := map[string]string{
+		"full document":          `<!doctype html><html><head><meta charset="utf-8"><title>t</title><script>var x=1</script></head><body>b</body></html>`,
+		"existing base":          `<html><head><title>t</title><base href="/app/"></head><body>b</body></html>`,
+		"fragment without head":  `<p>just a fragment</p><script>var y=2</script>`,
+		"head-only scripts":      `<html><head><script src="/first.js"></script></head></html>`,
+		"upstream referrer meta": `<html><head><meta name="referrer" content="unsafe-url"><meta name="Referrer" content="origin"></head><body><meta name="REFERRER" content="unsafe-url"></body></html>`,
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			doc := rewriteDoc(t, in, examplePage)
+			kids := doc.Find("head").Children()
+			if kids.Length() < 3 {
+				t.Fatalf("head has %d children, want at least base, meta, script", kids.Length())
+			}
+			if n := goquery.NodeName(kids.Eq(0)); n != "base" {
+				t.Fatalf("head child 0 = %q, want base", n)
+			}
+			meta := kids.Eq(1)
+			if n := goquery.NodeName(meta); n != "meta" {
+				t.Fatalf("head child 1 = %q, want meta", n)
+			}
+			if v, _ := meta.Attr("name"); v != "referrer" {
+				t.Errorf("meta name = %q, want referrer", v)
+			}
+			if v, _ := meta.Attr("content"); v != "no-referrer" {
+				t.Errorf("meta content = %q, want no-referrer", v)
+			}
+			if !isShim(kids.Eq(2)) {
+				t.Fatalf("head child 2 is not the shim: %q", goquery.NodeName(kids.Eq(2)))
+			}
+
+			// Exactly once.
+			referrerMetas := doc.Find("meta[name]").FilterFunction(func(_ int, s *goquery.Selection) bool {
+				v, _ := s.Attr("name")
+				return strings.EqualFold(v, "referrer")
+			})
+			if referrerMetas.Length() != 1 {
+				t.Errorf("referrer metas = %d, want 1 (upstream ones removed)", referrerMetas.Length())
+			}
+			shims := doc.Find("script").FilterFunction(func(_ int, s *goquery.Selection) bool { return isShim(s) })
+			if shims.Length() != 1 {
+				t.Errorf("shim scripts = %d, want 1", shims.Length())
+			}
+		})
+	}
+}
+
+// TestInjectShimVerbatim covers FR5: the shim text is emitted unescaped and
+// byte-for-byte, so it runs exactly as tested in R1.
+func TestInjectShimVerbatim(t *testing.T) {
+	out, err := rewriteHTML([]byte(`<html><head></head><body></body></html>`), mustParseURL(t, examplePage), "text/html", nil)
+	if err != nil {
+		t.Fatalf("rewriteHTML: %v", err)
+	}
+	want := `<base href="` + examplePage + `"/><meta name="referrer" content="no-referrer"/>` + injectedShimMarkup
+	if !strings.Contains(string(out), want) {
+		t.Fatalf("output does not contain %q directly in order:\n%s", want, out)
+	}
+	if strings.Count(string(out), sandboxCompatShim) != 1 {
+		t.Fatalf("shim text appears %d times, want 1", strings.Count(string(out), sandboxCompatShim))
+	}
+}
+
+// TestInjectIdempotent covers FR5: rewriting an already rewritten page (an
+// upstream that is itself a proxied page) still yields exactly one base, one
+// referrer meta and one shim.
+func TestInjectIdempotent(t *testing.T) {
+	page := mustParseURL(t, examplePage)
+	once, err := rewriteHTML([]byte(`<html><head><title>t</title></head><body><img src="a.png"></body></html>`), page, "text/html", nil)
+	if err != nil {
+		t.Fatalf("first rewrite: %v", err)
+	}
+	twice, err := rewriteHTML(once, page, "text/html", nil)
+	if err != nil {
+		t.Fatalf("second rewrite: %v", err)
+	}
+	if !bytes.Equal(once, twice) {
+		t.Fatalf("rewrite is not idempotent:\n once=%s\ntwice=%s", once, twice)
+	}
+}
+
+// TestRemoveReferrerPolicyAttributes covers FR5: element referrerpolicy
+// attributes, which would override the injected no-referrer policy for that
+// request, are removed.
+func TestRemoveReferrerPolicyAttributes(t *testing.T) {
+	doc := rewriteDoc(t, `<html><body><img src="a.png" referrerpolicy="unsafe-url"><a href="/x" referrerpolicy="origin">x</a><iframe src="/f" referrerpolicy="unsafe-url"></iframe></body></html>`, examplePage)
+	if n := doc.Find("[referrerpolicy]").Length(); n != 0 {
+		t.Fatalf("%d elements still carry referrerpolicy", n)
+	}
+}
+
+// --- Meta removal ---------------------------------------------------------------
+
+// TestRemoveCSPAndRefreshMetas covers "CSP and refresh meta tags removed;
+// charset/viewport/XFO-meta preserved".
 func TestRemoveCSPAndRefreshMetas(t *testing.T) {
 	in := `<html><head>` +
 		`<meta charset="utf-8">` +
@@ -342,10 +542,10 @@ func TestRemoveCSPAndRefreshMetas(t *testing.T) {
 	}
 }
 
-// --- Completion Criterion: frame-buster removal ------------------------------
+// --- Frame-buster removal ---------------------------------------------------------
 
-// TestRemoveFrameBusterFull covers Completion Criterion "an inline frame-buster
-// with BOTH a comparison and a navigation marker is removed".
+// TestRemoveFrameBusterFull covers "an inline frame-buster with BOTH a
+// comparison and a navigation marker is removed".
 func TestRemoveFrameBusterFull(t *testing.T) {
 	cases := []string{
 		`if (top != self) { top.location = self.location; }`,
@@ -355,15 +555,14 @@ func TestRemoveFrameBusterFull(t *testing.T) {
 	}
 	for _, js := range cases {
 		doc := rewriteDoc(t, `<html><body><script>`+js+`</script></body></html>`, examplePage)
-		if doc.Find("script").Length() != 0 {
+		if pageScripts(doc).Length() != 0 {
 			t.Errorf("frame-buster not removed: %q", js)
 		}
 	}
 }
 
-// TestRemoveFrameBusterSingleMarkerKept covers Completion Criterion "a script with
-// only ONE marker (comparison OR navigation, not both) is KEPT (false-negative
-// bias)".
+// TestRemoveFrameBusterSingleMarkerKept covers "a script with only ONE marker
+// (comparison OR navigation, not both) is KEPT (false-negative bias)".
 func TestRemoveFrameBusterSingleMarkerKept(t *testing.T) {
 	cases := []struct {
 		name string
@@ -376,35 +575,32 @@ func TestRemoveFrameBusterSingleMarkerKept(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			doc := rewriteDoc(t, `<html><body><script>`+c.js+`</script></body></html>`, examplePage)
-			if doc.Find("script").Length() != 1 {
+			if pageScripts(doc).Length() != 1 {
 				t.Errorf("script should be KEPT (only partial markers): %q", c.js)
 			}
 		})
 	}
 }
 
-// TestFrameBusterExternalScriptKept covers Completion Criterion "external scripts
-// (with src) are never scanned/removed; their body is not fetched".
+// TestFrameBusterExternalScriptKept covers "external scripts (with src) are
+// never scanned/removed; their body is not fetched".
 func TestFrameBusterExternalScriptKept(t *testing.T) {
-	// An external script whose src happens to point at a buster-named file, plus
-	// the marker text in an attribute that we should NOT scan, must survive.
 	doc := rewriteDoc(t, `<html><body><script src="/buster.js"></script></body></html>`, examplePage)
-	if doc.Find("script").Length() != 1 {
+	if pageScripts(doc).Length() != 1 {
 		t.Fatal("external script should be kept")
 	}
-	// And its src must have been rewritten to /proxy-resource (subresource).
-	if got := attr(t, doc, "script", "src"); !strings.HasPrefix(got, resourceBase+proxyResourcePath) {
-		t.Errorf("external script src = %q, want rewritten subresource URL", got)
+	// Its src is the absolute upstream URL (FR5).
+	if got := attr(t, doc, "script[src]", "src"); got != "http://example.com/buster.js" {
+		t.Errorf("external script src = %q, want http://example.com/buster.js", got)
 	}
 }
 
-// TestFrameBusterLdJSONUntouched covers Completion Criterion "a non-executable
-// script type (application/ld+json) is never removed even if it contains marker
-// substrings".
+// TestFrameBusterLdJSONUntouched covers "a non-executable script type
+// (application/ld+json) is never removed even if it contains marker substrings".
 func TestFrameBusterLdJSONUntouched(t *testing.T) {
 	js := `{"note":"if (top != self) top.location = self.location"}`
 	doc := rewriteDoc(t, `<html><body><script type="application/ld+json">`+js+`</script></body></html>`, examplePage)
-	if doc.Find("script").Length() != 1 {
+	if pageScripts(doc).Length() != 1 {
 		t.Error("ld+json data block must not be removed")
 	}
 }
@@ -415,45 +611,44 @@ func TestFrameBusterModuleAndTextJavascriptScanned(t *testing.T) {
 	for _, typ := range []string{"module", "text/javascript", "application/javascript"} {
 		js := `if (top != self) { top.location = self.location; }`
 		doc := rewriteDoc(t, `<html><body><script type="`+typ+`">`+js+`</script></body></html>`, examplePage)
-		if doc.Find("script").Length() != 0 {
+		if pageScripts(doc).Length() != 0 {
 			t.Errorf("inline frame-buster with type=%q should be removed", typ)
 		}
 	}
 }
 
-// --- Completion Criterion: security / XSS ------------------------------------
+// --- Security / XSS ---------------------------------------------------------------
 
-// TestRewriteEscapesHostileURL covers Completion Criterion "a crafted upstream URL
-// containing \"><script> ends up escaped inside the attribute (no breakout)".
+// TestRewriteEscapesHostileURL covers "a crafted upstream URL containing
+// \"><script> ends up escaped inside the attribute (no breakout)".
 func TestRewriteEscapesHostileURL(t *testing.T) {
 	hostile := `/p"><script>alert(1)</script>`
 	out, err := rewriteHTML([]byte(`<a href='`+hostile+`'>x</a>`), mustParseURL(t, examplePage), "text/html", nil)
 	if err != nil {
 		t.Fatalf("rewriteHTML: %v", err)
 	}
-	s := string(out)
+	s := withoutInjectedShim(string(out))
 	// The raw breakout sequence must NOT appear literally in the output.
-	if strings.Contains(s, `"><script>alert(1)</script>`) {
-		t.Fatalf("hostile URL broke out of the attribute: %s", s)
+	if strings.Contains(s, `"><script>alert(1)</script>`) || strings.Contains(s, "<script>") {
+		t.Fatalf("hostile URL broke out of the attribute: %s", out)
 	}
-	// Re-parsing must yield exactly one <a> and zero injected <script> elements.
+	// Re-parsing must yield exactly one <a> and no upstream <script> elements.
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(out))
 	if err != nil {
 		t.Fatalf("re-parse: %v", err)
 	}
-	if doc.Find("script").Length() != 0 {
-		t.Fatalf("an injected <script> survived; output: %s", s)
+	if pageScripts(doc).Length() != 0 {
+		t.Fatalf("an injected <script> survived; output: %s", out)
 	}
-	href := attr(t, doc, "a", "href")
-	if !strings.HasPrefix(href, resourceBase+proxyPath+"?url=") {
-		t.Fatalf("a href = %q, want proxied + encoded", href)
+	if href := attr(t, doc, "a", "href"); !strings.HasPrefix(href, "http://example.com/p") {
+		t.Fatalf("a href = %q, want the absolute, escaped upstream URL", href)
 	}
 }
 
-// --- Completion Criterion: charset -------------------------------------------
+// --- Charset ----------------------------------------------------------------------
 
-// TestRewriteCharsetAware covers Completion Criterion "non-UTF-8 input is decoded
-// via x/net/html/charset and emitted as UTF-8".
+// TestRewriteCharsetAware covers "non-UTF-8 input is decoded via
+// x/net/html/charset and emitted as UTF-8".
 func TestRewriteCharsetAware(t *testing.T) {
 	// "café" in ISO-8859-1: é is 0xE9.
 	body := []byte("<html><head><meta charset=\"ISO-8859-1\"></head><body>caf\xe9</body></html>")
@@ -466,10 +661,10 @@ func TestRewriteCharsetAware(t *testing.T) {
 	}
 }
 
-// --- Completion Criterion: malformed HTML no panic ---------------------------
+// --- Malformed HTML ---------------------------------------------------------------
 
-// TestRewriteMalformedNoPanic covers Completion Criterion "malformed HTML does not
-// panic; rewriting still produces output".
+// TestRewriteMalformedNoPanic covers "malformed HTML does not panic; rewriting
+// still produces output".
 func TestRewriteMalformedNoPanic(t *testing.T) {
 	cases := []string{
 		`<html><body><img src="/a.png"`,       // unclosed tag
@@ -493,12 +688,12 @@ func TestRewriteMalformedNoPanic(t *testing.T) {
 	}
 }
 
-// --- Integration through ModifyResponse / prepareHTMLBody --------------------
+// --- Integration through ModifyResponse / prepareHTMLBody ---------------------------
 
-// TestRewriteThroughProxyIntegration covers Completion Criterion "rewriting runs
-// on plain (non-gzip) HTML through the full ModifyResponse path".
+// TestRewriteThroughProxyIntegration covers FR5 through the full /proxy path:
+// absolute upstream URLs, the base, the referrer meta and the shim.
 func TestRewriteThroughProxyIntegration(t *testing.T) {
-	const html = `<html><head><title>t</title></head><body><img src="/logo.png"><a href="/next">go</a></body></html>`
+	const html = `<html><head><title>t</title></head><body><img src="/logo.png" srcset="/logo2.png 2x"><a href="next">go</a></body></html>`
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if _, err := w.Write([]byte(html)); err != nil {
@@ -513,28 +708,38 @@ func TestRewriteThroughProxyIntegration(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got status %d, want 200 (body=%q)", rec.Code, rec.Body.String())
 	}
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(rec.Body.String()))
+	body := rec.Body.String()
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(body))
 	if err != nil {
 		t.Fatalf("parse proxied body: %v", err)
 	}
-	if got, _ := doc.Find("img").Attr("src"); !strings.HasPrefix(got, resourceBase+proxyResourcePath) {
-		t.Errorf("img not rewritten through proxy: %q", got)
+	if got := attr(t, doc, "img", "src"); got != "http://example.com/logo.png" {
+		t.Errorf("img src = %q, want http://example.com/logo.png", got)
 	}
-	if got, _ := doc.Find("a").Attr("href"); !strings.HasPrefix(got, resourceBase+proxyPath) {
-		t.Errorf("a not rewritten through proxy: %q", got)
+	if got := attr(t, doc, "img", "srcset"); got != "http://example.com/logo2.png 2x" {
+		t.Errorf("img srcset = %q, want http://example.com/logo2.png 2x", got)
 	}
-	if doc.Find("head base").Length() == 0 {
-		t.Error("base not injected through proxy")
+	if got := attr(t, doc, "a", "href"); got != "http://example.com/dir/next" {
+		t.Errorf("a href = %q, want http://example.com/dir/next", got)
+	}
+	if strings.Contains(body, "/api/plugins/") {
+		t.Errorf("rewritten body still references the Grafana plugin API: %s", body)
+	}
+	if doc.Find("head base").Length() != 1 || doc.Find(`meta[name="referrer"]`).Length() != 1 {
+		t.Error("base or referrer meta missing through proxy")
+	}
+	if strings.Count(body, sandboxCompatShim) != 1 {
+		t.Error("shim missing or duplicated through proxy")
 	}
 }
 
-// TestRewriteContentLengthUpdated covers Completion Criterion "Content-Length is
-// updated to the rewritten length through ModifyResponse".
+// TestRewriteContentLengthUpdated covers "Content-Length is updated to the
+// rewritten length through ModifyResponse".
 func TestRewriteContentLengthUpdated(t *testing.T) {
 	const html = `<html><body><img src="/a.png"></body></html>`
 	resp := &http.Response{Header: http.Header{}, Body: nopBody(html)}
 	resp.Header.Set("Content-Type", "text/html")
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
 		t.Fatalf("prepareHTMLBody: %v", err)
 	}
 	body := readAllString(t, resp)
@@ -544,20 +749,20 @@ func TestRewriteContentLengthUpdated(t *testing.T) {
 	if resp.ContentLength != int64(len(body)) {
 		t.Errorf("resp.ContentLength = %d, want %d", resp.ContentLength, len(body))
 	}
-	if !strings.Contains(body, resourceBase+proxyResourcePath) {
+	if !strings.Contains(body, "http://example.com/a.png") {
 		t.Errorf("body not rewritten: %q", body)
 	}
 }
 
-// TestNonHTMLByteIdenticalPassthrough covers Completion Criterion "non-HTML
-// responses pass through byte-identical (regression)". A non-HTML body must NOT
-// be rewritten even if it looks like HTML.
+// TestNonHTMLByteIdenticalPassthrough covers "non-HTML responses pass through
+// byte-identical (regression)". A non-HTML body must NOT be rewritten even if
+// it looks like HTML.
 func TestNonHTMLByteIdenticalPassthrough(t *testing.T) {
 	const payload = `<html><body><img src="/a.png"></body></html>` // looks like HTML, but JSON content-type
 	resp := &http.Response{Header: http.Header{}, Body: nopBody(payload)}
 	resp.Header.Set("Content-Type", "application/json")
 	resp.ContentLength = int64(len(payload))
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil); err != nil {
+	if err := prepareHTMLBody(context.Background(), resp, 1<<20, mustParseURL(t, examplePage), nil); err != nil {
 		t.Fatalf("prepareHTMLBody: %v", err)
 	}
 	if body := readAllString(t, resp); body != payload {
@@ -565,37 +770,66 @@ func TestNonHTMLByteIdenticalPassthrough(t *testing.T) {
 	}
 }
 
-// TestRewriteFailureDegradesToOriginal covers Completion Criterion "a rewriteHTML
-// failure serves the DECODED ORIGINAL HTML (status 200), NOT a 502". It swaps in
-// a deterministically-failing rewriter via the htmlRewriter seam, drives
-// prepareHTMLBody, and asserts: no error is returned (so the ReverseProxy serves
-// 200), the ORIGINAL body bytes are preserved verbatim, and Content-Length
-// matches the original length.
-func TestRewriteFailureDegradesToOriginal(t *testing.T) {
+// TestRewriteFailureFailsClosed covers RV2: a rewriter failure other than the
+// size limit fails closed. prepareHTMLBody returns an error that wraps
+// errRewriteFailed (so the ReverseProxy sends 502), and the un-rewritten
+// original is never placed on the response.
+func TestRewriteFailureFailsClosed(t *testing.T) {
 	orig := htmlRewriter
 	t.Cleanup(func() { htmlRewriter = orig })
-	htmlRewriter = func(_ []byte, _ *url.URL, _ string, _ []string) ([]byte, error) {
+	htmlRewriter = func(_ []byte, _ *url.URL, _ string, _ []string, _ int64) ([]byte, error) {
 		return nil, errInjectedRewriteFailure
 	}
 
 	const html = `<html><body><img src="/a.png">original</body></html>`
-	resp := &http.Response{Header: http.Header{}, Body: nopBody(html)}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: nopBody(html)}
 	resp.Header.Set("Content-Type", "text/html")
 
-	if err := prepareHTMLBody(resp, 1<<20, mustParseURL(t, examplePage), nil, nil); err != nil {
-		t.Fatalf("prepareHTMLBody must NOT return an error on rewrite failure (degrade): %v", err)
+	err := prepareHTMLBody(context.Background(), resp, 1<<20, mustParseURL(t, examplePage), nil)
+	if !errors.Is(err, errRewriteFailed) || !errors.Is(err, errInjectedRewriteFailure) {
+		t.Fatalf("prepareHTMLBody error = %v, want errRewriteFailed wrapping the rewriter error", err)
 	}
-	body := readAllString(t, resp)
-	if body != html {
-		t.Errorf("degraded body = %q, want the DECODED ORIGINAL %q", body, html)
+	rec := httptest.NewRecorder()
+	if reason := proxyErrorHandler(rec, nil, err); reason != denialReasonUpstream || rec.Code != http.StatusBadGateway {
+		t.Fatalf("proxyErrorHandler = %q/%d, want %q/502", reason, rec.Code, denialReasonUpstream)
 	}
-	if resp.Header.Get("Content-Length") != itoa(len(html)) {
-		t.Errorf("Content-Length = %q, want %d", resp.Header.Get("Content-Length"), len(html))
+	if strings.Contains(rec.Body.String(), "original") {
+		t.Errorf("error body leaks the original page: %q", rec.Body.String())
+	}
+}
+
+// TestProxyParseFailureFailsClosed covers RV2 through /proxy: a document nested
+// deeper than the HTML parser accepts (more than 512 open elements) is a 502
+// with none of the upstream markup, not the un-rewritten original.
+func TestProxyParseFailureFailsClosed(t *testing.T) {
+	page := "<html><head></head><body>" + strings.Repeat("<div>", 600) + "secret-marker" + strings.Repeat("</div>", 600) + "</body></html>"
+	for _, gz := range []bool{false, true} {
+		t.Run(map[bool]string{false: "plain", true: "gzip"}[gz], func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				body := []byte(page)
+				if gz {
+					w.Header().Set("Content-Encoding", "gzip")
+					body = gzipBytes(t, body)
+				}
+				_, _ = w.Write(body)
+			}))
+			defer upstream.Close()
+			p := newTestHandler(t, settingsWith(allowExample(DomainOptions{})), upstream)
+
+			rec := doProxy(p, "http://example.com/deep")
+			if rec.Code != http.StatusBadGateway {
+				t.Fatalf("status = %d, want 502", rec.Code)
+			}
+			if strings.Contains(rec.Body.String(), "secret-marker") || strings.Contains(rec.Body.String(), "<div>") {
+				t.Errorf("502 body leaks upstream markup: %.200q", rec.Body.String())
+			}
+		})
 	}
 }
 
 // errInjectedRewriteFailure is the deterministic error a test rewriter returns to
-// exercise the degradation path.
+// exercise the fail-closed path.
 var errInjectedRewriteFailure = errorString("injected rewrite failure")
 
 type errorString string

@@ -33,14 +33,19 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
 # --- Required AC test functions (single source of truth) ---------------------
-# Format: "AC<nn>:TestFunctionName". Each entry must produce a `--- PASS:` line.
-# AC -> test mapping for the backend security suite (AC 17-29):
+# Format: "<label>:TestFunctionName" (the label must not contain ':'). Each
+# entry must produce a `--- PASS:` line.
+# AC -> test mapping for the backend security suite (AC 17-29, 31):
 #   TC1: AC 17-22 in pkg/plugin/proxy_security_ssrf_test.go
 #   TC2: AC 23-29 in pkg/plugin/proxy_security_limits_test.go
+#   AC 19 opt-in: pkg/plugin/proxy_ac19_optin_test.go
+#   AC 31 (hide-selector markup injection): pkg/plugin/rewrite_cr5_test.go
+# Security-review fixes (VR-n, 2026-06-10 review) and v1.0.0 review fixes
+# (RV1-n, RV2) follow the AC entries.
 REQUIRED_TESTS=(
   # TC1 - SSRF / allowlist / blocklist / schemes (AC 17-22)
   "AC17:TestTC1AC17FreshInstallEmptyAllowlistFailsClosed"
-  "AC18:TestTC1AC18AllowlistEnforcedOnAllThreeEndpoints"
+  "AC18:TestTC1AC18AllowlistEnforcedOnAllEndpoints"
   "AC19:TestTC1AC19AllowlistedHostResolvingToPrivateIsBlocked"
   "AC20:TestTC1AC20MetadataAndLinkLocalBlockedRegardlessOfAllowlist"
   "AC21:TestTC1AC21DNSRebindingPrevented"
@@ -58,15 +63,47 @@ REQUIRED_TESTS=(
   "AC28:TestSecurityTC2_AC28_AuditEntryEmittedOnDenial"
   "AC29:TestSecurityTC2_AC29_AllFourMetricFamiliesExposed"
   "AC29:TestSecurityTC2_AC29_MetricsIncrementOnSuccessAndDenial"
+  # AC 19 private-IP opt-in and AC 31 hide-selector markup injection
+  "AC19:TestAC19OptInStillBlocksNonRFC1918"
+  "AC19:TestAC19ConnectionReuseHazardMitigated"
+  "AC31:TestCR5MarkupInjectionAttemptInjectsNoMarkup"
+  # Security review fixes
+  "VR3:TestCheckFrameableRoleMatrix"
+  "VR3:TestCheckFrameableRoleGateRunsFirst"
+  "VR5:TestProxyStripsRefreshHeader"
+  "VR6:TestProxyGzipBombBounded"
+  "VR6:TestProxyUnsupportedContentEncodingRejected"
+  "VR7:TestProxyOversizeUndeclaredLengthIsCleanError"
+  "VR11:TestProxyBlocksTranslatedInternalAddresses"
+  "VR11:TestClassifyIPTranslationPrefixes"
+  "VR11:TestClassifyIPPolicyTranslatedPrivateNotRelaxed"
+  "CORS:TestProxySendsNoCORSHeaders"
+  "CORS:TestCheckFrameableNoCORS"
+  "FR5:TestProxyResourceRouteRemoved"
+  # v1.0.0 review fixes (RV2)
+  "RV2:TestProxyParseFailureFailsClosed"
+  "RV2:TestProxyHostileParseRefused413"
+  "RV2:TestRewriteSlotsBoundConcurrency"
+  "RV2:TestParseMatchesUpstream"
+  "RV1-8:TestUpstreamFailureDetailOnlyInServerLog"
+  "RV1-9:TestDomainRateLimitKeyedOnAllowlistEntry"
+  "RV1-23:TestAuditRedactsQueryAndUsesContextLogger"
+  # Hide-selector CPU bounds (CR5 hardening)
+  "CR5:TestProxyRefusesExpensiveHideSelectors"
+  "CR5:TestHideCombinatorChainsAreLinear"
+  "CR5:TestHideMatchBudgetStopsQuadraticSelectors"
+  "CR5:TestHideMatchBudgetChargesEverySimpleSelector"
+  "CR5:TestHideSelectorsHideEachElementOnce"
+  "CR5:TestHideMatcherAgreesWithCascadiaRandom"
 )
 
 # Packages that contain (or may contain) the mandatory security tests.
-SECURITY_PACKAGES="./pkg/plugin/... ./pkg/security/..."
+SECURITY_PACKAGES="./pkg/plugin/... ./pkg/security/... ./pkg/internal/htmlparse/..."
 
 # --- Gap 1: the backend must exist -------------------------------------------
 if [ ! -f "Magefile.go" ]; then
   echo "FAIL: Magefile.go not found - backend is missing, security suite cannot run." >&2
-  echo "      The mandatory security suite (AC 17-29) MUST execute on every PR." >&2
+  echo "      The mandatory security suite MUST execute on every PR." >&2
   exit 1
 fi
 
@@ -82,7 +119,7 @@ for entry in "${REQUIRED_TESTS[@]}"; do
 done
 run_regexp="${run_regexp})\$"
 
-echo "Running mandatory security suite (AC 17-29)..."
+echo "Running mandatory security suite (${#REQUIRED_TESTS[@]} required tests)..."
 echo "  packages: ${SECURITY_PACKAGES}"
 echo "  -run:     ${run_regexp}"
 echo
@@ -112,7 +149,10 @@ for entry in "${REQUIRED_TESTS[@]}"; do
   # `go test -v` prints "--- PASS: TestName (0.00s)". A skipped test prints
   # "--- SKIP:" and a failure "--- FAIL:", neither of which matches, so any
   # state other than PASS for a required test is treated as missing/failing.
-  if printf '%s\n' "${test_output}" | grep -Eq -- "^[[:space:]]*--- PASS: ${fn}\b"; then
+  # grep reads a here-string, not a pipe: `grep -q` exits at the first match,
+  # and under `set -o pipefail` the writer's SIGPIPE would fail the pipeline
+  # and mark a passing test as missing.
+  if grep -Eq -- "^[[:space:]]*--- PASS: ${fn}\b" <<<"${test_output}"; then
     echo "  [PASS] ${ac} ${fn}"
   else
     echo "  [MISS] ${ac} ${fn}  (no '--- PASS:' line - missing, renamed, skipped, or failed)"
@@ -131,4 +171,4 @@ if [ "${missing}" -ne 0 ]; then
   exit 1
 fi
 
-echo "OK: all required security tests (AC 17-29) passed."
+echo "OK: all ${#REQUIRED_TESTS[@]} required security tests passed."

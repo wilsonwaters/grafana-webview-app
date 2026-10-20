@@ -3,10 +3,13 @@ package plugin
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/grafana/grafana-plugin-sdk-go/backend"
 	"github.com/wilsonwaters/webview/pkg/security"
 )
 
@@ -60,7 +63,7 @@ func (h checkFrameableHandler) ServeHTTP(w http.ResponseWriter, req *http.Reques
 
 // checkFrameable implements the /check-frameable endpoint contract (Q7).
 //
-// It runs the EXACT same pre-fetch security pipeline as /proxy's serve — parse
+// It runs the EXACT same pre-fetch security pipeline as /proxy (ServeHTTP) — parse
 // `url` → SF2 hostname normalise → SF3 allowlist match (empty allowlist denies)
 // → SF2 full ValidateURL with the matched domain's extra ports → SF5 rate-limit
 // then concurrency Acquire — reusing writeDenial / the reasonStatus table so the
@@ -74,21 +77,35 @@ func (h checkFrameableHandler) ServeHTTP(w http.ResponseWriter, req *http.Reques
 // HTTP 200 with the {frameable, reason, recommendedMode} JSON verdict. A fetch
 // error/timeout, or a redirect with no framing verdict, is treated as
 // proxy-recommended (the proxy is more robust): still HTTP 200, frameable:false.
+//
+// VR-3: the endpoint is for panel editors only, so the first gate is the org
+// role (Editor or Admin). It runs before any other check, so a Viewer cannot
+// use the endpoint to learn which hosts are allowlisted. Like /proxy, every
+// request emits one audit entry and one metrics observation (endpoint
+// "check-frameable"), including the role denial.
 func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) {
-	// CORS preflight / method handling mirrors /proxy: this is a GET endpoint.
-	setCORSHeaders(w.Header())
-	if req.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
+	a := p.beginAudit(w, endpointCheckFrameable)
+	defer p.endAudit(req, a)
+	w = a.rec
+
+	// Same-origin only (R1 D2): no CORS headers and no preflight handling.
+	rawTarget := strings.TrimSpace(req.URL.Query().Get("url"))
+	if rawTarget != "" {
+		a.url = rawTarget
 	}
-	if req.Method != http.MethodGet {
-		writeDenial(w, denialReasonMethod, "method not allowed")
+
+	if !hasEditorRole(req.Context()) {
+		a.denied = writeJSONDenial(w, denialReasonRole, "The URL test requires the Editor or Admin role.")
 		return
 	}
 
-	rawTarget := req.URL.Query().Get("url")
-	if strings.TrimSpace(rawTarget) == "" {
-		writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
+	if req.Method != http.MethodGet {
+		a.denied = writeDenial(w, denialReasonMethod, "method not allowed")
+		return
+	}
+
+	if rawTarget == "" {
+		a.denied = writeDenial(w, denialReasonBadRequest, "missing required 'url' query parameter")
 		return
 	}
 
@@ -96,34 +113,37 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 	// matched domain's extra ports before the authoritative ValidateURL.
 	hostname, herr := hostnameOf(rawTarget)
 	if herr != nil {
-		writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(herr))
+		a.url = auditInvalidURL
+		a.denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(herr))
 		return
 	}
 
 	// SF3: allowlist match (empty/nil allowlist denies everything, fail-closed).
 	match := security.MatchHostname(hostname, p.allowlist)
 	if !match.Allowed {
-		writeDenial(w, denialReasonAllowlist, "target host is not allowlisted")
+		a.denied = writeDenial(w, denialReasonAllowlist, "target host is not allowlisted")
 		return
 	}
+	a.allowPrivate = match.Options.AllowPrivateIP
 
 	// SF2: full validation of scheme/userinfo/host/port, allowing the matched
 	// domain's extra ports. All failures are client errors ⇒ 400.
 	validated, err := security.ValidateURL(rawTarget, match.Options.AllowedPorts)
 	if err != nil {
-		writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(err))
+		a.denied = writeDenial(w, denialReasonScheme, "invalid target URL: "+security.ReasonOf(err))
 		return
 	}
 
-	// SF5: rate-limit tiers (per instance, per domain), then the concurrency cap.
+	// SF5: rate-limit tiers (per instance, per matched allowlist entry), then
+	// the concurrency cap.
 	instanceID := instanceIDFromContext(req)
-	if allowed, reason := p.rateLimiter.Allow(instanceID, validated.Hostname); !allowed {
-		writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
+	if allowed, reason := p.rateLimiter.Allow(instanceID, match.Domain); !allowed {
+		a.denied = writeDenial(w, denialReasonRateLimit, "rate limit exceeded: "+reason)
 		return
 	}
 	release, ok := p.rateLimiter.Acquire()
 	if !ok {
-		writeDenial(w, denialReasonConcurrency, "too many concurrent proxy requests")
+		a.denied = writeDenial(w, denialReasonConcurrency, "too many concurrent proxy requests")
 		return
 	}
 	defer release()
@@ -133,9 +153,10 @@ func (p *proxyHandler) checkFrameable(w http.ResponseWriter, req *http.Request) 
 	// pipeline approved.
 	target, perr := buildTargetURL(rawTarget, validated)
 	if perr != nil {
-		writeDenial(w, denialReasonBadRequest, "invalid target URL")
+		a.denied = writeDenial(w, denialReasonBadRequest, "invalid target URL")
 		return
 	}
+	a.url = target.String()
 
 	// Every gate passed: perform the framing check. SF4's resolve-then-dial +
 	// IP blocklist run inside p.transport at connect time, so a blocked/metadata
@@ -195,26 +216,22 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 	reqCtx, cancel := context.WithTimeout(security.WithPolicy(ctx, pol), p.frameableTimeout())
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil)
+	// Fetching a user-supplied URL is the purpose of this endpoint. targetURL
+	// passed the allowlist and URL validation, and p.transport dials only
+	// addresses that pass the IP blocklist (resolve-then-dial with a
+	// connect-time re-check).
+	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodGet, targetURL, nil) //nolint:gosec // G704: validated target, guarded dialer (see above)
 	if err != nil {
-		return frameableResponse{
-			Frameable:       false,
-			Reason:          "upstream unreachable: " + err.Error(),
-			RecommendedMode: recommendedModeProxy,
-		}
+		return p.unreachableVerdict(ctx, targetURL, err)
 	}
 	// Apply the same outbound header hygiene spirit as the proxy: identify
 	// honestly and leak nothing about the Grafana instance/viewer.
 	httpReq.Header.Set("User-Agent", proxyUserAgent)
 	httpReq.Header.Set("Accept", proxyAccept)
 
-	resp, err := client.Do(httpReq)
+	resp, err := client.Do(httpReq) //nolint:gosec // G704: validated target, guarded dialer (see NewRequestWithContext above)
 	if err != nil {
-		return frameableResponse{
-			Frameable:       false,
-			Reason:          "upstream unreachable: " + err.Error(),
-			RecommendedMode: recommendedModeProxy,
-		}
+		return p.unreachableVerdict(ctx, targetURL, err)
 	}
 	// Close the body without reading it: the verdict comes from headers only.
 	defer func() { _ = resp.Body.Close() }()
@@ -229,22 +246,54 @@ func (p *proxyHandler) checkFrameableVerdict(ctx context.Context, targetURL stri
 		}
 	}
 
-	return frameingVerdictFromHeaders(resp.Header)
+	return framingVerdictFromHeaders(resp.Header)
 }
 
-// frameingVerdictFromHeaders inspects the framing-relevant response headers and
+// unreachableVerdict is the proxy-recommended verdict for a framing check whose
+// fetch failed. The reason given to the caller names only the class of
+// failure: the error itself can hold the resolved IP addresses of the target
+// (for example a blocked internal address), so it goes to the server log only.
+func (p *proxyHandler) unreachableVerdict(ctx context.Context, targetURL string, err error) frameableResponse {
+	p.logger.FromContext(ctx).Warn("check-frameable fetch failed", "url", redactURL(targetURL), "error", redactErrorURL(err))
+	return frameableResponse{
+		Frameable:       false,
+		Reason:          "upstream unreachable: " + fetchFailureReason(err),
+		RecommendedMode: recommendedModeProxy,
+	}
+}
+
+// fetchFailureReason describes why an upstream fetch failed without any detail
+// from the error message (no host names, IP addresses or ports).
+func fetchFailureReason(err error) string {
+	switch security.DialReasonOf(err) {
+	case security.ReasonBlockedIP:
+		return "the host resolves to a blocked address"
+	case security.ReasonMetadataHost:
+		return "the host is a blocked cloud-metadata endpoint"
+	case security.ReasonResolveFailed, security.ReasonNoHost:
+		return "the host could not be resolved"
+	}
+	var netErr net.Error
+	if errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &netErr) && netErr.Timeout()) {
+		return "the request timed out"
+	}
+	return "the connection failed"
+}
+
+// framingVerdictFromHeaders inspects the framing-relevant response headers and
 // returns the Q7 verdict.
 //
-// X-Frame-Options: a value of DENY or SAMEORIGIN (case-insensitive) blocks
-// framing in a third-party (Grafana) origin.
+// X-Frame-Options: every value of every X-Frame-Options line is read (see
+// xFrameOptionsBlocks); DENY or SAMEORIGIN blocks framing in a third-party
+// (Grafana) origin.
 //
 // CSP frame-ancestors (conservative rule): the backend does NOT know the
 // Grafana origin, so it cannot prove a source list permits it. Therefore a
 // present frame-ancestors directive blocks UNLESS its source list contains the
 // wildcard `*` (which allows any origin). 'none' blocks outright. An ABSENT
 // frame-ancestors directive does not block via CSP.
-func frameingVerdictFromHeaders(h http.Header) frameableResponse {
-	if blocked, reason := xFrameOptionsBlocks(h.Get("X-Frame-Options")); blocked {
+func framingVerdictFromHeaders(h http.Header) frameableResponse {
+	if blocked, reason := xFrameOptionsBlocks(h.Values("X-Frame-Options")); blocked {
 		return frameableResponse{Frameable: false, Reason: reason, RecommendedMode: recommendedModeProxy}
 	}
 
@@ -262,16 +311,44 @@ func frameingVerdictFromHeaders(h http.Header) frameableResponse {
 	}
 }
 
-// xFrameOptionsBlocks reports whether an X-Frame-Options header value blocks
-// framing in a third-party origin. DENY and SAMEORIGIN both block (we are not
-// same-origin with the upstream). Matching is case-insensitive and tolerant of
-// surrounding whitespace. An empty or unrecognised value (e.g. a legacy
-// ALLOW-FROM, which modern browsers ignore) does not block here.
-func xFrameOptionsBlocks(value string) (bool, string) {
-	switch strings.ToUpper(strings.TrimSpace(value)) {
-	case "DENY":
+// xFrameOptionsMultipleReason is the verdict reason when the X-Frame-Options
+// lines hold more than one distinct value and one of them blocks.
+const xFrameOptionsMultipleReason = "X-Frame-Options: multiple values"
+
+// xFrameOptionsBlocks reports whether the X-Frame-Options header lines block
+// framing in a third-party origin, following the HTML standard's processing:
+// the values of all lines are split on commas, trimmed and lowercased into a
+// set. One distinct value blocks when it is "deny" or "sameorigin" (the
+// Grafana page is not same-origin with the upstream). More than one distinct
+// value blocks when any of them is "deny", "sameorigin" or "allowall", so
+// "SAMEORIGIN, SAMEORIGIN" and a second DENY line both block. No header, or a
+// single unrecognised value (a legacy ALLOW-FROM, which browsers ignore), does
+// not block. The reason for more than one value is fixed text
+// (xFrameOptionsMultipleReason), so the verdict never repeats an upstream's
+// header values.
+func xFrameOptionsBlocks(lines []string) (bool, string) {
+	values := map[string]bool{}
+	var order []string
+	for _, line := range lines {
+		for _, v := range strings.Split(line, ",") {
+			v = strings.ToLower(strings.TrimSpace(v))
+			if !values[v] {
+				values[v] = true
+				order = append(order, v)
+			}
+		}
+	}
+	switch {
+	case len(order) == 0:
+		return false, ""
+	case len(order) > 1:
+		if values["deny"] || values["sameorigin"] || values["allowall"] {
+			return true, xFrameOptionsMultipleReason
+		}
+		return false, ""
+	case order[0] == "deny":
 		return true, "X-Frame-Options: DENY"
-	case "SAMEORIGIN":
+	case order[0] == "sameorigin":
 		return true, "X-Frame-Options: SAMEORIGIN"
 	default:
 		return false, ""
@@ -280,7 +357,7 @@ func xFrameOptionsBlocks(value string) (bool, string) {
 
 // cspFrameAncestorsBlocks parses a single Content-Security-Policy header value
 // for a frame-ancestors directive and applies the conservative blocking rule
-// (see frameingVerdictFromHeaders). It returns (true, reason) when the directive
+// (see framingVerdictFromHeaders). It returns (true, reason) when the directive
 // is present and does NOT permit any origin via `*`.
 func cspFrameAncestorsBlocks(csp string) (bool, string) {
 	for _, directive := range strings.Split(csp, ";") {
@@ -316,6 +393,51 @@ func cspFrameAncestorsBlocks(csp string) (bool, string) {
 		return true, "CSP frame-ancestors: restrictive source list"
 	}
 	return false, ""
+}
+
+// Grafana basic org roles that may call /check-frameable (VR-3). Grafana sends
+// the role in the plugin context as "Viewer", "Editor", "Admin" or "None".
+const (
+	orgRoleEditor = "Editor"
+	orgRoleAdmin  = "Admin"
+)
+
+// hasEditorRole reports whether the request's Grafana user has the Editor or
+// Admin org role. A request with no plugin context user, an empty role, Viewer,
+// None or any unknown value fails closed. The check uses the basic org role
+// only: a user whose basic role is Viewer but who can edit dashboards through a
+// custom RBAC role is denied.
+func hasEditorRole(ctx context.Context) bool {
+	u := backend.PluginConfigFromContext(ctx).User
+	if u == nil {
+		return false
+	}
+	role := strings.TrimSpace(u.Role)
+	return strings.EqualFold(role, orgRoleEditor) || strings.EqualFold(role, orgRoleAdmin)
+}
+
+// jsonDenial is the body of a JSON denial. The panel editor shows `message`
+// (see extractErrorMessage in FrameabilityEditor.tsx).
+type jsonDenial struct {
+	Error   string `json:"error"`
+	Reason  string `json:"reason"`
+	Message string `json:"message"`
+}
+
+// writeJSONDenial is writeDenial with a JSON body. The status comes from the
+// same reasonStatus table, so the status and the metric reason cannot drift.
+func writeJSONDenial(w http.ResponseWriter, reason, message string) string {
+	status := statusForReason(reason)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
+	// The status is already sent; a failed body write cannot be reported.
+	_ = json.NewEncoder(w).Encode(jsonDenial{
+		Error:   http.StatusText(status),
+		Reason:  reason,
+		Message: message,
+	})
+	return reason
 }
 
 // writeFrameableResponse writes the verdict as HTTP 200 JSON. An encode failure

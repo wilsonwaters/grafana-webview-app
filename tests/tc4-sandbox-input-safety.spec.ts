@@ -1,19 +1,25 @@
 import { test, expect } from './fixtures';
 import { webViewPanelTestIds } from '../src/panels/webview/components/testIds';
 import { frameabilityEditorTestIds } from '../src/panels/webview/components/frameabilityEditorTestIds';
+import { viewportEditorTestIds } from '../src/panels/webview/components/viewportEditorTestIds';
 import { setWebViewVisualization, FRAMABLE_URL } from './tc4Helpers';
 
 /**
- * TC4 — sandbox hardening (AC30) and editor-input safety (AC31, FR5-deferred).
+ * TC4 — sandbox hardening (AC30, VR-2), URL safety (VR-1) and editor-input
+ * safety (AC31).
  *
  * Covers:
- *   - AC 30: the rendered view-mode iframe uses EXACTLY
+ *   - AC 30 / VR-2: a direct-mode iframe for a cross-origin URL (example.com is
+ *     cross-origin to Grafana) uses EXACTLY
  *     sandbox="allow-scripts allow-same-origin" (never broadened) and is
- *     non-interactive (pointer-events: none). Observable directly on the DOM.
+ *     non-interactive (pointer-events: none). The per-mode sandbox is computed:
+ *     a proxy-mode iframe gets sandbox="allow-scripts" only, which
+ *     fr5-proxy-render.spec.ts asserts.
+ *   - VR-1: an unsafe URL (javascript:) renders an error message, never an
+ *     iframe, in the panel and in the editor preview.
  *   - AC 31 (scoped): the AUTHORITATIVE CSS-selector injection guard is
  *     server-side (CR5, cascadia-validated, unit-tested in rewrite_cr5_test.go)
- *     and only applies to PROXIED HTML — which does NOT render in-panel in v1
- *     (FR5 deferred, issue #102). What is observable in the editor is that a
+ *     and applies to PROXIED HTML. What is observable in the editor is that a
  *     malicious selector-like / markup value entered in a text field does not
  *     break the editor and is not reflected as raw markup into Grafana's page.
  *     v1 exposes no dedicated hideSelectors field, so the URL field is used as
@@ -21,9 +27,6 @@ import { setWebViewVisualization, FRAMABLE_URL } from './tc4Helpers';
  *
  * Theme coverage (AC35) lives in tc4-theme-light.spec.ts / tc4-theme-dark.spec.ts
  * (separate files because userPreferences.theme is a worker-scoped option).
- *
- * SCOPE NOTE (FR5 deferred): no test here asserts proxied content renders inside
- * the panel — only direct render + DOM attributes + input safety.
  */
 
 test.describe('TC4 sandbox + direct render (AC30)', () => {
@@ -40,8 +43,8 @@ test.describe('TC4 sandbox + direct render (AC30)', () => {
     // Direct render of a framable URL.
     await expect(iframe).toHaveAttribute('src', FRAMABLE_URL);
 
-    // AC30: sandbox must be EXACTLY this — never broadened (no allow-popups,
-    // allow-top-navigation, allow-forms, allow-modals, etc.).
+    // AC30 / VR-2: a cross-origin direct URL gets EXACTLY this — never broadened
+    // (no allow-popups, allow-top-navigation, allow-forms, allow-modals, etc.).
     await expect(iframe).toHaveAttribute('sandbox', 'allow-scripts allow-same-origin');
 
     // AC30: the iframe is non-interactive in view mode.
@@ -59,14 +62,47 @@ test.describe('TC4 sandbox + direct render (AC30)', () => {
   });
 });
 
-test.describe('TC4 editor-input safety (AC31, FR5-deferred scope)', () => {
+test.describe('TC4 URL safety (VR-1)', () => {
+  test('a javascript: URL renders an error and no iframe in the panel and the editor preview', async ({
+    panelEditPage,
+    page,
+  }) => {
+    test.setTimeout(180000);
+    await setWebViewVisualization(panelEditPage, page);
+
+    // A dialog would mean the script ran. Fail the test if one opens.
+    let dialogOpened = false;
+    page.on('dialog', async (dialog) => {
+      dialogOpened = true;
+      await dialog.dismiss();
+    });
+
+    await page.getByRole('textbox', { name: 'URL' }).fill('javascript:alert(document.domain)');
+    await page.keyboard.press('Tab');
+
+    // Panel: an accessible error message, no iframe.
+    const panelError = panelEditPage.panel.locator.getByTestId(webViewPanelTestIds.invalidUrl);
+    await expect(panelError).toBeVisible({ timeout: 10000 });
+    await expect(panelError).toHaveAttribute('role', 'alert');
+    await expect(panelEditPage.panel.locator.locator('iframe')).toHaveCount(0);
+
+    // Editor preview: the same error, no iframe.
+    const preview = page.getByTestId(viewportEditorTestIds.preview);
+    await preview.scrollIntoViewIfNeeded();
+    await expect(preview.getByTestId(viewportEditorTestIds.invalidUrl)).toBeVisible();
+    await expect(preview.locator('iframe')).toHaveCount(0);
+
+    expect(dialogOpened).toBe(false);
+  });
+});
+
+test.describe('TC4 editor-input safety (AC31)', () => {
   // NOTE: the authoritative AC31 guard (CSS-selector injection) is enforced
   // server-side during proxied HTML rewriting (CR5, cascadia-validated and
-  // unit-tested in pkg/.../rewrite_cr5_test.go). It applies ONLY to proxied HTML,
-  // which does not render in-panel in v1 (FR5 deferred — issue #102). This e2e is
-  // therefore scoped to what is observable in the editor: a malicious
-  // selector-like / markup value entered into a text field must NOT break the
-  // editor and must NOT be reflected as raw markup into Grafana's page.
+  // unit-tested in pkg/.../rewrite_cr5_test.go). This e2e is scoped to what is
+  // observable in the editor: a malicious selector-like / markup value entered
+  // into a text field must NOT break the editor and must NOT be reflected as
+  // raw markup into Grafana's page.
   test('malicious selector/markup in an editor field does not break the editor or inject markup', async ({
     panelEditPage,
     page,
@@ -74,9 +110,8 @@ test.describe('TC4 editor-input safety (AC31, FR5-deferred scope)', () => {
     test.setTimeout(180000);
     await setWebViewVisualization(panelEditPage, page);
 
-    // A value combining CSS-injection and HTML/script-injection probes. v1 has no
-    // dedicated hideSelectors field, so the URL field is the author-controlled
-    // text input we exercise.
+    // A value combining CSS-injection and HTML/script-injection probes, entered
+    // into the URL field and the Hide elements (selector) field.
     const malicious = '"><img src=x onerror=alert(1)>}*{display:none}</style><script>alert(2)</script>';
 
     const urlField = page.getByRole('textbox', { name: 'URL' });
@@ -86,6 +121,13 @@ test.describe('TC4 editor-input safety (AC31, FR5-deferred scope)', () => {
     // The editor remains functional: the URL field still holds the raw value
     // (treated as data, not interpreted).
     await expect(urlField).toHaveValue(malicious);
+
+    // VR-1: the value is not an absolute http(s) URL, so the panel shows an
+    // error instead of an iframe.
+    await expect(panelEditPage.panel.locator.getByTestId(webViewPanelTestIds.invalidUrl)).toBeVisible({
+      timeout: 10000,
+    });
+    await expect(panelEditPage.panel.locator.locator('iframe')).toHaveCount(0);
 
     // No raw markup injection: neither the injected <img> nor <script> probe is a
     // live element anywhere in Grafana's page DOM.
@@ -98,8 +140,21 @@ test.describe('TC4 editor-input safety (AC31, FR5-deferred scope)', () => {
     await preview.scrollIntoViewIfNeeded();
     await expect(preview).toBeVisible();
 
-    // The Test URL button is still operable (the editor did not crash).
+    // The Test URL control still renders (the editor did not crash). It never
+    // sends an invalid URL: the button is disabled and a hint says why.
     const testButton = page.getByTestId(frameabilityEditorTestIds.testButton);
-    await expect(testButton).toBeEnabled();
+    await testButton.scrollIntoViewIfNeeded();
+    await expect(testButton).toBeDisabled();
+    await expect(page.getByTestId(frameabilityEditorTestIds.invalidUrlHint)).toContainText('cannot be tested');
+
+    // The same value in the selector field is kept as data and injects nothing.
+    const hideField = page.getByRole('textbox', { name: 'Hide elements (proxy mode)' });
+    await hideField.scrollIntoViewIfNeeded();
+    await hideField.fill(malicious);
+    await hideField.blur();
+    await expect(hideField).toHaveValue(malicious);
+    expect(await page.locator('img[src="x"]').count()).toBe(0);
+    expect(await page.locator('script:has-text("alert(2)")').count()).toBe(0);
+    await expect(preview).toBeVisible();
   });
 });

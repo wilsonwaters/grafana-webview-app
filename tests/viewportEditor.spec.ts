@@ -1,4 +1,5 @@
 import { test, expect } from './fixtures';
+import { setWebViewVisualization } from './tc4Helpers';
 
 /**
  * PC3 runtime verification: the interactive config-mode viewport editor.
@@ -10,17 +11,7 @@ test.describe('Viewport editor (PC3)', () => {
   test('drag pans and wheel zooms the preview, updating the live readout', async ({ panelEditPage, page }) => {
     test.setTimeout(120000);
 
-    // setVisualization is known-flaky; retry a few times.
-    for (let i = 0; i < 3; i++) {
-      try {
-        await panelEditPage.setVisualization('Web View');
-        break;
-      } catch {
-        if (i === 2) {
-          throw new Error('setVisualization failed after retries');
-        }
-      }
-    }
+    await setWebViewVisualization(panelEditPage, page);
     await expect(panelEditPage.getVisualizationName()).toHaveText('Web View');
 
     await page.getByRole('textbox', { name: 'URL' }).fill('https://example.com');

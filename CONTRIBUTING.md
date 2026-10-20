@@ -27,8 +27,10 @@ For questions, ideas, or general discussion, use [GitHub Discussions](https://gi
 ## Development Setup
 
 This is a Grafana **app plugin** with a TypeScript/React frontend and a Go
-backend. You need Node.js (>= 22, see `.nvmrc`), Go (version per `go.mod`),
-[Mage](https://magefile.org/), and Docker with Docker Compose.
+backend. You need Node.js (>= 22, see `.nvmrc`), Go 1.27.2 (per `go.mod`),
+[Mage](https://magefile.org/), and Docker with Docker Compose. On Windows, run
+the Node toolchain in a Linux container or WSL (see the
+[Developer guide](docs/developer-guide.md#windows-workstations)).
 
 ```bash
 # 1. Install frontend dependencies
@@ -44,7 +46,10 @@ mage -v build:linux
 npm run server          # equivalent to `docker compose up --build`
 ```
 
-Default local credentials are `admin` / `admin`.
+The local Grafana signs you in automatically as an anonymous **Admin**, runs in
+development mode and loads the unsigned plugin. It is for local development
+only: never expose it to an untrusted network or copy its settings to a
+production Grafana.
 
 End-to-end tests use [`@grafana/plugin-e2e`](https://grafana.com/developers/plugin-tools/)
 (Playwright) and require a running Grafana instance (`npm run server`), then
@@ -117,7 +122,8 @@ The PR title must follow this format because it is used as the squash-merge comm
 Run all of the following locally and ensure they pass before opening or updating a PR:
 
 ```bash
-# Frontend lint
+# Frontend type check and lint
+npm run typecheck
 npm run lint
 
 # Frontend unit tests
@@ -126,8 +132,12 @@ npm run test:ci
 # Frontend production build
 npm run build
 
-# Go backend build
+# Go backend build and tests
 mage -v build:linux
+mage test
+
+# Non-skippable backend security suite
+./scripts/security-suite.sh
 ```
 
 If your change affects runtime behaviour, also run the end-to-end suite against a

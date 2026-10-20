@@ -2,13 +2,13 @@ package plugin
 
 // End-to-end tests for issue #105: the per-domain AllowPrivateIP opt-in wired
 // through to the dial path. This suite is HERMETIC — no real network, no real
-// DNS — and drives the REAL serve / serveProxy / checkFrameable pipeline so the
+// DNS — and drives the REAL ServeHTTP / serveProxy / checkFrameable pipeline so the
 // per-request security.Policy threading (security.WithPolicy on the request
 // context) and the SF4 resolve-then-dial + connect-time gate are all exercised.
 //
 // It mirrors TC1's stub-resolver pattern (proxy_security_ssrf_test.go) and
 // reuses its helpers (tc1NewStubResolver, settingsWith, allowExample, doProxy,
-// tc1RecordingDialer, tc1DoProxyResource, …). The policy-aware transports below
+// tc1RecordingDialer, …). The policy-aware transports below
 // reconstruct the production *security.Dialer.DialContext dial path (resolve →
 // first-IP-direct → connect-time Control re-check) but with the POLICY variants
 // (ResolveAndValidatePolicy / NewControlPolicy) so the matched domain's opt-in
@@ -318,6 +318,17 @@ func (c *ac19CapturingLogger) warnEntries() []auditEntry {
 	return out
 }
 
+// permitWarnEntries returns only the private-IP permit Warns.
+func (c *ac19CapturingLogger) permitWarnEntries() []auditEntry {
+	var out []auditEntry
+	for _, w := range c.warnEntries() {
+		if w.msg == "proxy private-ip permitted by opt-in" {
+			out = append(out, w)
+		}
+	}
+	return out
+}
+
 func (c *ac19CapturingLogger) infoEntries() []auditEntry {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -364,8 +375,9 @@ func TestAC19PermitEmitsDistinctAuditAndMetric(t *testing.T) {
 			t.Errorf("audit Info allowPrivateIP = %v, want true", infos[0].kv["allowPrivateIP"])
 		}
 
-		// The distinct permit Warn fired with permittedIP + ipClass.
-		warns := logger.warnEntries()
+		// The distinct permit Warn fired with permittedIP + ipClass. (The trapped
+		// dial also logs a "proxy upstream error" Warn, which is not counted.)
+		warns := logger.permitWarnEntries()
 		if len(warns) != 1 {
 			t.Fatalf("expected exactly one permit Warn, got %d: %+v", len(warns), warns)
 		}
@@ -398,7 +410,7 @@ func TestAC19PermitEmitsDistinctAuditAndMetric(t *testing.T) {
 
 		_ = doProxy(p, "https://example.com/page")
 
-		if warns := logger.warnEntries(); len(warns) != 0 {
+		if warns := logger.permitWarnEntries(); len(warns) != 0 {
 			t.Errorf("public-IP opted-in: expected NO permit Warn, got %+v", warns)
 		}
 		if n := testutil.ToFloat64(p.metrics.privateIPPermitted.WithLabelValues(security.ReasonPrivate)); n != 0 {
@@ -430,35 +442,9 @@ func TestAC19PoisonedMultiRecordFailsClosedWhenOptedIn(t *testing.T) {
 	}
 }
 
-// -----------------------------------------------------------------------------
-// /proxy-resource shares serve, so the opt-in must reach it identically.
-// -----------------------------------------------------------------------------
-
-func TestAC19OptInAppliesToProxyResource(t *testing.T) {
-	const privateIP = "10.0.0.1"
-
-	// Opted-in: the resource endpoint reaches the validated private IP.
-	recIn := &tc1RecordingDialer{}
-	pIn := newProxyHandler(settingsWith(allowExampleOpts(true)))
-	pIn.transport = ac19PolicyTransport(tc1NewStubResolver(privateIP), security.Policy{AllowPrivate: true}, recIn)
-	if rec := tc1DoProxyResource(proxyResourceHandler{p: pIn}, "https://example.com/style.css"); rec.Code == http.StatusForbidden {
-		t.Fatalf("/proxy-resource opted-in: got 403 at IP gate, want permitted (body=%q)", rec.Body.String())
-	}
-	if len(recIn.addrs()) != 1 {
-		t.Fatalf("/proxy-resource opted-in: expected one validated dial, got %v", recIn.addrs())
-	}
-
-	// NOT opted-in: the resource endpoint 403s the private IP.
-	recOut := &tc1RecordingDialer{}
-	pOut := newProxyHandler(settingsWith(allowExampleOpts(false)))
-	pOut.transport = ac19PolicyTransport(tc1NewStubResolver(privateIP), security.Policy{AllowPrivate: false}, recOut)
-	if rec := tc1DoProxyResource(proxyResourceHandler{p: pOut}, "https://example.com/style.css"); rec.Code != http.StatusForbidden {
-		t.Fatalf("/proxy-resource NOT opted-in: got %d, want 403 (body=%q)", rec.Code, rec.Body.String())
-	}
-	if dialed := recOut.addrs(); len(dialed) != 0 {
-		t.Fatalf("/proxy-resource NOT opted-in: private IP must not be dialled, dialled %v", dialed)
-	}
-}
+// The /proxy-resource variant of the opt-in test was removed with that route
+// (FR5); the /proxy behaviour it mirrored is covered by
+// TestAC19OptInPermitsRFC1918EndToEnd and TestAC19StrictDefaultStillBlocksPrivate.
 
 // -----------------------------------------------------------------------------
 // check-frameable shares p.transport, so the opt-in must apply there too.

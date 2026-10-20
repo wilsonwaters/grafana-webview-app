@@ -14,7 +14,7 @@ jobs:
     outputs:
       modules: ${{ steps.find-modules.outputs.modules }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
@@ -36,12 +36,12 @@ jobs:
       matrix:
         module: ${{ fromJSON(needs.discover-modules.outputs.modules) }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Setup Node.js environment
-        uses: actions/setup-node@6044e13b5dc448c55e2357c09f80417699197238 # v6.2.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -53,17 +53,8 @@ jobs:
         run: npm run build
 
       - name: Compatibility check
-        uses: grafana/plugin-actions/is-compatible@is-compatible/v1.0.2
+        uses: grafana/plugin-actions/is-compatible@6a283a4015776c4becd1708906b59b2e78c221ae # is-compatible/v1.0.4
         with:
           module: ${{ matrix.module }}
           comment-pr: 'no'
-          # TEMPORARY (2026-10-17): advisory, not blocking. Latest Grafana moved
-          # to 13.2.4 and Levitate flags a TYPE-only change to `config`
-          # (@grafana/runtime, used for config.appSubUrl in
-          # src/panels/webview/loadMode.ts) as an incompatibility. The plugin
-          # passes runtime e2e on Grafana 13.0.2, so this is a forward-compat
-          # type diff, not a runtime break. Downgraded to non-blocking so CI can
-          # go green in the interim.
-          # REVERT to 'yes' once the project bumps @grafana/* deps to the latest
-          # (13.x) and resolves the `config` type change. Tracked for next cycle.
-          fail-if-incompatible: 'no'
+          fail-if-incompatible: 'yes'

@@ -18,10 +18,13 @@ var errDialRefused = errors.New("connection refused")
 // doCheckFrameable issues a GET /check-frameable?url=<target> against handler
 // and returns the recorder. target is the RAW (unencoded) absolute URL; it is
 // percent-encoded into the query string here exactly as a real caller would.
+// The request carries an Editor user (VR-3), so the tests that use this helper
+// exercise the pipeline behind the role gate. frameable_authz_test.go covers
+// the role gate itself.
 func doCheckFrameable(handler http.Handler, target string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(http.MethodGet, "/check-frameable?url="+url.QueryEscape(target), nil)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
+	handler.ServeHTTP(rec, withOrgRole(req, orgRoleEditor))
 	return rec
 }
 
@@ -232,7 +235,7 @@ func TestCheckFrameableMissingURLParam(t *testing.T) {
 	for _, q := range []string{"/check-frameable", "/check-frameable?url=", "/check-frameable?url=%20"} {
 		req := httptest.NewRequest(http.MethodGet, q, nil)
 		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, req)
+		h.ServeHTTP(rec, withOrgRole(req, orgRoleEditor))
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("query %q: got status %d, want 400", q, rec.Code)
 		}
@@ -285,24 +288,45 @@ func TestCheckFrameableNonGETMethod(t *testing.T) {
 	h := checkFrameableHandler{p: newProxyHandler(settingsWith(allowExample(DomainOptions{})))}
 	req := httptest.NewRequest(http.MethodPost, "/check-frameable?url="+url.QueryEscape("https://example.com/page"), nil)
 	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
+	h.ServeHTTP(rec, withOrgRole(req, orgRoleEditor))
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("POST: got status %d, want 405", rec.Code)
 	}
 }
 
-// TestCheckFrameableOptionsPreflight confirms OPTIONS returns 204 with CORS and
-// does not run the pipeline (no url param required).
-func TestCheckFrameableOptionsPreflight(t *testing.T) {
-	h := checkFrameableHandler{p: newProxyHandler(settingsWith(allowExample(DomainOptions{})))}
-	req := httptest.NewRequest(http.MethodOptions, "/check-frameable", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("OPTIONS: got status %d, want 204", rec.Code)
+// TestCheckFrameableNoCORS covers R1 D2: /check-frameable is same-origin only.
+// There is no preflight handling (OPTIONS from an Editor is a 405, from a
+// Viewer the role denial) and no response carries an Access-Control-* header.
+func TestCheckFrameableNoCORS(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*") // must not reach the client
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+	h := frameableHandler(t, settingsWith(allowExample(DomainOptions{})), upstream)
+
+	cases := []struct {
+		name   string
+		method string
+		role   string
+		target string
+		want   int
+	}{
+		{"OPTIONS as Editor", http.MethodOptions, orgRoleEditor, "", http.StatusMethodNotAllowed},
+		{"OPTIONS as Viewer", http.MethodOptions, "Viewer", "", http.StatusForbidden},
+		{"verdict", http.MethodGet, orgRoleEditor, "http://example.com/page", http.StatusOK},
+		{"pipeline denial", http.MethodGet, orgRoleEditor, "https://evil.example/", http.StatusForbidden},
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("OPTIONS: Access-Control-Allow-Origin = %q, want *", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, "/check-frameable?url="+url.QueryEscape(tc.target), nil)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, withOrgRole(req, tc.role))
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body=%q)", rec.Code, tc.want, rec.Body.String())
+			}
+			assertNoCORSHeaders(t, tc.name, rec.Header())
+		})
 	}
 }
 
@@ -311,19 +335,76 @@ func TestCheckFrameableOptionsPreflight(t *testing.T) {
 // TestXFrameOptionsBlocks covers the X-Frame-Options classification directly.
 func TestXFrameOptionsBlocks(t *testing.T) {
 	cases := []struct {
-		value   string
+		lines   []string
 		blocked bool
 	}{
-		{"DENY", true},
-		{" deny ", true},
-		{"SAMEORIGIN", true},
-		{"sameorigin", true},
-		{"", false},
-		{"ALLOW-FROM https://x", false},
+		{[]string{"DENY"}, true},
+		{[]string{" deny "}, true},
+		{[]string{"SAMEORIGIN"}, true},
+		{[]string{"sameorigin"}, true},
+		{nil, false},
+		{[]string{""}, false},
+		{[]string{"ALLOW-FROM https://x"}, false},
+		{[]string{"ALLOWALL"}, false},
+		// RV1-21: every value of every line counts.
+		{[]string{"SAMEORIGIN, SAMEORIGIN"}, true},
+		{[]string{"sameorigin,SAMEORIGIN "}, true},
+		{[]string{"ALLOW-FROM https://x", "DENY"}, true},
+		{[]string{"", "DENY"}, true},
+		{[]string{"DENY", "DENY"}, true},
+		{[]string{"ALLOWALL, SAMEORIGIN"}, true},
+		{[]string{"ALLOWALL", "foo"}, true},
+		{[]string{"foo, bar"}, false},
 	}
 	for _, c := range cases {
-		if blocked, _ := xFrameOptionsBlocks(c.value); blocked != c.blocked {
-			t.Errorf("xFrameOptionsBlocks(%q) = %v, want %v", c.value, blocked, c.blocked)
+		if blocked, _ := xFrameOptionsBlocks(c.lines); blocked != c.blocked {
+			t.Errorf("xFrameOptionsBlocks(%q) = %v, want %v", c.lines, blocked, c.blocked)
+		}
+	}
+}
+
+// TestCheckFrameableXFrameOptionsEveryLine covers RV1-21 through the endpoint:
+// a second X-Frame-Options line, or a repeated value on one line, still blocks.
+func TestCheckFrameableXFrameOptionsEveryLine(t *testing.T) {
+	for name, lines := range map[string][]string{
+		"repeated value":   {"SAMEORIGIN, SAMEORIGIN"},
+		"second DENY line": {"ALLOW-FROM https://grafana.example", "DENY"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				for _, l := range lines {
+					w.Header().Add("X-Frame-Options", l)
+				}
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer upstream.Close()
+			h := frameableHandler(t, settingsWith(allowExample(DomainOptions{})), upstream)
+			got := decodeFrameable(t, doCheckFrameable(h, "http://example.com/page"))
+			if got.Frameable || got.RecommendedMode != recommendedModeProxy {
+				t.Fatalf("verdict = %+v, want blocked (proxy)", got)
+			}
+		})
+	}
+}
+
+// TestXFrameOptionsMultipleValuesReasonIsFixed checks that the verdict reason
+// for several X-Frame-Options values is fixed text: it does not repeat the
+// upstream's header values, which the upstream controls.
+func TestXFrameOptionsMultipleValuesReasonIsFixed(t *testing.T) {
+	for _, lines := range [][]string{
+		{"SAMEORIGIN, DENY"},
+		{"ALLOW-FROM https://evil.example/<img src=x onerror=alert(1)>", "DENY"},
+		{"DENY", "attacker-chosen text"},
+	} {
+		blocked, reason := xFrameOptionsBlocks(lines)
+		if !blocked || reason != xFrameOptionsMultipleReason {
+			t.Errorf("xFrameOptionsBlocks(%q) = %v, %q; want true, %q", lines, blocked, reason, xFrameOptionsMultipleReason)
+		}
+	}
+	// One distinct value, repeated or not, keeps its own reason.
+	for _, lines := range [][]string{{"deny"}, {"DENY", " deny"}} {
+		if _, reason := xFrameOptionsBlocks(lines); reason != "X-Frame-Options: DENY" {
+			t.Errorf("xFrameOptionsBlocks(%q) reason = %q, want %q", lines, reason, "X-Frame-Options: DENY")
 		}
 	}
 }

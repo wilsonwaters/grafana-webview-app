@@ -1,17 +1,19 @@
 /**
- * PC5 runtime e2e tests: auto-refresh, debug overlay, multi-instance independence.
+ * PC5 runtime e2e tests: auto-refresh and the debug overlay.
  *
  * These tests drive the real Grafana UI to verify that the PC5 view-mode
  * behaviours work end-to-end in a real browser.
  *
- * Known-flaky note: `panelEditPage.setVisualization` can be slow on first
- * render. Retries are configured in playwright.config.ts (2 retries on CI).
+ * The visualization is selected with the shared `setWebViewVisualization`
+ * helper, which handles the Grafana 12.4 picker behaviour and cold-start
+ * slowness. Retries are also configured in playwright.config.ts (2 on CI).
  */
 import { test, expect } from './fixtures';
+import { setWebViewVisualization } from './tc4Helpers';
 
 test.describe('PC5: View-mode behaviours', () => {
   test('debug overlay shows mode, X, Y, zoom when enabled', async ({ panelEditPage, page }) => {
-    await panelEditPage.setVisualization('Web View');
+    await setWebViewVisualization(panelEditPage, page);
 
     // Set a URL so the panel renders an iframe rather than the placeholder.
     await page.getByRole('textbox', { name: 'URL' }).fill('https://example.com');
@@ -37,43 +39,27 @@ test.describe('PC5: View-mode behaviours', () => {
     await expect(overlay).toContainText('zoom:');
   });
 
-  test('auto-refresh: iframe reloads when interval is set', async ({ panelEditPage, page }) => {
-    await panelEditPage.setVisualization('Web View');
+  test('auto-refresh: each tick mounts a new iframe element (a fresh load)', async ({ panelEditPage, page }) => {
+    test.setTimeout(120000);
+    await setWebViewVisualization(panelEditPage, page);
 
     await page.getByRole('textbox', { name: 'URL' }).fill('https://example.com');
     await page.keyboard.press('Tab');
 
-    // Wait for the initial iframe to appear.
+    // Wait for the initial iframe to appear and mark the element. React never
+    // removes an attribute it did not set, so the mark stays until the element
+    // is replaced.
     const iframe = panelEditPage.panel.locator.getByTestId('data-testid webview-panel-iframe');
-    await expect(iframe).toBeVisible({ timeout: 5000 });
+    await expect(iframe).toBeVisible({ timeout: 10000 });
+    await iframe.evaluate((el) => el.setAttribute('data-e2e-mark', 'first'));
 
-    // Set a very short refresh interval (1 second) in the panel options.
+    // Set the shortest refresh interval (the minimum is 5 seconds).
     const intervalInput = page.getByRole('spinbutton', { name: /auto-refresh interval/i });
-    await intervalInput.fill('1');
+    await intervalInput.fill('5');
     await page.keyboard.press('Tab');
 
-    // Wait two seconds (two ticks); the iframe key should have changed causing a
-    // re-mount. We can't directly observe the key but we can confirm the iframe
-    // is still present and functional (no crash, no error state).
-    await page.waitForTimeout(2500);
-    await expect(iframe).toBeVisible();
+    // A tick replaces the marked element with a new one.
+    await expect(iframe).not.toHaveAttribute('data-e2e-mark', 'first', { timeout: 15000 });
     await expect(iframe).toHaveAttribute('src', 'https://example.com');
-  });
-
-  test('screenshot: debug overlay with mode, coordinates, zoom', async ({ panelEditPage, page }) => {
-    await panelEditPage.setVisualization('Web View');
-
-    await page.getByRole('textbox', { name: 'URL' }).fill('https://example.com');
-    await page.keyboard.press('Tab');
-
-    // Enable debug overlay.
-    const overlaySwitch = page.getByRole('switch', { name: /show debug overlay/i });
-    await overlaySwitch.check({ force: true });
-
-    const overlay = panelEditPage.panel.locator.getByTestId('data-testid webview-panel-debug-overlay');
-    await expect(overlay).toBeVisible({ timeout: 5000 });
-
-    // Take a screenshot for visual evidence (saved to /tmp/pc5.png).
-    await page.screenshot({ path: '/tmp/pc5.png', fullPage: false });
   });
 });

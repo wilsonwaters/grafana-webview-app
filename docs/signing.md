@@ -2,15 +2,15 @@
 
 This plugin is **privately signed** for self-hosted distribution (Path 1). Both the
 CI workflow (`.github/workflows/ci.yml`) and the release workflow
-(`.github/workflows/release.yml`) sign privately, reading:
+(`.github/workflows/release.yml`) sign privately by running the `sign` script in
+`package.json`. They read the Grafana Cloud **Access Policy token** from the
+repository secret `GRAFANA_ACCESS_POLICY_TOKEN` (both jobs run in the GitHub
+Actions environment `QA-Alintech`).
 
-- the Grafana Cloud **Access Policy token** from the repository secret
-  `GRAFANA_ACCESS_POLICY_TOKEN`, and
-- the deployment **root URL** from the GitHub Actions **environment `QA-Alintech`**
-  variable `GRAFANA_INSTANCE_URL`.
-
-Both workflows sign for `GRAFANA_INSTANCE_URL` **plus** `http://localhost:3000`, so
-the signed build also loads in the CI end-to-end Grafana and during local testing.
+The `sign` script is the single source of the signed root URLs:
+`https://graphs.alintech.com.au` (the deployment host) **plus**
+`http://localhost:3000`, so the signed build also loads in the CI end-to-end
+Grafana and during local testing.
 A public/community signature is deliberately **not** used: it is rejected (HTTP 409)
 until the plugin is accepted into the Grafana catalog (Path 2).
 
@@ -90,20 +90,24 @@ To sign locally for your own instance:
 ```bash
 export GRAFANA_ACCESS_POLICY_TOKEN=...        # your token; do not commit it
 npm run build && mage -v build:linux
-npm run sign -- --rootUrls https://grafana.example.com    # your Grafana base URL(s)
+npx @grafana/sign-plugin@latest --rootUrls https://grafana.example.com    # your Grafana base URL(s)
 ```
+
+Call `sign-plugin` directly as shown. Do not use `npm run sign -- --rootUrls …`:
+the `sign` script already passes `--rootUrls`, so the tool would receive the
+option twice.
 
 The signed `MANIFEST.txt` is written into `dist/`. Users install the resulting
 zip on a Grafana instance served from one of the `rootUrls`. See
-`docs/installation.md` (forthcoming) for install methods.
+[`installation.md`](./installation.md) for install methods.
 
 ## Community signing / catalog submission (Path 2)
 
 Submitting to the Grafana plugin catalog for Community signing requires passing
 Grafana Labs' review (security, quality, docs). That process — pre-submission
 checklist, validator run, and the submission cover letter — is documented in
-`docs/publishing.md` (forthcoming, catalog-prep stream). Submission itself is
-deferred per the project plan.
+`docs/publishing.md` (forthcoming, catalog-prep stream). Submission has not
+started and is out of scope for v1.0.0.
 
 ## How to hand the token to an automated session
 

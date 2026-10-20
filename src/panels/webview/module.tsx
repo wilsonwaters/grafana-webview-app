@@ -1,9 +1,17 @@
 import { PanelPlugin } from '@grafana/data';
-import { DEFAULT_PANEL_OPTIONS, type PanelOptions } from '../../types';
+import { DEFAULT_PANEL_OPTIONS, MIN_REFRESH_INTERVAL_SEC, type PanelOptions } from '../../types';
 import { WebViewPanel } from './components/WebViewPanel';
 import { ViewportEditor } from './components/ViewportEditor';
 import { FrameabilityEditor } from './components/FrameabilityEditor';
 import { LoadModeEditor } from './components/LoadModeEditor';
+import { HideSelectorsEditor } from './components/HideSelectorsEditor';
+import { MAX_HIDE_SELECTORS } from './hideSelectors';
+import { migratePanelOptions, needsDetectedForUrl } from './migrations';
+
+const HIDE_SELECTORS_DESCRIPTION =
+  'CSS selectors of elements to hide, one per line, for example a cookie banner. Applies in proxy mode only; ' +
+  `direct mode shows the page unchanged. At most ${MAX_HIDE_SELECTORS} selectors; :has(), :contains() and ` +
+  'other slow selectors are not supported.';
 
 /**
  * Registration for the nested Web View panel plugin.
@@ -12,16 +20,17 @@ import { LoadModeEditor } from './components/LoadModeEditor';
  * (see ./plugin.json). The webpack build discovers this `module.tsx` via the
  * sibling `plugin.json` and emits it to `dist/panels/webview/module.js`.
  *
- * At this stage the panel is a registration/packaging placeholder only: the
- * options editor exposes the F2 `PanelOptions` fields and the component renders
- * a placeholder. Real viewport / proxy behaviour is added by later streams.
+ * The options registered here are the editable `PanelOptions` fields (see
+ * src/types.ts). `viewportX`/`viewportY`, `iframeWidth`/`iframeHeight` and
+ * `detectedForUrl` have no option of their own: the custom editors write them
+ * next to the option path they are bound to.
  */
 export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOptions((builder) => {
   builder
     .addTextInput({
       path: 'url',
       name: 'URL',
-      description: 'The external web page to display in the panel.',
+      description: 'The external web page to display in the panel. Enter a full http:// or https:// URL.',
       defaultValue: DEFAULT_PANEL_OPTIONS.url,
     })
     // DF2: load-mode selector. Converted from a standard `addRadio` to a custom
@@ -38,14 +47,29 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
       editor: LoadModeEditor,
       defaultValue: DEFAULT_PANEL_OPTIONS.loadMode,
     })
+    // CR5: a custom editor, so it can say which selectors the proxy would
+    // refuse; the panel does not send those (see hideSelectors.ts).
+    .addCustomEditor({
+      id: 'hideSelectors',
+      path: 'hideSelectors',
+      name: 'Hide elements (proxy mode)',
+      description: HIDE_SELECTORS_DESCRIPTION,
+      editor: HideSelectorsEditor,
+      defaultValue: DEFAULT_PANEL_OPTIONS.hideSelectors,
+      settings: {
+        rows: 3,
+        placeholder: '.cookie-banner\n#site-header',
+      },
+    })
     .addNumberInput({
       path: 'refreshIntervalSec',
       name: 'Auto-refresh interval (seconds)',
-      description: 'Reload the iframe at this interval. 0 disables auto-refresh.',
+      description: `Reload the page at this interval, in whole seconds. 0 disables auto-refresh. The minimum is ${MIN_REFRESH_INTERVAL_SEC} seconds; a smaller value uses ${MIN_REFRESH_INTERVAL_SEC}.`,
       defaultValue: DEFAULT_PANEL_OPTIONS.refreshIntervalSec,
       settings: {
         min: 0,
-        integer: false,
+        integer: true,
+        step: 1,
         placeholder: '0 (disabled)',
       },
     })
@@ -71,7 +95,8 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
     // FR3: "Test URL" frameability check. Bound to `detectedMode` (Grafana wires
     // a custom editor's onChange to this single path); the editor reads the
     // current `url` from `context.options`, calls `/check-frameable`, and on a
-    // successful response persists the recommended mode into `detectedMode`.
+    // successful response persists the recommended mode into `detectedMode` and
+    // the tested URL into `detectedForUrl`.
     .addCustomEditor({
       id: 'frameabilityTester',
       path: 'detectedMode',
@@ -80,4 +105,10 @@ export const plugin = new PanelPlugin<PanelOptions>(WebViewPanel).setPanelOption
       editor: FrameabilityEditor,
       defaultValue: DEFAULT_PANEL_OPTIONS.detectedMode,
     });
-});
+})
+  // Runs when the saved plugin version differs, and for any panel that still
+  // needs a migration (on Grafana versions that support `shouldMigrate`).
+  .setMigrationHandler(
+    (panel) => migratePanelOptions(panel.options),
+    (panel) => needsDetectedForUrl(panel.options)
+  );

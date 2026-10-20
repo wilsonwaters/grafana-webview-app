@@ -289,44 +289,82 @@ func TestProxyStripsResponseHeaders(t *testing.T) {
 	}
 }
 
-// TestProxyCORSHeaderPresent covers Completion Criterion: permissive CORS header present.
-func TestProxyCORSHeaderPresent(t *testing.T) {
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+// assertNoCORSHeaders fails the test if h carries any Access-Control-* header.
+// /proxy and /check-frameable are same-origin only (R1 D2).
+func assertNoCORSHeaders(t *testing.T, what string, h http.Header) {
+	t.Helper()
+	for key, values := range h {
+		if strings.HasPrefix(strings.ToLower(key), "access-control-") {
+			t.Errorf("%s: unexpected CORS header %s: %v", what, key, values)
+		}
+	}
+}
+
+// TestProxySendsNoCORSHeaders covers R1 D2: /proxy sends no Access-Control-*
+// header on the success, denial and error paths, and an upstream's own CORS
+// headers (which could grant another site credentialed reads) never pass
+// through.
+func TestProxySendsNoCORSHeaders(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("Access-Control-Allow-Origin", "https://evil.example")
+		h.Set("Access-Control-Allow-Credentials", "true")
+		h.Set("Access-Control-Allow-Methods", "GET, POST")
+		h.Set("Access-Control-Allow-Headers", "*")
+		h.Set("Access-Control-Expose-Headers", "X-Secret")
+		h.Set("Access-Control-Max-Age", "86400")
+		// Set a raw lower-case key too, so the case-insensitive sweep is exercised.
+		h["access-control-allow-private-network"] = []string{"true"}
+		h.Set("Content-Type", "text/plain")
+		if r.URL.Path == "/big" {
+			h.Set("Content-Length", "64")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, strings.Repeat("x", 64))
+			return
+		}
+		_, _ = io.WriteString(w, "<html><body>x</body></html>")
 	}))
 	defer upstream.Close()
 
 	cfg := settingsWith(allowExample(DomainOptions{}))
+	cfg.MaxResponseBytes = 32
 	p := newTestHandler(t, cfg, upstream)
 
-	// Success path carries CORS.
-	rec := doProxy(p, "http://example.com/page")
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("success: Access-Control-Allow-Origin = %q, want *", got)
+	cases := []struct {
+		name   string
+		h      http.Handler
+		target string
+		want   int
+	}{
+		{"success with upstream CORS headers", p, "http://example.com/page", http.StatusOK},
+		{"error-handler path (413)", p, "http://example.com/big", http.StatusRequestEntityTooLarge},
+		{"pre-fetch denial", newProxyHandler(settingsWith(nil)), "https://example.com/page", http.StatusForbidden},
 	}
-
-	// Denial path also carries CORS.
-	pDeny := newProxyHandler(settingsWith(nil))
-	recDeny := doProxy(pDeny, "https://example.com/page")
-	if got := recDeny.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("denial: Access-Control-Allow-Origin = %q, want *", got)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := doProxy(tc.h, tc.target)
+			if rec.Code != tc.want {
+				t.Fatalf("status = %d, want %d (body=%q)", rec.Code, tc.want, rec.Body.String())
+			}
+			assertNoCORSHeaders(t, tc.name, rec.Header())
+		})
 	}
 }
 
-// TestProxyOptionsPreflight verifies OPTIONS preflight returns 204 with CORS and
-// without running the pipeline (no url param required).
-func TestProxyOptionsPreflight(t *testing.T) {
+// TestProxyOptionsNotAllowed covers R1 D2: with CORS removed there is no
+// preflight handling, so OPTIONS is a non-GET method (405) without CORS
+// headers.
+func TestProxyOptionsNotAllowed(t *testing.T) {
 	cfg := settingsWith(allowExample(DomainOptions{}))
 	p := newProxyHandler(cfg)
-	req := httptest.NewRequest(http.MethodOptions, "/proxy", nil)
+	p.transport = tc1FailIfDialled(t)
+	req := httptest.NewRequest(http.MethodOptions, "/proxy?url="+url.QueryEscape("https://example.com/"), nil)
 	rec := httptest.NewRecorder()
 	p.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("OPTIONS preflight: got status %d, want 204", rec.Code)
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("OPTIONS: got status %d, want 405", rec.Code)
 	}
-	if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-		t.Fatalf("OPTIONS preflight: Access-Control-Allow-Origin = %q, want *", got)
-	}
+	assertNoCORSHeaders(t, "OPTIONS", rec.Header())
 }
 
 // TestNewProxyHandlerWiresSecureDialer confirms the PRODUCTION transport is an
@@ -365,7 +403,7 @@ func (timeoutError) Temporary() bool { return true }
 // TestProxyErrorHandlerMapping covers Completion Criterion: upstream/transport
 // failures map to clean status codes — SF4 dial denials (blocked IP / metadata
 // host) => 403, resolve failure => 502, timeout => 504, generic failure => 502.
-// CORS is asserted present on the error response.
+// The error response carries no CORS header (R1 D2).
 func TestProxyErrorHandlerMapping(t *testing.T) {
 	cases := []struct {
 		name string
@@ -386,9 +424,7 @@ func TestProxyErrorHandlerMapping(t *testing.T) {
 			if rec.Code != tc.want {
 				t.Fatalf("got status %d, want %d", rec.Code, tc.want)
 			}
-			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-				t.Fatalf("error response missing CORS: %q", got)
-			}
+			assertNoCORSHeaders(t, tc.name, rec.Header())
 		})
 	}
 }
@@ -801,13 +837,11 @@ func TestProxyResponseTooLargeContentLength(t *testing.T) {
 	}
 }
 
-// TestProxyResponseTooLargeChunked covers the P4 defense-in-depth path: an
+// TestProxyResponseTooLargeChunked covers the P4 undeclared-length path: an
 // upstream that does NOT declare Content-Length (chunked / -1) but streams more
-// than MaxResponseBytes. DOCUMENTED BEHAVIOUR: because the ReverseProxy has
-// already written 200 + headers before the body is read, this path CANNOT
-// become a clean 413 — the limited reader caps the copy at the limit and errors,
-// so the delivered body is truncated to at most MaxResponseBytes (and the copy
-// fails). We assert the body is capped, never the full oversized payload.
+// than MaxResponseBytes. Since VR-7 the body is read in full before the status
+// is sent, so the result is a clean 413 with none of the upstream bytes, never
+// a truncated 200.
 func TestProxyResponseTooLargeChunked(t *testing.T) {
 	const limit = 16
 	// Build a body strictly larger than the limit. No Content-Length is set
@@ -835,14 +869,11 @@ func TestProxyResponseTooLargeChunked(t *testing.T) {
 	p := newTestHandler(t, cfg, upstream)
 
 	rec := doProxy(p, "http://example.com/stream")
-	// Status was already 200 before streaming began (documented caveat); the key
-	// guarantee is that the delivered body is CAPPED at the limit, never the full
-	// oversized payload.
-	if int64(rec.Body.Len()) > limit {
-		t.Fatalf("chunked oversize: delivered %d bytes, want <= %d (body must be capped)", rec.Body.Len(), limit)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("chunked oversize: got status %d, want 413 (body=%q)", rec.Code, rec.Body.String())
 	}
-	if rec.Body.String() == oversized {
-		t.Fatalf("chunked oversize: full body leaked, limited reader did not cap")
+	if strings.Contains(rec.Body.String(), "AAAA") {
+		t.Fatalf("chunked oversize: upstream bytes leaked into the 413: %q", rec.Body.String())
 	}
 }
 
@@ -885,7 +916,7 @@ func TestProxyRequestTimeout(t *testing.T) {
 
 // TestProxyErrorHandlerResourceLimitMapping covers the P4 additions to
 // proxyErrorHandler in isolation: errResponseTooLarge => 413 and
-// context.DeadlineExceeded => 504, with CORS present on both.
+// context.DeadlineExceeded => 504, with no CORS header on either (R1 D2).
 func TestProxyErrorHandlerResourceLimitMapping(t *testing.T) {
 	cases := []struct {
 		name string
@@ -905,9 +936,7 @@ func TestProxyErrorHandlerResourceLimitMapping(t *testing.T) {
 			if rec.Code != tc.want {
 				t.Fatalf("got status %d, want %d", rec.Code, tc.want)
 			}
-			if got := rec.Header().Get("Access-Control-Allow-Origin"); got != "*" {
-				t.Fatalf("error response missing CORS: %q", got)
-			}
+			assertNoCORSHeaders(t, tc.name, rec.Header())
 		})
 	}
 }

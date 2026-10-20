@@ -4,11 +4,21 @@ import { GrafanaTheme2, PanelProps } from '@grafana/data';
 import { useStyles2 } from '@grafana/ui';
 import { normalizeOptions, type PanelOptions } from '../../../types';
 import { buildViewportTransform } from '../viewport';
-import { buildProxySrc, resolveLoadMode } from '../loadMode';
-import { useBackendAvailable } from '../useBackendAvailable';
+import { resolveLoadMode } from '../loadMode';
 import { webViewPanelTestIds } from './testIds';
+import { WebViewFrame, type WebViewFrameTestIds } from './WebViewFrame';
 
 type Props = PanelProps<PanelOptions>;
+
+/** The panel's test ids for the elements that the shared frame renders. */
+const frameTestIds: WebViewFrameTestIds = {
+  iframe: webViewPanelTestIds.iframe,
+  invalidUrl: webViewPanelTestIds.invalidUrl,
+  backendLoading: webViewPanelTestIds.backendLoading,
+  proxyUnavailable: webViewPanelTestIds.proxyUnavailable,
+  proxyLoading: webViewPanelTestIds.proxyLoading,
+  proxyError: webViewPanelTestIds.proxyError,
+};
 
 /**
  * Web View panel — view-mode render slice (PC1 + PC5).
@@ -20,20 +30,26 @@ type Props = PanelProps<PanelOptions>;
  * non-interactive (`pointer-events: none`) — the viewer sees exactly the region
  * the author configured.
  *
+ * The iframe itself (URL validation, direct and proxy rendering, sandbox, DF3
+ * backend guard) comes from the shared {@link WebViewFrame}, which the editor
+ * preview uses too. See that component for the security notes (VR-1, VR-2) and
+ * the proxy-mode render (FR5: fetch the rewritten HTML, render it with
+ * `srcdoc`).
+ *
  * PC5 additions:
  * - **Auto-refresh**: when `refreshIntervalSec > 0`, a `setInterval` bumps a
- *   counter key each interval, which causes React to remount the iframe with a
- *   fresh load. The timer is torn down on unmount and re-armed when the interval
- *   value changes. A counter-key approach avoids any module-level shared state,
- *   so two panel instances each maintain their own independent refresh cycle.
+ *   counter key each interval (at least `MIN_REFRESH_INTERVAL_SEC`, applied by
+ *   `normalizeOptions`). Direct mode remounts the iframe (a fresh load); proxy
+ *   mode refetches the HTML and swaps it in when it arrives, and skips a tick
+ *   while the previous fetch is still in flight. The timer is
+ *   torn down on unmount and re-armed when the interval value changes. A
+ *   counter-key approach avoids any module-level shared state, so two panel
+ *   instances each maintain their own independent refresh cycle.
  * - **Debug overlay**: when `showDebugOverlay` is true we render a small overlay
- *   **in our own DOM** (not inside the iframe — cross-origin DOM is inaccessible).
- *   The overlay is theme-aware via `useStyles2`.
- * - **hide-selectors** (`hideSelectors`): this option is intentionally NOT acted
- *   on here. Injecting CSS into a cross-origin iframe requires DOM access which
- *   the browser blocks (same-origin policy). `hideSelectors` is preserved in the
- *   schema and will be applied server-side during HTML rewriting in proxy mode —
- *   see stream content-rewriting task CR5.
+ *   **in our own DOM** (not inside the iframe). The overlay is theme-aware via
+ *   `useStyles2`.
+ * - **hide-selectors** (`hideSelectors`): applied server-side during HTML
+ *   rewriting in proxy mode (CR5). The frame passes them as `hide=` params.
  *
  * Multi-instance safety: no module-level mutable state, no fixed DOM ids. Each
  * component instance is independently keyed by its own React state (refreshKey),
@@ -41,52 +57,16 @@ type Props = PanelProps<PanelOptions>;
  *
  * Load-mode resolution (FR4): the effective mode is resolved via
  * `resolveLoadMode` (manual `direct`/`proxy` win; `auto` uses the stored
- * `detectedMode`, defaulting to direct). In `direct` mode the iframe `src` is
- * the raw target URL (cross-origin); in `proxy` mode it is the backend proxy
- * resource URL built by `buildProxySrc` (same-origin to Grafana), which carries
- * the `hideSelectors` as repeated `hide=` query params for server-side CSS
- * rewriting (CR5). View mode never re-detects.
- *
- * DF3 — proxy view-mode guard: a proxy iframe `src` is only loadable when the
- * backend proxy resource is actually serving. We consult the shared
- * per-session liveness probe (`useBackendAvailable`, DF1) and, *only for proxy
- * mode*, gate the iframe behind it:
- * - while the probe is in flight → a neutral "checking" placeholder (never the
- *   proxy iframe, to avoid a flash of a broken frame);
- * - settled unavailable → an accessible fallback message (no iframe);
- * - settled available → the proxy iframe exactly as before.
- *
- * Direct mode is completely unaffected: it needs no backend, so it renders the
- * raw-URL iframe immediately and NEVER waits on the probe.
- *
- * "Attempt direct where the URL permits" (the issue's secondary clause):
- * deliberately NOT done. A site is only ever resolved to proxy mode because it
- * was determined to block framing (manual `proxy`, or `auto` + detected proxy);
- * framability cannot be re-checked at view time. Silently swapping in a raw
- * direct iframe would therefore most likely reproduce the very broken frame the
- * proxy was meant to avoid (X-Frame-Options / frame-ancestors). We instead show
- * the clear fallback. See PR body for the full rationale.
+ * `detectedMode`, defaulting to direct). View mode never re-detects.
  */
 export function WebViewPanel({ options, width, height }: Props) {
   const styles = useStyles2(getStyles);
 
-  // DF3: consult the shared backend-availability probe (DF1). Called
-  // unconditionally at the top to satisfy the Rules of Hooks; the result is
-  // only consumed in the proxy branch below (direct mode ignores it entirely).
-  const { loading: backendLoading, backendAvailable } = useBackendAvailable();
-
   // Normalise so the component is robust against partial/legacy saved options.
   const opts = normalizeOptions(options);
 
-  // PC5: auto-refresh key — incrementing this causes React to remount the iframe,
-  // which triggers a fresh load of the src URL. We use a counter rather than
-  // setting src directly so we never mutate the DOM imperatively, and each panel
-  // instance owns its own counter (no shared mutable state).
-  //
-  // Note: the `refreshKey` value is not consumed in JSX directly (it is passed
-  // as the iframe's React `key` prop inside the conditional below). We only need
-  // the setter here; the linter may warn about the unused value destructuring —
-  // suppressing via `_refreshKey` prefix to signal intentional discard.
+  // PC5: auto-refresh key — incrementing this reloads the frame (see above).
+  // Each panel instance owns its own counter (no shared mutable state).
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
@@ -109,8 +89,8 @@ export function WebViewPanel({ options, width, height }: Props) {
   }, [opts.refreshIntervalSec, setRefreshKey]);
 
   // Resolved load mode ('direct' | 'proxy'): manual modes win, 'auto' uses the
-  // stored detectedMode (defaulting to direct). Drives both the iframe src and
-  // the debug overlay.
+  // stored detectedMode (defaulting to direct). Drives both the frame and the
+  // debug overlay.
   const resolvedMode = resolveLoadMode(opts);
 
   // Empty / blank URL: render a clear empty state rather than an iframe with an
@@ -125,12 +105,9 @@ export function WebViewPanel({ options, width, height }: Props) {
     );
   }
 
-  const transform = buildViewportTransform(opts);
-
-  // The debug overlay is rendered in our own DOM (not inside the iframe, which is
-  // cross-origin and inaccessible). It is shown alongside whatever the body of
-  // the panel resolves to below — including the proxy fallback/loading states —
-  // so authors can always see the resolved mode. Visible only when enabled.
+  // The debug overlay is rendered in our own DOM. It is shown alongside whatever
+  // the frame renders — including the error, loading and fallback states — so
+  // authors can always see the resolved mode. Visible only when enabled.
   const debugOverlay = opts.showDebugOverlay ? (
     <div className={styles.debugOverlay} data-testid={webViewPanelTestIds.debugOverlay}>
       <span>mode: {resolvedMode}</span>
@@ -141,76 +118,29 @@ export function WebViewPanel({ options, width, height }: Props) {
     </div>
   ) : null;
 
-  const renderContainer = (body: React.ReactNode) => (
+  return (
     <div
       className={styles.container}
       style={{ width, height, overflow: 'hidden' }}
       data-testid={webViewPanelTestIds.container}
     >
-      {body}
+      <WebViewFrame
+        url={opts.url}
+        mode={resolvedMode}
+        hideSelectors={opts.hideSelectors}
+        reloadKey={refreshKey}
+        title="Web View"
+        testIds={frameTestIds}
+        frameStyle={{
+          width: opts.iframeWidth,
+          height: opts.iframeHeight,
+          transform: buildViewportTransform(opts),
+          transformOrigin: 'top left',
+        }}
+      />
       {debugOverlay}
     </div>
   );
-
-  const renderIframe = (src: string) => (
-    <iframe
-      // PC5: refreshKey forces a fresh iframe mount on each auto-refresh tick.
-      // Using `key` is intentional: it causes React to unmount/remount the
-      // iframe element, which reloads the src. No shared state across instances.
-      key={refreshKey}
-      title="Web View"
-      src={src}
-      data-testid={webViewPanelTestIds.iframe}
-      className={styles.iframe}
-      // SECURITY: never broaden this sandbox value.
-      sandbox="allow-scripts allow-same-origin"
-      referrerPolicy="no-referrer"
-      style={{
-        width: opts.iframeWidth,
-        height: opts.iframeHeight,
-        transform,
-        transformOrigin: 'top left',
-      }}
-    />
-  );
-
-  // DF3: proxy mode is the ONLY mode gated on the backend probe — a proxy `src`
-  // points at the backend proxy resource, which cannot serve content when the
-  // backend is unavailable. Direct mode falls through to the render below and is
-  // never affected by the probe (it loads the raw URL cross-origin).
-  if (resolvedMode === 'proxy') {
-    // Probe still in flight: render a neutral placeholder rather than the proxy
-    // iframe, so we never flash a broken frame before the probe settles. This is
-    // a transient state; once settled we either render the iframe or the
-    // fallback below.
-    if (backendLoading) {
-      return renderContainer(
-        <div className={styles.empty} data-testid={webViewPanelTestIds.backendLoading}>
-          Checking backend availability…
-        </div>
-      );
-    }
-
-    // Settled unavailable: the backend proxy cannot serve this content. Show a
-    // clear, accessible fallback (real text, reusing the empty-state container)
-    // instead of a guaranteed-to-fail proxy iframe. We deliberately do NOT fall
-    // back to a raw direct iframe here — see the component-level rationale above.
-    if (!backendAvailable) {
-      return renderContainer(
-        <div className={styles.empty} data-testid={webViewPanelTestIds.proxyUnavailable}>
-          This panel is configured to load its content through the backend proxy, which is currently
-          unavailable. The content can’t be shown until the backend proxy is running.
-        </div>
-      );
-    }
-
-    // Settled available: render the proxy iframe exactly as before.
-    return renderContainer(renderIframe(buildProxySrc(opts)));
-  }
-
-  // Direct mode: load the raw URL (cross-origin) immediately — no backend needed,
-  // never waits on the probe.
-  return renderContainer(renderIframe(opts.url));
 }
 
 const getStyles = (theme: GrafanaTheme2) => ({
@@ -220,11 +150,6 @@ const getStyles = (theme: GrafanaTheme2) => ({
     height: 100%;
     overflow: hidden;
     background: ${theme.colors.background.canvas};
-  `,
-  iframe: css`
-    border: none;
-    /* View mode is non-interactive: the viewer cannot pan/zoom/click. */
-    pointer-events: none;
   `,
   empty: css`
     display: flex;
